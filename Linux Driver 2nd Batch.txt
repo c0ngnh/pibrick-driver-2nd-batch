@@ -1,0 +1,15 @@
+Linux Driver 2nd Batch
+NOTE:
+Github repo will release after all wave shipped
+Github repo will have completed documentation
+This driver meant for working functionality, not for source peeping 😅
+Will update the Installation guide
+
+Instalation
+Copy this folder into your Raspberry OS
+Open terminal
+Change to this current directory
+Run sudo bash ./install.sh
+It will automatically reboot your device
+
+https://cdn.discordapp.com/attachments/1468886061076844554/1504116070901088316/pibrick-driver-2nd-batch.zip?ex=6a05d0c0&is=6a047f40&hm=a442d6468438f41ec905f43f2e756aae950f8e26314c30fb8ff8a954da174b0d&

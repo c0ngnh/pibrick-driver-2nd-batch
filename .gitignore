@@ -1,0 +1,27 @@
+# Generated panel source (copied from panel-pibrick.9203.c at build time)
+panel-pibrick.c
+
+# Kernel module build outputs
+*.ko
+*.o
+*.mod
+*.mod.c
+*.cmd
+*.symvers
+modules.order
+Module.symvers
+.tmp_versions/
+
+# Built device tree overlay
+*.dtbo
+
+# Python
+__pycache__/
+*.pyc
+
+# Editor / OS
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db
