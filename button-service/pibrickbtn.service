@@ -7,6 +7,8 @@ Before=graphical.target
 Type=simple
 User=root
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+# gpio_keys claims the button GPIOs at boot; release before pibrickbtn opens them.
+ExecStartPre=/bin/sh -c '/sbin/modprobe -r gpio_keys 2>/dev/null; /sbin/rmmod gpio_keys 2>/dev/null; sleep 0.2'
 ExecStart=/usr/local/bin/pibrickbtn
 Restart=on-failure
 RestartSec=2

@@ -16,6 +16,8 @@
 #define RELEASE_DEBOUNCE_MS	30
 #define POLL_US			5000
 #define IDENTITY_SAMPLES	3
+#define GPIO_INIT_RETRIES	15
+#define GPIO_INIT_RETRY_MS	200
 
 #define PRESS_CHIP_PATH		"/dev/gpiochip0"
 #define PRESS_LINE_OFFSET	23
@@ -89,7 +91,37 @@ static struct gpiod_line_request *request_input_line(struct gpiod_chip *chip,
 	return request;
 }
 
-static int gpio_init(void)
+static void unload_gpio_keys(void)
+{
+	/*
+	 * gpio_keys binds the button GPIOs from device tree at boot.
+	 * Must release before gpiod can request the same lines (EBUSY otherwise).
+	 */
+	system("/sbin/modprobe -r gpio_keys 2>/dev/null");
+	system("/sbin/rmmod gpio_keys 2>/dev/null");
+}
+
+static void gpio_release_partial(void)
+{
+	if (press_request) {
+		gpiod_line_request_release(press_request);
+		press_request = NULL;
+	}
+	if (select_request) {
+		gpiod_line_request_release(select_request);
+		select_request = NULL;
+	}
+	if (press_chip) {
+		gpiod_chip_close(press_chip);
+		press_chip = NULL;
+	}
+	if (select_chip) {
+		gpiod_chip_close(select_chip);
+		select_chip = NULL;
+	}
+}
+
+static int gpio_init_once(void)
 {
 	press_chip = gpiod_chip_open(PRESS_CHIP_PATH);
 	if (!press_chip)
@@ -113,22 +145,27 @@ static int gpio_init(void)
 	return 0;
 
 fail:
-	if (press_request) {
-		gpiod_line_request_release(press_request);
-		press_request = NULL;
+	gpio_release_partial();
+	return -1;
+}
+
+static int gpio_init(void)
+{
+	int attempt;
+
+	unload_gpio_keys();
+
+	for (attempt = 0; attempt < GPIO_INIT_RETRIES; attempt++) {
+		if (attempt > 0) {
+			if (attempt % 3 == 0)
+				unload_gpio_keys();
+			usleep(GPIO_INIT_RETRY_MS * 1000);
+		}
+
+		if (gpio_init_once() == 0)
+			return 0;
 	}
-	if (select_request) {
-		gpiod_line_request_release(select_request);
-		select_request = NULL;
-	}
-	if (press_chip) {
-		gpiod_chip_close(press_chip);
-		press_chip = NULL;
-	}
-	if (select_chip) {
-		gpiod_chip_close(select_chip);
-		select_chip = NULL;
-	}
+
 	return -1;
 }
 
@@ -235,8 +272,6 @@ static int button_is_power(void)
 static int uk_init(void)
 {
 	struct uinput_user_dev uidev;
-
-	system("/sbin/rmmod gpio_keys 2>/dev/null");
 
 	uk_fd = open("/dev/uinput", O_WRONLY | O_NONBLOCK);
 	if (uk_fd < 0)
@@ -445,8 +480,12 @@ int main(int argc, char *argv[])
 	openlog("pibrickbtn", LOG_PID, LOG_DAEMON);
 
 	if (gpio_init() < 0) {
-		fprintf(stderr, "pibrickbtn: GPIO init failed (%s)\n", strerror(errno));
-		syslog(LOG_ERR, "GPIO init failed");
+		fprintf(stderr,
+			"pibrickbtn: GPIO init failed (%s) — unload gpio_keys and retry\n",
+			strerror(errno));
+		syslog(LOG_ERR,
+		       "GPIO init failed (%s); gpio_keys may still own gpiochip0:23 / gpiochip10:20",
+		       strerror(errno));
 		return 1;
 	}
 

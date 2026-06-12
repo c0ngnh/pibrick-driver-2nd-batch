@@ -21,6 +21,12 @@ chmod +x /etc/pibrick/*.sh /etc/pibrick/actions/*.sh
 
 install -m 644 pibrickbtn.service /etc/systemd/system/pibrickbtn.service
 install -m 644 99-pibrick-display.rules /etc/udev/rules.d/99-pibrick-display.rules
+
+# Keep gpio_keys from reclaiming button lines on later modprobe -r cycles.
+cat >/etc/modprobe.d/pibrick-btn.conf <<'EOF'
+# piBrick buttons are handled by pibrickbtn (userspace), not gpio_keys.
+blacklist gpio_keys
+EOF
 udevadm control --reload-rules
 while IFS= read -r sysfs_path; do
 	chmod 0666 "$sysfs_path"
