@@ -1,5 +1,8 @@
 
 obj-m += hyn_ts.o
+# Out-of-tree builds may not see CONFIG_DRM_PANEL; Pi 5 uses DRM panel blank events.
+ccflags-y += -DHYN_DRM_PANEL_NOTIFIER
+
 MODEL_FILE := /proc/device-tree/model
 MODEL_EXISTS := $(wildcard $(MODEL_FILE))
 MODULE_NAME := hyn_ts.ko

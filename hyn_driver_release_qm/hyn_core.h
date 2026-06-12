@@ -57,16 +57,15 @@
 #include <linux/wakelock.h>
 #endif
 
-#if HYN_HAS_DISPLAY_NOTIFIER && defined(CONFIG_FB)
+#if defined(CONFIG_DRM)
+#include <linux/notifier.h>
+#if defined(CONFIG_DRM_PANEL) || defined(HYN_DRM_PANEL_NOTIFIER)
+#include <drm/drm_panel.h>
+#define HYN_USE_DRM_PANEL_NOTIFIER 1
+#endif
+#elif defined(CONFIG_FB)
 #include <linux/notifier.h>
 #include <linux/fb.h>
-#elif HYN_HAS_DISPLAY_NOTIFIER && defined(CONFIG_DRM)
-#include <linux/notifier.h>
-#if defined(CONFIG_DRM_PANEL)
-#include <drm/drm_panel.h>
-#else
-#include <linux/msm_drm_notify.h>
-#endif
 #elif defined(CONFIG_HAS_EARLYSUSPEND)
 #include <linux/earlysuspend.h>
 #endif
@@ -300,15 +299,13 @@ struct hyn_ts_data {
     u8 charge_is_enable;
     u8 glove_is_enable;
 
-#if HYN_HAS_DISPLAY_NOTIFIER && defined(CONFIG_FB)
+#if defined(HYN_USE_DRM_PANEL_NOTIFIER)
     struct notifier_block fb_notif;
     int old_fb_state;
-#elif HYN_HAS_DISPLAY_NOTIFIER && defined(CONFIG_DRM)
-    struct notifier_block fb_notif;
-    int old_fb_state;
-#if defined(CONFIG_DRM_PANEL)
     struct drm_panel *active_panel;
-#endif
+#elif defined(CONFIG_FB)
+    struct notifier_block fb_notif;
+    int old_fb_state;
 #elif defined(CONFIG_HAS_EARLYSUSPEND)
     struct early_suspend early_suspend;
 #endif

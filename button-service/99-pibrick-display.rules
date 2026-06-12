@@ -1,0 +1,3 @@
+# Allow users to toggle display via pibrick_display_enable (panel sysfs).
+ACTION=="add|bind", SUBSYSTEM=="platform", KERNEL=="*.dsi.0", \
+	RUN+="/bin/sh -c 'test -f /sys%p/pibrick_display_enable && /bin/chmod 0666 /sys%p/pibrick_display_enable'"

@@ -1,27 +1,25 @@
+PANEL_SRC := panel-pibrick.9203.c
+PANEL_OBJ := panel-pibrick.c
+
 obj-m += panel-pibrick.o
 DTBO_NAME := vc4-kms-dsi-pibrick
-MODEL_FILE := /proc/device-tree/model
-MODEL_EXISTS := $(wildcard $(MODEL_FILE))
 MODULE_NAME := panel-pibrick.ko
 CONFIG_TXT := /boot/firmware/config.txt
 OVERLAY_DIR := /boot/firmware/overlays
 MODULE_INSTALL_DIR := /lib/modules/$(shell uname -r)/kernel/drivers/gpu/drm/panel
 
-panel-pibrick.c: panel-pibrick.9203.c
-	cp panel-pibrick.9203.c panel-pibrick.c
+$(PANEL_OBJ): $(PANEL_SRC)
+	ln -sf $(PANEL_SRC) $(PANEL_OBJ)
 
-modules: panel-pibrick.c
+modules: $(PANEL_OBJ)
 	$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules
-	
+
 clean:
 	$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean
-	rm -rf *.dtbo panel-pibrick.c
+	rm -f $(PANEL_OBJ) *.dtbo
 
 amoled: modules
 	dtc -I dts -O dtb -o $(DTBO_NAME).dtbo dts/vc4-kms-dsi-pibrick.dts
-
-xga: modules
-	dtc -I dts -O dtb -o $(DTBO_NAME).dtbo dts/vc4-kms-dsi-pibrick-xga.dts
 
 install: remove
 	install -m 644 -D $(MODULE_NAME) $(MODULE_INSTALL_DIR)

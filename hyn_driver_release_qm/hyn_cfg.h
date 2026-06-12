@@ -38,18 +38,6 @@
 #define HYN_TP0_TEST_LOG_SAVE  (0)
 
 #define HYN_DRIVER_VERSION      "== Hynitron V2.21 20250806 =="
-
-/* Pi 5 / kernel 6.16+: fbdev blank events removed; use PM suspend/resume. */
-#define HYN_USE_PM_SUSPEND      (1)
-
-#if HYN_USE_PM_SUSPEND
-#define HYN_HAS_DISPLAY_NOTIFIER 0
-#elif defined(CONFIG_FB) || defined(CONFIG_DRM)
-#define HYN_HAS_DISPLAY_NOTIFIER 1
-#else
-#define HYN_HAS_DISPLAY_NOTIFIER 0
-#endif
-
 #endif
 
 

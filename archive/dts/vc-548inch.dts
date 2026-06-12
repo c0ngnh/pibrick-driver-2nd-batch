@@ -117,7 +117,7 @@
 				compatible = "ti,bq25890";
 				reg = <0x6a>;
 				
-				ti,battery-regulation-voltage = <4176000>;
+				ti,battery-regulation-voltage = <4100000>;
 				ti,charge-current = <4000000>;
 				ti,termination-current = <50000>;
 				ti,precharge-current = <128000>;

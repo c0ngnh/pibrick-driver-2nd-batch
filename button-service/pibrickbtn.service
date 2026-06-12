@@ -1,0 +1,15 @@
+[Unit]
+Description=piBrick GPIO button service
+After=local-fs.target
+Before=graphical.target
+
+[Service]
+Type=simple
+User=root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+ExecStart=/usr/local/bin/pibrickbtn
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

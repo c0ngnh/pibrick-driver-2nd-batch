@@ -555,51 +555,75 @@ static irqreturn_t hyn_irq_handler(int irq, void *data)
     return IRQ_HANDLED;
 }
 
-#if HYN_HAS_DISPLAY_NOTIFIER
-#ifndef FB_EARLY_EVENT_BLANK
-#define FB_EARLY_EVENT_BLANK  FB_EVENT_BLANK
-#endif
+#if defined(HYN_USE_DRM_PANEL_NOTIFIER)
 static int fb_notifier_callback(struct notifier_block *self, unsigned long event, void *data)
 {
-    if(IS_ERR_OR_NULL(data)){
-        HYN_INFO("data is invlid don't handle");
+    int blank_value;
+    const unsigned long event_enum[2] = {
+        DRM_PANEL_EARLY_EVENT_BLANK, DRM_PANEL_EVENT_BLANK
+    };
+    const int blank_enum[2] = {
+        DRM_PANEL_BLANK_POWERDOWN, DRM_PANEL_BLANK_UNBLANK
+    };
+
+    if (IS_ERR_OR_NULL(data))
         return 0;
-    }
-    {
-#if defined(CONFIG_FB)
-        int blank_value = *((int *)(((struct fb_event *)data)->data));
-        const unsigned long event_enum[2] = {FB_EARLY_EVENT_BLANK, FB_EVENT_BLANK};
-        const int blank_enum[2] = {FB_BLANK_POWERDOWN, FB_BLANK_UNBLANK};
-#elif defined(CONFIG_DRM)
-    #if defined(CONFIG_DRM_PANEL)
-        int blank_value = *((int *)(((struct drm_panel_notifier *)data)->data));
-        const unsigned long event_enum[2] = {DRM_PANEL_EARLY_EVENT_BLANK, DRM_PANEL_EVENT_BLANK};
-        const int blank_enum[2] = {DRM_PANEL_BLANK_POWERDOWN, DRM_PANEL_BLANK_UNBLANK};
-    #else //CONFIG_DRM_PANEL
-        int blank_value = *((int *)(((struct msm_drm_notifier *)data)->data));
-        const unsigned long event_enum[2] = {MSM_DRM_EARLY_EVENT_BLANK, MSM_DRM_EVENT_BLANK};
-        const int blank_enum[2] = {MSM_DRM_BLANK_POWERDOWN, MSM_DRM_BLANK_UNBLANK};
-    #endif //CONFIG_DRM_PANEL
-#endif //CONFIG_DRM
+
+    blank_value = *((int *)(((struct drm_panel_notifier *)data)->data));
 
     HYN_INFO("notifier,event:%lu,blank:%d", event, blank_value);
-    if(hyn_data->old_fb_state == blank_value || (event != event_enum[0] && event != event_enum[1])){
+    if (hyn_data->old_fb_state == blank_value ||
+        (event != event_enum[0] && event != event_enum[1])) {
         HYN_INFO("don't care");
         return 0;
     }
 
-    if (blank_enum[1] == blank_value) {
+    if (blank_enum[1] == blank_value)
         queue_work(hyn_data->hyn_workqueue, &hyn_data->work_resume);
-    } else{
+    else {
         cancel_work_sync(&hyn_data->work_resume);
         hyn_suspend(hyn_data->dev);
-    } 
+    }
 
     hyn_data->old_fb_state = blank_value;
     return 0;
-    }
 }
-#elif defined(CONFIG_PM) || HYN_USE_PM_SUSPEND
+#elif defined(CONFIG_FB) && defined(FB_EVENT_BLANK)
+static int fb_notifier_callback(struct notifier_block *self, unsigned long event, void *data)
+{
+    int blank_value;
+#ifndef FB_EARLY_EVENT_BLANK
+#define FB_EARLY_EVENT_BLANK  FB_EVENT_BLANK
+#endif
+    const unsigned long event_enum[2] = {FB_EARLY_EVENT_BLANK, FB_EVENT_BLANK};
+    const int blank_enum[2] = {FB_BLANK_POWERDOWN, FB_BLANK_UNBLANK};
+
+    if (IS_ERR_OR_NULL(data))
+        return 0;
+
+    blank_value = *((int *)(((struct fb_event *)data)->data));
+
+    HYN_INFO("notifier,event:%lu,blank:%d", event, blank_value);
+    if (hyn_data->old_fb_state == blank_value ||
+        (event != event_enum[0] && event != event_enum[1])) {
+        HYN_INFO("don't care");
+        return 0;
+    }
+
+    if (blank_enum[1] == blank_value)
+        queue_work(hyn_data->hyn_workqueue, &hyn_data->work_resume);
+    else {
+        cancel_work_sync(&hyn_data->work_resume);
+        hyn_suspend(hyn_data->dev);
+    }
+
+    hyn_data->old_fb_state = blank_value;
+    return 0;
+}
+#endif
+
+#if defined(CONFIG_PM) && !defined(HYN_USE_DRM_PANEL_NOTIFIER) && \
+    !(defined(CONFIG_FB) && defined(FB_EVENT_BLANK))
 static int hyn_pm_suspend(struct device *dev)
 {
     hyn_suspend(dev);
@@ -614,8 +638,9 @@ static struct dev_pm_ops hyn_pm_ops = {
   .suspend = hyn_pm_suspend,
   .resume  = hyn_pm_resume,
 };
+#endif
 
-#elif defined(CONFIG_HAS_EARLYSUSPEND)
+#if defined(CONFIG_HAS_EARLYSUSPEND)
 static void hyn_ts_early_suspend(struct early_suspend *handler)
 {
     hyn_suspend(hyn_data->dev);
@@ -788,16 +813,8 @@ static int hyn_ts_probe(struct spi_device *client)
     atomic_set(&ts_data->irq_is_disable,ENABLE);
     hyn_irq_set(ts_data , DISABLE);
 
-#if HYN_HAS_DISPLAY_NOTIFIER && defined(CONFIG_FB)
-    HYN_INFO("fb_notif_register");
+#if defined(HYN_USE_DRM_PANEL_NOTIFIER)
     ts_data->fb_notif.notifier_call = fb_notifier_callback;
-    ret = fb_register_client(&ts_data->fb_notif);
-    if (ret) {
-        HYN_ERROR("register fb_notifier failed: %d", ret);
-    }
-#elif HYN_HAS_DISPLAY_NOTIFIER && defined(CONFIG_DRM)
-    ts_data->fb_notif.notifier_call = fb_notifier_callback;
-#if defined(CONFIG_DRM_PANEL)
     HYN_INFO("drm_panel register");
     {
         int i,count;
@@ -827,13 +844,6 @@ static int hyn_ts_probe(struct spi_device *client)
              HYN_ERROR("drm_panel_notifier_register failed: %d", ret);
         }
     }
-#else
-    HYN_INFO("msm_drm_register");
-    ret = msm_drm_register_client(&ts_data->fb_notif);
-    if(ret < 0){
-        HYN_ERROR("msm_drm_register_client failed: %d", ret);
-    }
-#endif
 #elif defined(CONFIG_HAS_EARLYSUSPEND)
     ts_data->early_suspend.level = EARLY_SUSPEND_LEVEL_BLANK_SCREEN + 1;
     ts_data->early_suspend.suspend = hyn_ts_early_suspend;
@@ -891,15 +901,11 @@ static int hyn_ts_remove(struct spi_device *client)
             input_unregister_device(ts_data->input_dev);
         }
         HYN_INFO("ts_remove4");
-#if HYN_HAS_DISPLAY_NOTIFIER && defined(CONFIG_FB)
-        fb_unregister_client(&ts_data->fb_notif);
-#elif HYN_HAS_DISPLAY_NOTIFIER && defined(CONFIG_DRM)
-#if defined(CONFIG_DRM_PANEL)
-    if (!IS_ERR_OR_NULL(ts_data->active_panel))
+#if defined(HYN_USE_DRM_PANEL_NOTIFIER)
+        if (!IS_ERR_OR_NULL(ts_data->active_panel))
             drm_panel_notifier_unregister(ts_data->active_panel, &ts_data->fb_notif);
-#else
-    msm_drm_unregister_client(&ts_data->fb_notif);
-#endif
+#elif defined(CONFIG_FB) && defined(FB_EVENT_BLANK)
+        fb_unregister_client(&ts_data->fb_notif);
 #elif defined(CONFIG_HAS_EARLYSUSPEND)
         unregister_early_suspend(&ts_data->early_suspend);
 #endif
@@ -941,7 +947,8 @@ static struct i2c_driver hyn_ts_driver = {
         .name = HYN_DRIVER_NAME,
         .owner = THIS_MODULE,
         .of_match_table = hyn_of_match_table,
-#if (defined(CONFIG_PM) || HYN_USE_PM_SUSPEND) && !HYN_HAS_DISPLAY_NOTIFIER
+#if defined(CONFIG_PM) && !defined(HYN_USE_DRM_PANEL_NOTIFIER) && \
+    !(defined(CONFIG_FB) && defined(FB_EVENT_BLANK))
         .pm      = &hyn_pm_ops,
 #endif
     },
@@ -953,7 +960,8 @@ static struct spi_driver hyn_ts_driver = {
         .name = HYN_DRIVER_NAME,
         .of_match_table = hyn_of_match_table,
         .owner = THIS_MODULE,
-#if (defined(CONFIG_PM) || HYN_USE_PM_SUSPEND) && !HYN_HAS_DISPLAY_NOTIFIER
+#if defined(CONFIG_PM) && !defined(HYN_USE_DRM_PANEL_NOTIFIER) && \
+    !(defined(CONFIG_FB) && defined(FB_EVENT_BLANK))
         .pm      = &hyn_pm_ops,
 #endif
 	},

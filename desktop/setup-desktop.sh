@@ -5,8 +5,9 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 INSTALL_DIR="/usr/lib/pibrick/desktop"
 AUTOSTART_DIR="/etc/xdg/autostart"
 
-install -d "$INSTALL_DIR"
-if [ "$SCRIPT_DIR" != "$INSTALL_DIR" ]; then
+install -d "$INSTALL_DIR" "$AUTOSTART_DIR"
+
+if [ "$(realpath "$SCRIPT_DIR")" != "$(realpath "$INSTALL_DIR")" ]; then
 	install -m 755 "$SCRIPT_DIR/pibrick-battery-indicator.py" "$INSTALL_DIR/"
 fi
 install -m 644 "$SCRIPT_DIR/pibrick-battery-indicator.desktop" "$AUTOSTART_DIR/"

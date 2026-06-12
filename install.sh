@@ -8,6 +8,7 @@ chmod +x /usr/lib/pibrick/build.sh
 systemctl daemon-reload
 systemctl enable pibrick.service
 cd /usr/lib/pibrick/
-/usr/lib/pibrick/build.sh --force
+/usr/lib/pibrick/build.sh --force --no-reboot
 bash /usr/lib/pibrick/desktop/setup-desktop.sh
+bash /usr/lib/pibrick/button-service/install.sh
 systemctl start pibrick.service

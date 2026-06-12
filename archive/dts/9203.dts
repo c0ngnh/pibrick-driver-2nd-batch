@@ -43,25 +43,7 @@
 	};
 
 	fragment@2 {
-		target-path = "/";
-		__overlay__ {
-			touch_i2c_gpio: touch_i2c_gpio {
-				compatible = "i2c-gpio";
-				gpios = <&gpio 1 0 /* sda */
-					&gpio 0 0 /* scl */
-				>;
-				i2c-gpio,delay-us = <2>;        /* ~100 kHz */
-				#address-cells = <1>;
-				#size-cells = <0>;
-				status = "okay";
-				i2c-max-frequency = <100000>;
-			};
-		};
-	};
-
-	fragment@3 {
-		//target = <&i2c0>;
-		target = <&touch_i2c_gpio>;
+		target = <&i2c0>;
 		__overlay__ {
 			#address-cells = <1>;
 			#size-cells = <0>;
@@ -69,7 +51,6 @@
 
 			hynitron@5A {
 				compatible = "hyn,66xx";
-				// reg = <0x5A>;
 				reg = <0x5A>;
 
 				interrupt-parent = <&gpio>;
@@ -88,7 +69,7 @@
 		};
 	};
 	
-	fragment@4 {
+	fragment@3 {
 		target = <&i2c1>;
 		__overlay__ {
 			#address-cells = <1>;
@@ -99,7 +80,7 @@
 				compatible = "ti,bq25890";
 				reg = <0x6a>;
 				
-				ti,battery-regulation-voltage = <4176000>;
+				ti,battery-regulation-voltage = <4100000>;
 				ti,charge-current = <4000000>;
 				ti,termination-current = <50000>;
 				ti,precharge-current = <128000>;

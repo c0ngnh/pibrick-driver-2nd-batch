@@ -1,24 +1,23 @@
 #!/bin/bash
-set -e
 cd "$(dirname "$0")"
 
-FORCE=0
-if [ "$1" = "--force" ] || [ "$1" = "-f" ]; then
-	FORCE=1
-fi
+force_rebuild=0
+skip_reboot=0
 
-LASTBUILD=""
-if [ -f /etc/pibrick.lastbuild ]; then
-	LASTBUILD="$(cat /etc/pibrick.lastbuild)"
-fi
+for arg in "$@"; do
+	case "$arg" in
+	--force|-f) force_rebuild=1 ;;
+	--no-reboot) skip_reboot=1 ;;
+	esac
+done
 
-if [ "$FORCE" = "1" ]; then
+if [ "$force_rebuild" = 1 ]; then
 	echo "Force rebuild requested."
-elif [ "$LASTBUILD" = "$(uname -r)" ]; then
+elif [ -f /etc/pibrick.lastbuild ] && [ "$(cat /etc/pibrick.lastbuild)" = "$(uname -r)" ]; then
 	echo "No Linux Kernel Update."
 	exit 0
 else
-	echo "Linux Kernel Changed. Rebuild"
+	echo "Linux Kernel changed. Rebuild."
 fi
 
 #	apt install -y linux-headers-$(uname -r)
@@ -36,7 +35,9 @@ make install
 
 echo "$(uname -r)" > /etc/pibrick.lastbuild
 
-if [ -f "/boot/firstrun.sh" ]; then
+if [ "$skip_reboot" = 1 ]; then
+	echo "Build finished (reboot skipped)."
+elif [ -f "/boot/firstrun.sh" ]; then
 	echo "Firstrun build finished"
 else
 	reboot
