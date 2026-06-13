@@ -10,7 +10,7 @@ if ! pkg-config --exists libgpiod 2>/dev/null; then
 fi
 
 if ! command -v pishutdown >/dev/null 2>&1; then
-	echo "WARNING: pishutdown not found — install the Pi OS desktop (pishutdown package)." >&2
+	echo "NOTE: pishutdown not found — Pi OS menu fallback unavailable (GNOME/KDE/etc. still work)." >&2
 fi
 
 gcc -Wall -O2 pibrickbtn.c -o pibrickbtn $(pkg-config --cflags --libs libgpiod)
@@ -37,6 +37,6 @@ systemctl daemon-reload
 systemctl enable pibrickbtn.service
 systemctl restart pibrickbtn.service
 
-echo "piBrick button service installed (user short=display, power short=pishutdown, power long=shutdown)."
+echo "piBrick button service installed (user short=display, power short=desktop power menu, power long=shutdown)."
 echo "GPIO test: sudo systemctl stop pibrickbtn && sudo /usr/local/bin/pibrickbtn --test"
 echo "Logs:      journalctl -u pibrickbtn -f"

@@ -418,7 +418,7 @@ static void handle_one_gesture(void)
 
 	if (!long_done && held_ms < LONG_PRESS_MS) {
 		if (is_power) {
-			syslog(LOG_INFO, "power short -> pishutdown menu (%ld ms)", held_ms);
+			syslog(LOG_INFO, "power short -> desktop power menu (%ld ms)", held_ms);
 			run_script("/etc/pibrick/power-short.sh");
 		} else {
 			syslog(LOG_INFO, "user short -> display toggle (%ld ms)", held_ms);

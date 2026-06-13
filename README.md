@@ -8,7 +8,8 @@ Kernel modules and user-space helpers for the piBrick CM5 handheld (Raspberry Pi
 | Touch | `hyn_driver_release_qm/` | Hynitron CST66xx (`compatible = "hyn,66xx"` in DTS) |
 | Battery | `battery/bq25890_battery.c` | TI BQ25895 PMIC (no separate fuel gauge) |
 | Buttons | `button-service/` | GPIO daemon for power + user buttons |
-| Desktop | `desktop/` | GTK taskbar battery indicator |
+| Desktop | `desktop/` | GTK taskbar battery indicator, `pibrick-display-settings` |
+| Tools | `tools/` | Display settings menu, GNOME refresh helper, OCV calibration |
 
 Original maker sources (Amarullz / [amarullz.com](https://amarullz.com)) ship as two separate trees:
 
@@ -48,7 +49,7 @@ Baseline for the tables below:
 | Makefile | `make amoled` or `make xga`; builds `panel-pibrick.c` directly | `make amoled` only; symlinks `panel-pibrick.9203.c` → `panel-pibrick.c` |
 | Dev copies | Extra `2/`, `3/panel-pibrick.c` snapshots at repo root | Removed from active tree |
 | Desktop | Not included | `desktop/pibrick-battery-indicator.py` + autostart |
-| Tools | Not included | `tools/ocv-calibrate.py`, `tools/strip-panel-if0.py` |
+| Tools | Not included | `tools/pibrick-display-settings.sh`, `tools/gnome-display-rate.py`, `tools/ocv-calibrate.py`, `tools/strip-panel-if0.py` |
 
 ### Build and install
 
@@ -123,7 +124,7 @@ Power does **not** pull line 23 low; only the user button does. The maker daemon
 |---------|--------------------------------------|-------------------------------|
 | **User short** | Cycle backlight (+64 steps via `brightness.sh`) | Toggle display (`display-on-off.sh`) |
 | **User long** | Empty stub (`user-long.sh`) | Empty stub (customize `user-long.sh`) |
-| **Power short** | Toggle display | Open Pi OS power menu (`pishutdown` via `run-as-session-user.sh`) |
+| **Power short** | Toggle display | Native desktop power menu (GNOME, KDE, XFCE, Pi OS `pishutdown`, …) |
 | **Power long** | Brief `KEY_POWER` uinput pulse (~40 ms threshold) | Hold `KEY_POWER` for 2 s, release on button up (Pi-style shutdown) |
 
 ### Daemon implementation
@@ -149,7 +150,27 @@ Power does **not** pull line 23 low; only the user button does. The maker daemon
 | `display-on-off.sh` | Backtick `` `find` `` one-liners | Safe `find` + error messages for missing node / permission denied |
 | `brightness.sh` | Default user-short action | Present but not wired to user-short by default |
 | `on-off-display-wlroot.sh` | Alternate `wlr-randr` toggle (unused) | Not shipped |
-| `run-as-session-user.sh` | — | Runs GUI commands as the logged-in desktop user |
+| `run-as-session-user.sh` | — | Runs GUI commands as the logged-in desktop user (`runuser` / `su` fallback) |
+| `power-menu.sh` | — | DE-aware power menu: GNOME `gnome-session-quit`, KDE, XFCE, Pi OS `pishutdown` |
+
+### Power menu (GNOME / KDE / Pi OS)
+
+Power short press runs `power-short.sh` → `run-as-session-user.sh` → `power-menu.sh` in the active graphical session.
+
+Detection order:
+
+1. Live session D-Bus (`org.gnome.Shell`, `org.kde.LogoutPrompt`) — beats stale `XDG_CURRENT_DESKTOP` (Pi images may still export `LABWC` while GNOME runs)
+2. `XDG_CURRENT_DESKTOP` name matching
+3. Simulated `XF86PowerOff` (`wtype` / `xdotool`)
+4. `pishutdown` only when GNOME/KDE are not on the session bus
+
+On **GNOME 48**, the menu uses `gnome-session-quit` or `EndSessionDialog.Open` (not `Shell.Eval`, which is restricted on GNOME 41+).
+
+Test from a root shell:
+
+```bash
+sudo bash /etc/pibrick/power-short.sh
+```
 
 ---
 
@@ -162,6 +183,48 @@ Power does **not** pull line 23 low; only the user button does. The maker daemon
 | `…/color_profile` | `natural`, `vivid`, `srgb`, `warm`, `cool`, `night`, `soft` |
 | `/sys/class/power_supply/battery/` | Capacity, voltage, charging state (from extended BQ25895 driver) |
 
+### Display settings menu
+
+```bash
+pibrick-display-settings
+```
+
+Interactive menu for:
+
+- **Color profile** — sysfs `color_profile` (`natural`, `vivid`, `srgb`, `warm`, `cool`, `night`, `soft`)
+- **Refresh rate** — 90 / 60 Hz @ 1080×1240
+
+Refresh-rate backend is chosen automatically:
+
+| Desktop | Backend | Notes |
+|---------|---------|-------|
+| **GNOME Wayland** | `tools/gnome-display-rate.py` via `org.gnome.Mutter.DisplayConfig` | Uses `python3-dbus` (primary) or `gdbus` fallback |
+| **labwc / wlroots** | `wlr-randr` | Pi OS default compositor |
+| **X11** | `xrandr` | Legacy sessions |
+
+Non-interactive:
+
+```bash
+pibrick-display-settings --profile soft
+pibrick-display-settings --refresh 60
+pibrick-display-settings --status
+```
+
+Low-level GNOME helper (also works over SSH when a graphical session is active):
+
+```bash
+python3 /usr/lib/pibrick/tools/gnome-display-rate.py get
+python3 /usr/lib/pibrick/tools/gnome-display-rate.py set 90
+python3 /usr/lib/pibrick/tools/gnome-display-rate.py debug
+```
+
+Installed by `desktop/setup-desktop.sh`:
+
+- `/usr/local/bin/pibrick-display-settings`
+- `/usr/lib/pibrick/tools/gnome-display-rate.py`
+
+Dependencies: `python3-gi`, `python3-dbus` (installed by `setup-desktop.sh` when missing).
+
 ---
 
 ## Customizing buttons
@@ -172,7 +235,7 @@ Edit scripts under `/etc/pibrick/` (copied from `button-service/etc/pibrick/`):
 |------|----------------------|
 | `user-short.sh` | Display on/off |
 | `user-long.sh` | No-op (add your command) |
-| `power-short.sh` | `pishutdown` menu |
+| `power-short.sh` | Desktop power menu (`power-menu.sh`) |
 | Power long | Handled in `pibrickbtn.c` (uinput `KEY_POWER` hold) |
 
 After changes: `sudo systemctl restart pibrickbtn`

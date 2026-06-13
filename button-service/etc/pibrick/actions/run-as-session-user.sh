@@ -85,12 +85,78 @@ runtime_dir="/run/user/$user_id"
 	exit 1
 }
 
-wayland_display=$(loginctl show-session "$session_id" -p Display --value 2>/dev/null)
-[ -z "$wayland_display" ] && wayland_display=$(find_wayland_display "$runtime_dir")
+session_type=$(loginctl show-session "$session_id" -p Type --value 2>/dev/null)
+session_desktop=$(loginctl show-session "$session_id" -p Desktop --value 2>/dev/null)
 
-exec runuser -u "$session_user" -- \
-	env \
-	XDG_RUNTIME_DIR="$runtime_dir" \
-	DBUS_SESSION_BUS_ADDRESS="unix:path=${runtime_dir}/bus" \
-	WAYLAND_DISPLAY="$wayland_display" \
-	"$@"
+detect_session_desktop() {
+	local runtime_dir="$1"
+	local bus_address="$2"
+
+	if [ -n "$session_desktop" ]; then
+		echo "$session_desktop"
+		return 0
+	fi
+
+	if env XDG_RUNTIME_DIR="$runtime_dir" DBUS_SESSION_BUS_ADDRESS="$bus_address" \
+		busctl --user status org.gnome.Shell >/dev/null 2>&1; then
+		echo "GNOME"
+		return 0
+	fi
+
+	if env XDG_RUNTIME_DIR="$runtime_dir" DBUS_SESSION_BUS_ADDRESS="$bus_address" \
+		busctl --user status org.kde.LogoutPrompt >/dev/null 2>&1; then
+		echo "KDE"
+		return 0
+	fi
+
+	return 1
+}
+
+session_desktop=$(detect_session_desktop "$runtime_dir" "unix:path=${runtime_dir}/bus" || true)
+
+wayland_display=$(loginctl show-session "$session_id" -p Display --value 2>/dev/null)
+if [ "$session_type" = "x11" ]; then
+	display_value="${wayland_display:-:0}"
+	wayland_display=""
+else
+	display_value=""
+	[ -z "$wayland_display" ] && wayland_display=$(find_wayland_display "$runtime_dir")
+fi
+
+session_env=(
+	env
+	XDG_RUNTIME_DIR="$runtime_dir"
+	DBUS_SESSION_BUS_ADDRESS="unix:path=${runtime_dir}/bus"
+)
+
+[ -n "$session_desktop" ] && session_env+=(XDG_CURRENT_DESKTOP="$session_desktop")
+[ -n "$session_type" ] && session_env+=(XDG_SESSION_TYPE="$session_type")
+[ -n "$wayland_display" ] && session_env+=(WAYLAND_DISPLAY="$wayland_display")
+[ -n "$display_value" ] && session_env+=(DISPLAY="$display_value")
+
+exec_as_session_user() {
+	local runuser_cmd=""
+
+	for candidate in /usr/sbin/runuser /sbin/runuser runuser; do
+		if [ -x "$candidate" ] 2>/dev/null || command -v "$candidate" >/dev/null 2>&1; then
+			runuser_cmd="$candidate"
+			break
+		fi
+	done
+
+	if [ -n "$runuser_cmd" ]; then
+		exec "$runuser_cmd" -u "$session_user" -- \
+			"${session_env[@]}" \
+			"$@"
+	fi
+
+	# util-linux runuser missing — fall back to su (needs root).
+	if [ "$(id -u)" -ne 0 ]; then
+		echo "run-as-session-user.sh must run as root (or install util-linux for runuser)" >&2
+		exit 1
+	fi
+
+	exec su -s /bin/bash "$session_user" -c "$(printf '%q ' "${session_env[@]}" "$@")"
+}
+
+exec_as_session_user "$@"
