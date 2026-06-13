@@ -14,57 +14,12 @@ session_has_kde_plasma() {
 	busctl --user status org.kde.LogoutPrompt >/dev/null 2>&1
 }
 
-run_gnome_end_session_dialog() {
-	local dialog_type="${1:-0}"
-
-	if busctl --user call org.gnome.Shell /org/gnome/SessionManager/EndSessionDialog \
-		org.gnome.SessionManager.EndSessionDialog Open \
-		uuuao "$dialog_type" 0 0 0 >/dev/null 2>&1; then
-		return 0
-	fi
-
-	if command -v gdbus >/dev/null 2>&1; then
-		gdbus call --session \
-			--dest org.gnome.Shell \
-			--object-path /org/gnome/SessionManager/EndSessionDialog \
-			--method org.gnome.SessionManager.EndSessionDialog.Open \
-			"$dialog_type" 0 0 "[]" >/dev/null 2>&1 && return 0
-	fi
-
-	if command -v dbus-send >/dev/null 2>&1; then
-		dbus-send --session --print-reply \
-			--dest=org.gnome.Shell \
-			/org/gnome/SessionManager/EndSessionDialog \
-			org.gnome.SessionManager.EndSessionDialog.Open \
-			uint32:"$dialog_type" uint32:0 uint32:0 array:objpath:"" >/dev/null 2>&1 && return 0
-	fi
-
-	return 1
-}
-
 run_gnome_power_menu() {
-	# Native GNOME session dialog (Logout / Power Off / Restart). Works on GNOME 41+ without Shell.Eval.
+	# EndSessionDialog leaves a stuck modal blur on GNOME 48; pibrickbtn injects KEY_POWER instead.
+	# Manual-test fallback only (e.g. sudo bash power-short.sh without a button press).
 	if command -v gnome-session-quit >/dev/null 2>&1; then
-		gnome-session-quit >/dev/null 2>&1 && return 0
-	fi
-
-	# EndSessionDialog type 0 = logout (GNOME shows the full session/power choices).
-	if run_gnome_end_session_dialog 0; then
+		gnome-session-quit --power-off >/dev/null 2>&1 &
 		return 0
-	fi
-
-	# Shell.Eval needs unsafe mode on GNOME 41+; keep as a late fallback only.
-	if busctl --user call org.gnome.Shell /org/gnome/Shell org.gnome.Shell Eval \
-		s 'global.received_power_key(); true' >/dev/null 2>&1; then
-		return 0
-	fi
-
-	if command -v gdbus >/dev/null 2>&1; then
-		gdbus call --session \
-			--dest org.gnome.Shell \
-			--object-path /org/gnome/Shell \
-			--method org.gnome.Shell.Eval \
-			'global.received_power_key(); true' >/dev/null 2>&1 && return 0
 	fi
 
 	return 1
@@ -144,15 +99,16 @@ send_power_key() {
 	return 1
 }
 
-# Live session D-Bus beats stale XDG vars (Pi images may still export LABWC while GNOME runs).
+# GNOME/KDE: pibrickbtn already injected KEY_POWER — skip dbus/script menu (avoids double dialog + blur).
 if session_has_gnome_shell; then
-	run_gnome_power_menu && exit 0
+	exit 0
 fi
 
 if session_has_kde_plasma; then
-	run_kde_power_menu && exit 0
+	exit 0
 fi
 
+# Live session D-Bus beats stale XDG vars (Pi images may still export LABWC while GNOME runs).
 case "$desktop_name" in
 *GNOME*|*CINNAMON*|*BUDGIE*|*UNITY*)
 	run_gnome_power_menu && exit 0

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Power button short press: native shutdown/power menu for the active desktop.
+# Power button short press: DE-specific menu fallback (GNOME/KDE use KEY_POWER from pibrickbtn).
 
-exec bash /etc/pibrick/actions/run-as-session-user.sh \
-	bash /etc/pibrick/actions/power-menu.sh
+bash /etc/pibrick/actions/run-as-session-user.sh \
+	bash /etc/pibrick/actions/power-menu.sh &

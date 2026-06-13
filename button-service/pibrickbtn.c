@@ -334,6 +334,25 @@ static void uk_close(void)
 	}
 }
 
+#define POWER_KEY_TAP_US 100000
+
+static void power_key_short_tap(void)
+{
+	syslog(LOG_INFO, "power short -> KEY_POWER tap");
+	uk_send_key(KEY_POWER, 1);
+	usleep(POWER_KEY_TAP_US);
+	uk_send_key(KEY_POWER, 0);
+}
+
+static void run_script_async(const char *path)
+{
+	char command[180];
+
+	snprintf(command, sizeof(command), "/bin/bash %s >/dev/null 2>&1 &", path);
+	if (system(command) != 0)
+		syslog(LOG_WARNING, "script failed to start: %s", path);
+}
+
 static void run_script(const char *path)
 {
 	char command[160];
@@ -419,7 +438,8 @@ static void handle_one_gesture(void)
 	if (!long_done && held_ms < LONG_PRESS_MS) {
 		if (is_power) {
 			syslog(LOG_INFO, "power short -> desktop power menu (%ld ms)", held_ms);
-			run_script("/etc/pibrick/power-short.sh");
+			power_key_short_tap();
+			run_script_async("/etc/pibrick/power-short.sh");
 		} else {
 			syslog(LOG_INFO, "user short -> display toggle (%ld ms)", held_ms);
 			run_script("/etc/pibrick/user-short.sh");

@@ -161,9 +161,11 @@ Primary targets (verified design):
 
 | Desktop | Handler | Status |
 |---------|---------|--------|
-| **GNOME** (48) | `gnome-session-quit`, else `EndSessionDialog.Open` | Tested |
+| **GNOME** (48) | `KEY_POWER` uinput tap from `pibrickbtn` (same as hardware power key) | Tested |
 | **XFCE** | `xfce4-session-logout` | Supported |
 | **Pi OS / labwc** | `pishutdown` | Tested |
+
+On GNOME, `power-menu.sh` is a no-op when the session bus shows `org.gnome.Shell` — the daemon injects `KEY_POWER` and opening a second D-Bus shutdown dialog (`EndSessionDialog`) caused the menu to vanish and leave a stuck blur overlay.
 
 Additional fallbacks (best-effort, not verified on hardware): KDE Plasma (`org.kde.LogoutPrompt`), MATE (`mate-session-save`), LXQt (`lxqt-leave`), and a simulated `XF86PowerOff` (`wtype` / `xdotool`).
 
@@ -174,9 +176,9 @@ Detection order:
 3. Per-DE generic fallbacks, then simulated `XF86PowerOff`
 4. `pishutdown` only when GNOME/KDE are not on the session bus
 
-On **GNOME 48**, the menu uses `gnome-session-quit` or `EndSessionDialog.Open` (not `Shell.Eval`, which is restricted on GNOME 41+).
+On **GNOME 48**, the native power menu is triggered by a brief `KEY_POWER` pulse from `pibrickbtn` via uinput — the same path as a laptop power key. Do not use `EndSessionDialog` here; it conflicts with GNOME and leaves a stuck blur overlay.
 
-Test from a root shell:
+Test from a root shell (manual fallback only — physical button is preferred on GNOME):
 
 ```bash
 sudo bash /etc/pibrick/power-short.sh
