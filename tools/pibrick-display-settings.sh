@@ -355,13 +355,14 @@ read_refresh_rate() {
 		fi
 		;;
 	wlr-randr)
+		# wlr-randr mode lines look like: "1080x1240 px, 90.000000 Hz (current)".
 		while IFS= read -r line; do
-			if [[ "$line" =~ ^(DSI-[0-9]+)[[:space:]] ]]; then
+			if [[ "$line" =~ ^([A-Za-z0-9-]+)[[:space:]] ]]; then
 				current_output="${BASH_REMATCH[1]}"
 			fi
-			if [[ "$line" =~ current:.*@([0-9]+(\.[0-9]+)?)[[:space:]]Hz ]]; then
+			if [[ "$line" =~ px,[[:space:]]+([0-9]+(\.[0-9]+)?)[[:space:]]+Hz[[:space:]]+\(current\) ]]; then
 				refresh="${BASH_REMATCH[1]}"
-				display_output="$current_output"
+				[ -n "$current_output" ] && display_output="$current_output"
 				printf '%.0f\n' "$refresh"
 				return 0
 			fi
@@ -369,8 +370,9 @@ read_refresh_rate() {
 		;;
 	xrandr)
 		find_panel_output || true
+		# xrandr mode lines look like: "   1080x1240     90.00*+  60.00"; current rate ends with '*'.
 		while IFS= read -r line; do
-			if [[ "$line" =~ \*[[:space:]]${panel_mode}[[:space:]]+([0-9]+\.[0-9]+) ]]; then
+			if [[ "$line" =~ ${panel_mode}[[:space:]] ]] && [[ "$line" =~ ([0-9]+\.[0-9]+)\* ]]; then
 				refresh="${BASH_REMATCH[1]}"
 				printf '%.0f\n' "$refresh"
 				return 0
@@ -431,8 +433,9 @@ set_refresh_rate() {
 		fi
 		;;
 	wlr-randr)
-		if ! wlr-randr --output "$display_output" --mode "$panel_mode" --refresh "$refresh"; then
-			echo "wlr-randr failed for $display_output @ ${panel_mode} ${refresh} Hz." >&2
+		# wlr-randr has no --refresh flag; the rate is part of the mode string.
+		if ! wlr-randr --output "$display_output" --mode "${panel_mode}@${refresh}Hz"; then
+			echo "wlr-randr failed for $display_output @ ${panel_mode}@${refresh}Hz." >&2
 			refresh_rate_help
 			return 1
 		fi

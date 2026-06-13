@@ -151,17 +151,27 @@ Power does **not** pull line 23 low; only the user button does. The maker daemon
 | `brightness.sh` | Default user-short action | Present but not wired to user-short by default |
 | `on-off-display-wlroot.sh` | Alternate `wlr-randr` toggle (unused) | Not shipped |
 | `run-as-session-user.sh` | — | Runs GUI commands as the logged-in desktop user (`runuser` / `su` fallback) |
-| `power-menu.sh` | — | DE-aware power menu: GNOME `gnome-session-quit`, KDE, XFCE, Pi OS `pishutdown` |
+| `power-menu.sh` | — | DE-aware power menu: GNOME `gnome-session-quit`, XFCE `xfce4-session-logout`, Pi OS `pishutdown` (KDE/MATE/LXQt as fallbacks) |
 
-### Power menu (GNOME / KDE / Pi OS)
+### Power menu
 
 Power short press runs `power-short.sh` → `run-as-session-user.sh` → `power-menu.sh` in the active graphical session.
+
+Primary targets (verified design):
+
+| Desktop | Handler | Status |
+|---------|---------|--------|
+| **GNOME** (48) | `gnome-session-quit`, else `EndSessionDialog.Open` | Tested |
+| **XFCE** | `xfce4-session-logout` | Supported |
+| **Pi OS / labwc** | `pishutdown` | Tested |
+
+Additional fallbacks (best-effort, not verified on hardware): KDE Plasma (`org.kde.LogoutPrompt`), MATE (`mate-session-save`), LXQt (`lxqt-leave`), and a simulated `XF86PowerOff` (`wtype` / `xdotool`).
 
 Detection order:
 
 1. Live session D-Bus (`org.gnome.Shell`, `org.kde.LogoutPrompt`) — beats stale `XDG_CURRENT_DESKTOP` (Pi images may still export `LABWC` while GNOME runs)
 2. `XDG_CURRENT_DESKTOP` name matching
-3. Simulated `XF86PowerOff` (`wtype` / `xdotool`)
+3. Per-DE generic fallbacks, then simulated `XF86PowerOff`
 4. `pishutdown` only when GNOME/KDE are not on the session bus
 
 On **GNOME 48**, the menu uses `gnome-session-quit` or `EndSessionDialog.Open` (not `Shell.Eval`, which is restricted on GNOME 41+).
@@ -196,11 +206,13 @@ Interactive menu for:
 
 Refresh-rate backend is chosen automatically:
 
-| Desktop | Backend | Notes |
-|---------|---------|-------|
-| **GNOME Wayland** | `tools/gnome-display-rate.py` via `org.gnome.Mutter.DisplayConfig` | Uses `python3-dbus` (primary) or `gdbus` fallback |
-| **labwc / wlroots** | `wlr-randr` | Pi OS default compositor |
-| **X11** | `xrandr` | Legacy sessions |
+| Desktop | Backend | Status |
+|---------|---------|--------|
+| **GNOME Wayland** (48) | `tools/gnome-display-rate.py` via `org.gnome.Mutter.DisplayConfig` (`python3-dbus`, else `gdbus`) | Tested |
+| **Pi OS / labwc** | `wlr-randr` (rate embedded in mode, e.g. `1080x1240@90Hz`) | Supported |
+| **XFCE / X11** | `xrandr` (current rate marked with `*`) | Supported |
+
+Color profile is pure sysfs and works on every desktop. If no backend can drive the panel, the menu still reports the rate read from `/sys/class/drm/.../modes` but cannot change it.
 
 Non-interactive:
 
