@@ -22,14 +22,20 @@ fi
 
 #	apt install -y linux-headers-$(uname -r)
 
+# Clean before each build so a changed header/source can't leave stale
+# objects behind (incremental builds normally suffice, but this guarantees
+# a fresh module on every kernel update).
+make clean
 make -j4 amoled
 make install
 
 cd hyn_driver_release_qm
+make clean
 make -j4 touch
 make install
 
 cd ../battery
+make clean
 make
 make install
 
