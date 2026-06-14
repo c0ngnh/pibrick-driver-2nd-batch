@@ -1,10 +1,10 @@
 # piBrick pocketcm5 drivers
 
-Kernel modules and user-space helpers for the piBrick CM5 handheld (Raspberry Pi CM5 + Visionox 9203 AMOLED).
+Kernel modules and user-space helpers for the piBrick CM5 handheld (Raspberry Pi CM5 + Visionox 1080×1240 AMOLED). Both Visionox panel variants are supported and selectable at install time: **9203** (SD5302H) and **9202** (VTDR6110).
 
 | Component | Path | Hardware |
 |-----------|------|----------|
-| Display | `panel-pibrick.9203.c`, `dts/vc4-kms-dsi-pibrick.dts` | Visionox VTDR6110 / 9203, 1080×1240 @ 90 Hz, DSI1 |
+| Display | `panel-pibrick.9203.c`, `panel-pibrick.9202.c`, `dts/vc4-kms-dsi-pibrick.dts` | Visionox 1080×1240 AMOLED, DSI1 — 9203 (SD5302H, 90/60 Hz) or 9202 (VTDR6110, 60 Hz) |
 | Touch | `hyn_driver_release_qm/` | Hynitron CST66xx (`compatible = "hyn,66xx"` in DTS) |
 | Battery | `battery/bq25890_battery.c` | TI BQ25895 PMIC (no separate fuel gauge) |
 | Buttons | `button-service/` | GPIO daemon for power + user buttons |
@@ -28,6 +28,18 @@ sudo bash ./install.sh
 
 `install.sh` copies the tree to `/usr/lib/pibrick/`, builds kernel modules, sets up the desktop battery indicator, installs the button service, and enables `pibrick.service` (rebuild on kernel update).
 
+### Panel selection
+
+`install.sh` prompts for the panel variant and saves the choice to `/etc/pibrick.panel`. You can also pick it non-interactively:
+
+```bash
+sudo PANEL=9203 bash ./install.sh   # SD5302H (90/60 Hz)
+sudo PANEL=9202 bash ./install.sh   # VTDR6110 (60 Hz)
+sudo PANEL=548  bash ./install.sh   # 5.48 inch 1080×1920 (legacy)
+```
+
+The default refresh rate is **60 Hz** (saved to `/etc/pibrick.display-refresh` and applied on login), which is within the panel's 57–63 Hz frame-rate spec. The 9203 panel can additionally run 90 Hz via `pibrick-display-settings --refresh 90`.
+
 ---
 
 ## Comparison with Amarullz originals
@@ -44,9 +56,9 @@ Baseline for the tables below:
 | Topic | Amarullz | This repo |
 |-------|----------|-----------|
 | Scope | Kernel modules only; buttons are a second install | Single repo: drivers + buttons + desktop |
-| Panel sources | Many variants at repo root (`panel-pibrick.5inch.c`, `.9202.c`, `.548inch.c`, …) | One active build: `panel-pibrick.9203.c`; legacy files under `archive/panels/` |
+| Panel sources | Many variants at repo root (`panel-pibrick.5inch.c`, `.9202.c`, `.548inch.c`, …) | Two maintained builds at root: `panel-pibrick.9203.c` and `panel-pibrick.9202.c`; legacy variants under `archive/panels/` |
 | DTS overlays | Multiple overlays at `dts/` (5", 5.48", 9202, XGA, …) | One active overlay: `dts/vc4-kms-dsi-pibrick.dts`; legacy under `archive/dts/` |
-| Makefile | `make amoled` or `make xga`; builds `panel-pibrick.c` directly | `make amoled` only; symlinks `panel-pibrick.9203.c` → `panel-pibrick.c` |
+| Makefile | `make amoled` or `make xga`; builds `panel-pibrick.c` directly | `make amoled PANEL=9203\|9202\|548`; `install.sh` prompts for panel |
 | Dev copies | Extra `2/`, `3/panel-pibrick.c` snapshots at repo root | Removed from active tree |
 | Desktop | Not included | `desktop/pibrick-battery-indicator.py` + autostart |
 | Tools | Not included | `tools/pibrick-display-settings.sh`, `tools/gnome-display-rate.py`, `tools/ocv-calibrate.py`, `tools/strip-panel-if0.py` |
@@ -59,14 +71,16 @@ Baseline for the tables below:
 | `install.sh` | Runs `build.sh` only | Also runs `desktop/setup-desktop.sh` and `button-service/install.sh` with `--force --no-reboot` |
 | `pibrick.service` | Same auto-rebuild-on-kernel-change pattern | Same |
 
-### Display driver (`panel-pibrick.9203.c`)
+### Display drivers (`panel-pibrick.9203.c`, `panel-pibrick.9202.c`)
 
 | Topic | Amarullz | This repo |
 |-------|----------|-----------|
-| Size / structure | ~1378 lines; large blocks of commented timing alternatives | ~985 lines; trimmed and focused on 9203 @ 90 Hz |
+| Panel variants | Single source swapped manually | `PANEL=9203\|9202` selects the source; both maintained at repo root |
+| Panel allocation | `devm_kzalloc` + `drm_panel_init` (deprecated on kernel 6.18) | `devm_drm_panel_alloc()` refcounted allocation (canonical on kernel 6.18; avoids panel use-after-free) |
+| Power lifecycle | `prepare` / `unprepare` only | `prepare` / `unprepare` + `enable` / `disable` + `shutdown` handler |
 | Includes | Extra DRM headers (`drm_dsc.h`, `drm_vblank.h`) | Minimal includes for the active panel path |
-| Sysfs `color_profile` | Present | Present (unchanged behaviour) |
-| Sysfs `pibrick_display_enable` | Present; default root-only permissions | Present; mode **0666** in driver so users can toggle display |
+| Sysfs `color_profile` | Present (9203) | Present on 9203 (9202 has no gamma tables) |
+| Sysfs `pibrick_display_enable` | Present; default root-only permissions | `DEVICE_ATTR_RW` (0644 in driver); user write granted at runtime by udev rule + button service (kernel 6.18 forbids world-writable 0666 sysfs attrs) |
 | Backlight | `pibrick-backlight` class, 0–1023 | Same |
 
 ### Device tree (`dts/vc4-kms-dsi-pibrick.dts`)
@@ -140,7 +154,7 @@ Power does **not** pull line 23 low; only the user button does. The maker daemon
 | Touch module | Reloads `hyn_ts` at startup | Does not touch touch driver |
 | `gpio_keys` | `rmmod gpio_keys` at startup | Same |
 | Build | `gcc pibrickbtn.c` (no libs) | `gcc … -lgpiod`; `install.sh` installs `libgpiod-dev` |
-| Sysfs permissions | None; display toggle often needs root | udev rule `99-pibrick-display.rules` + panel driver 0666 |
+| Sysfs permissions | None; display toggle often needs root | udev rule `99-pibrick-display.rules` grants user write at runtime (driver attr stays 0644) |
 | Session GUI | None | `run-as-session-user.sh` (`loginctl` + `/run/user` fallback) |
 | systemd unit | Minimal `After=network.target` | `Restart=on-failure`, `Before=graphical.target` |
 
@@ -193,7 +207,7 @@ sudo bash /etc/pibrick/power-short.sh
 |------|---------|
 | `/sys/class/backlight/pibrick-backlight/brightness` | Backlight 0–1023 |
 | `…/pibrick_display_enable` (under DSI device) | Display on/off (`0` / `1`) |
-| `…/color_profile` | `natural`, `vivid`, `srgb`, `warm`, `cool`, `night`, `soft` |
+| `…/color_profile` | `natural`, `vivid`, `srgb`, `warm`, `cool`, `night`, `soft` (9203 only) |
 | `/sys/class/power_supply/battery/` | Capacity, voltage, charging state (from extended BQ25895 driver) |
 
 ### Display settings menu
@@ -204,8 +218,8 @@ pibrick-display-settings
 
 Interactive menu for:
 
-- **Color profile** — sysfs `color_profile` (`natural`, `vivid`, `srgb`, `warm`, `cool`, `night`, `soft`)
-- **Refresh rate** — 90 / 60 Hz @ 1080×1240
+- **Color profile** — sysfs `color_profile` (`natural`, `vivid`, `srgb`, `warm`, `cool`, `night`, `soft`); 9203 only
+- **Refresh rate** — 60 Hz default @ 1080×1240; the 9203 panel also offers 90 Hz (9202 and 5.48 inch are 60 Hz only)
 
 Refresh-rate backend is chosen automatically:
 

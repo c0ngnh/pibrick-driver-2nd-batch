@@ -3,6 +3,7 @@
 *.o
 *.mod
 *.mod.c
+panel-pibrick.c
 Module.symvers
 modules.order
 .tmp_versions/

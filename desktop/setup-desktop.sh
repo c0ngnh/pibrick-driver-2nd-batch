@@ -13,12 +13,18 @@ fi
 install -m 644 "$SCRIPT_DIR/pibrick-battery-indicator.desktop" "$AUTOSTART_DIR/"
 
 DISPLAY_SETTINGS="$SCRIPT_DIR/../tools/pibrick-display-settings.sh"
+DISPLAY_DEFAULTS="$SCRIPT_DIR/../tools/pibrick-apply-display-defaults.sh"
 GNOME_RATE_HELPER="$SCRIPT_DIR/../tools/gnome-display-rate.py"
 TOUCH_RESET="$SCRIPT_DIR/../tools/pibrick-touch-reset.sh"
 TOOLS_DIR="/usr/lib/pibrick/tools"
 
 if [ -f "$DISPLAY_SETTINGS" ]; then
 	install -m 755 "$DISPLAY_SETTINGS" /usr/local/bin/pibrick-display-settings
+fi
+
+if [ -f "$DISPLAY_DEFAULTS" ]; then
+	install -m 755 "$DISPLAY_DEFAULTS" /usr/local/bin/pibrick-apply-display-defaults
+	install -m 644 "$SCRIPT_DIR/pibrick-display-defaults.desktop" "$AUTOSTART_DIR/"
 fi
 
 if [ -f "$TOUCH_RESET" ]; then
@@ -55,3 +61,4 @@ fi
 
 echo "piBrick battery taskbar indicator installed (autostart enabled)."
 echo "Display settings: pibrick-display-settings"
+echo "Default refresh: 60 Hz (applied on login via pibrick-apply-display-defaults)"

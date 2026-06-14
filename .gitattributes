@@ -1,0 +1,9 @@
+# Force LF on files executed/parsed on the Pi (Linux).
+# CRLF here breaks bash (`set: pipefail: invalid option name`), udev, and make.
+*.sh        text eol=lf
+*.rules     text eol=lf
+*.service   text eol=lf
+*.desktop   text eol=lf
+*.dts       text eol=lf
+Makefile    text eol=lf
+makefile    text eol=lf

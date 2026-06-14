@@ -10,6 +10,21 @@ PANEL_MODE="${PANEL_WIDTH}x${PANEL_HEIGHT}"
 COLOR_PROFILES=(natural vivid srgb warm cool night soft)
 REFRESH_RATES=(90 60)
 
+PIBRICK_PANEL="9203"
+if [ -r /etc/pibrick.panel ]; then
+	PIBRICK_PANEL=$(tr -d '[:space:]' </etc/pibrick.panel)
+fi
+
+case "$PIBRICK_PANEL" in
+9202|548)
+	REFRESH_RATES=(60)
+	PANEL_MODES_LABEL="60 @ ${PANEL_MODE}"
+	;;
+*)
+	PANEL_MODES_LABEL="90 / 60 @ ${PANEL_MODE}"
+	;;
+esac
+
 color_profile_node=""
 display_output=""
 display_tool=""
@@ -511,7 +526,10 @@ print_status() {
 	if [ -n "$color_profile_node" ]; then
 		echo "  sysfs       : $color_profile_node"
 	fi
-	echo "Refresh rate  : ${refresh} Hz (panel modes: 90 / 60 @ ${PANEL_MODE})"
+	echo "Refresh rate  : ${refresh} Hz (panel modes: ${PANEL_MODES_LABEL})"
+	if [ -r /etc/pibrick.panel ]; then
+		echo "  panel       : $(tr -d '[:space:]' </etc/pibrick.panel)"
+	fi
 	if detect_display_tool; then
 		if find_panel_output; then
 			echo "  output      : $display_output @ ${panel_mode} via $display_tool"
@@ -575,6 +593,11 @@ choose_refresh_rate() {
 	echo "Refresh rate (current: ${current} Hz)"
 	echo "  Resolution: ${PANEL_MODE}"
 	echo
+
+	if [ "${#REFRESH_RATES[@]}" -eq 1 ]; then
+		echo "  (9202/548 panel: 60 Hz only)"
+		return 0
+	fi
 
 	PS3="Select refresh rate, or 0 to go back: "
 	select choice in "90 Hz (default)" "60 Hz (lower power)" "Back"; do
@@ -684,7 +707,7 @@ main() {
 
 	if [ -n "$refresh_arg" ]; then
 		if ! is_valid_refresh "$refresh_arg"; then
-			echo "Invalid refresh rate: $refresh_arg (use 60 or 90)" >&2
+			echo "Invalid refresh rate: $refresh_arg (use ${REFRESH_RATES[*]})" >&2
 			return 1
 		fi
 		set_refresh_rate "$refresh_arg"

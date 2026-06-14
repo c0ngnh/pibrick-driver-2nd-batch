@@ -51,6 +51,7 @@ struct visionox_vtdr6110 {
 
 	enum visionox_color_profile profile;
 	bool enabled;
+	bool id_logged;
 };
 
 static const struct regulator_bulk_data visionox_vtdr6110_supplies[] = {
@@ -454,9 +455,9 @@ static ssize_t pibrick_display_enable_store(struct device *dev,
 	return count;
 }
 
-static struct device_attribute dev_attr_pibrick_display_enable =
-	__ATTR(pibrick_display_enable, 0666, pibrick_display_enable_show,
-	       pibrick_display_enable_store);
+/* 0644 in-driver: kernel 6.18 forbids world-writable (0666) sysfs attrs.
+ * User write access is granted at runtime by the udev rule + button-service. */
+static DEVICE_ATTR_RW(pibrick_display_enable);
 
 
 
@@ -699,6 +700,42 @@ static int visionox_vtdr6110_on(struct visionox_vtdr6110 *ctx)
 }
 
 
+/* One-time read of the DDIC identification registers to tell 9203 (SD5302H)
+ * from 9202 (VTDR6110). The two modules are physically identical; only the
+ * driver IC differs, so the controller ID is the reliable discriminator.
+ * Logged once to dmesg: `dmesg | grep -i 'panel-pibrick.*DDIC'`.
+ */
+static void visionox_vtdr6110_read_id(struct visionox_vtdr6110 *ctx)
+{
+	struct mipi_dsi_device *dsi = ctx->dsi;
+	struct device *dev = &dsi->dev;
+	u8 id1 = 0, id2 = 0, id3 = 0, ddb[3] = { 0 }, pwr = 0;
+	int r1, r2, r3, rddb, rpwr;
+
+	dsi->mode_flags |= MIPI_DSI_MODE_LPM;
+
+	r1   = mipi_dsi_dcs_read(dsi, 0xDA, &id1, 1);
+	r2   = mipi_dsi_dcs_read(dsi, 0xDB, &id2, 1);
+	r3   = mipi_dsi_dcs_read(dsi, 0xDC, &id3, 1);
+	rddb = mipi_dsi_dcs_read(dsi, 0x04, ddb, sizeof(ddb));
+	rpwr = mipi_dsi_dcs_read(dsi, 0x0A, &pwr, 1);
+
+	if (r1 < 0 && r2 < 0 && r3 < 0 && rddb < 0 && rpwr < 0) {
+		dev_info(dev,
+			 "DDIC ID: read unsupported on this DSI host (no command-mode read). "
+			 "Identify by behavior instead (PANEL=9202 A/B test).\n");
+		return;
+	}
+
+	dev_info(dev,
+		 "DDIC ID: RDID1[0xDA]=0x%02x RDID2[0xDB]=0x%02x RDID3[0xDC]=0x%02x "
+		 "DDB[0x04]=%02x %02x %02x POWER[0x0A]=0x%02x\n",
+		 id1, id2, id3, ddb[0], ddb[1], ddb[2], pwr);
+	dev_info(dev,
+		 "DDIC ID: this build sends the SD5302H (9203) init sequence; "
+		 "a clean image here indicates a 9203 panel.\n");
+}
+
 static void visionox_vtdr6110_off(struct visionox_vtdr6110 *ctx)
 {
 	struct mipi_dsi_device *dsi = ctx->dsi;
@@ -726,6 +763,10 @@ static int visionox_vtdr6110_prepare(struct drm_panel *panel)
 	visionox_vtdr6110_reset(ctx);
 
 	ret = visionox_vtdr6110_on(ctx);
+	if (ret == 0 && !ctx->id_logged) {
+		visionox_vtdr6110_read_id(ctx);
+		ctx->id_logged = true;
+	}
 	if (ret < 0) {
 		gpiod_set_value_cansleep(ctx->reset_gpio, 1);
 		regulator_bulk_disable(ARRAY_SIZE(visionox_vtdr6110_supplies),
@@ -820,7 +861,7 @@ static int visionox_vtdr6110_get_modes(struct drm_panel *panel,
 {
 	struct drm_display_mode *mode;
 
-	mode = drm_mode_duplicate(connector->dev, &visionox_vtdr6110_mode);
+	mode = drm_mode_duplicate(connector->dev, &visionox_vtdr6110_mode_60);
 	if (!mode)
 		return -ENOMEM;
 	drm_mode_set_name(mode);
@@ -829,7 +870,7 @@ static int visionox_vtdr6110_get_modes(struct drm_panel *panel,
 	connector->display_info.height_mm = mode->height_mm;
 	drm_mode_probed_add(connector, mode);
 
-	mode = drm_mode_duplicate(connector->dev, &visionox_vtdr6110_mode_60);
+	mode = drm_mode_duplicate(connector->dev, &visionox_vtdr6110_mode);
 	if (!mode)
 		return -ENOMEM;
 	drm_mode_set_name(mode);
@@ -883,16 +924,14 @@ static int visionox_vtdr6110_probe(struct mipi_dsi_device *dsi)
 	struct visionox_vtdr6110 *ctx;
 	int ret;
 
-	// New Linux Kernel Allocation
-	// ctx = devm_drm_panel_alloc(dev, struct visionox_vtdr6110, panel,
-	// 			   &visionox_vtdr6110_panel_funcs,
-	// 			   DRM_MODE_CONNECTOR_DSI);
-	// if (IS_ERR(ctx))
-	// 	return PTR_ERR(ctx);
-
-	ctx = devm_kzalloc(dev, sizeof(*ctx), GFP_KERNEL);
-	if (!ctx)
-		return -ENOMEM;
+	/* Kernel 6.18: refcounted panel allocation (replaces devm_kzalloc +
+	 * drm_panel_init, which is deprecated and removed from the public API).
+	 * Allocates ctx and initializes ctx->panel in one call. */
+	ctx = devm_drm_panel_alloc(dev, struct visionox_vtdr6110, panel,
+				   &visionox_vtdr6110_panel_funcs,
+				   DRM_MODE_CONNECTOR_DSI);
+	if (IS_ERR(ctx))
+		return PTR_ERR(ctx);
 
 	ret = devm_regulator_bulk_get_const(&dsi->dev,
 					    ARRAY_SIZE(visionox_vtdr6110_supplies),
@@ -905,9 +944,6 @@ static int visionox_vtdr6110_probe(struct mipi_dsi_device *dsi)
 	if (IS_ERR(ctx->reset_gpio))
 		return dev_err_probe(dev, PTR_ERR(ctx->reset_gpio),
 				     "Failed to get reset-gpios\n");
-
-	drm_panel_init(&ctx->panel, &dsi->dev, &visionox_vtdr6110_panel_funcs,
-		       DRM_MODE_CONNECTOR_DSI);
 
 	ctx->dsi = dsi;
 	mipi_dsi_set_drvdata(dsi, ctx);
