@@ -59,7 +59,10 @@ static  ssize_t hyn_dbg_store(struct device *dev,struct device_attribute *attr,c
 	ret = get_word(&next_ptr,str);
 	HYN_INFO("word:%s %d\n",str,ret);
 	if(0 == strcmp(str,"rst")){
-		hyn_fun->tp_rest();
+		if(hyn_fs_data->state_is_sunpend)
+			queue_work(hyn_fs_data->hyn_workqueue, &hyn_fs_data->work_resume);
+		else
+			hyn_fun->tp_rest();
 	}
 	else if(0 == strcmp(str,"w") || 0 == strcmp(str,"r")){
 		u8 *w_buf = kzalloc(count/2, GFP_KERNEL);

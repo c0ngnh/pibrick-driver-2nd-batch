@@ -14,15 +14,22 @@ install -m 644 "$SCRIPT_DIR/pibrick-battery-indicator.desktop" "$AUTOSTART_DIR/"
 
 DISPLAY_SETTINGS="$SCRIPT_DIR/../tools/pibrick-display-settings.sh"
 GNOME_RATE_HELPER="$SCRIPT_DIR/../tools/gnome-display-rate.py"
+TOUCH_RESET="$SCRIPT_DIR/../tools/pibrick-touch-reset.sh"
 TOOLS_DIR="/usr/lib/pibrick/tools"
 
 if [ -f "$DISPLAY_SETTINGS" ]; then
 	install -m 755 "$DISPLAY_SETTINGS" /usr/local/bin/pibrick-display-settings
 fi
 
+if [ -f "$TOUCH_RESET" ]; then
+	install -m 755 "$TOUCH_RESET" /usr/local/bin/pibrick-touch-reset
+fi
+
 if [ -f "$GNOME_RATE_HELPER" ]; then
 	install -d "$TOOLS_DIR"
-	install -m 755 "$GNOME_RATE_HELPER" "$TOOLS_DIR/gnome-display-rate.py"
+	if [ "$(realpath "$GNOME_RATE_HELPER")" != "$(realpath "$TOOLS_DIR/gnome-display-rate.py" 2>/dev/null)" ]; then
+		install -m 755 "$GNOME_RATE_HELPER" "$TOOLS_DIR/gnome-display-rate.py"
+	fi
 fi
 
 if ! python3 -c "import gi; gi.require_version('Gtk','3.0')" 2>/dev/null; then

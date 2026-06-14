@@ -555,40 +555,40 @@ static irqreturn_t hyn_irq_handler(int irq, void *data)
     return IRQ_HANDLED;
 }
 
-#if defined(HYN_USE_DRM_PANEL_NOTIFIER)
-static int fb_notifier_callback(struct notifier_block *self, unsigned long event, void *data)
+#if defined(HYN_USE_PANEL_FOLLOWER)
+/*
+ * drm_panel_follower callbacks. The panel core serialises these under its
+ * follower_lock and calls them around the real power transition, so there is
+ * no early/late duplicate-event race like the old blank notifier had.
+ */
+static int hyn_panel_prepared(struct drm_panel_follower *follower)
 {
-    int blank_value;
-    const unsigned long event_enum[2] = {
-        DRM_PANEL_EARLY_EVENT_BLANK, DRM_PANEL_EVENT_BLANK
-    };
-    const int blank_enum[2] = {
-        DRM_PANEL_BLANK_POWERDOWN, DRM_PANEL_BLANK_UNBLANK
-    };
+    struct hyn_ts_data *ts =
+        container_of(follower, struct hyn_ts_data, panel_follower);
 
-    if (IS_ERR_OR_NULL(data))
-        return 0;
-
-    blank_value = *((int *)(((struct drm_panel_notifier *)data)->data));
-
-    HYN_INFO("notifier,event:%lu,blank:%d", event, blank_value);
-    if (hyn_data->old_fb_state == blank_value ||
-        (event != event_enum[0] && event != event_enum[1])) {
-        HYN_INFO("don't care");
-        return 0;
-    }
-
-    if (blank_enum[1] == blank_value)
-        queue_work(hyn_data->hyn_workqueue, &hyn_data->work_resume);
-    else {
-        cancel_work_sync(&hyn_data->work_resume);
-        hyn_suspend(hyn_data->dev);
-    }
-
-    hyn_data->old_fb_state = blank_value;
+    HYN_INFO("panel prepared (suspend:%d)", ts->state_is_sunpend);
+    if (ts->state_is_sunpend)
+        queue_work(ts->hyn_workqueue, &ts->work_resume);
     return 0;
 }
-#elif defined(CONFIG_FB) && defined(FB_EVENT_BLANK)
+
+static int hyn_panel_unpreparing(struct drm_panel_follower *follower)
+{
+    struct hyn_ts_data *ts =
+        container_of(follower, struct hyn_ts_data, panel_follower);
+
+    HYN_INFO("panel unpreparing (suspend:%d)", ts->state_is_sunpend);
+    cancel_work_sync(&ts->work_resume);
+    if (!ts->state_is_sunpend)
+        hyn_suspend(ts->dev);
+    return 0;
+}
+
+static const struct drm_panel_follower_funcs hyn_panel_follower_funcs = {
+    .panel_prepared = hyn_panel_prepared,
+    .panel_unpreparing = hyn_panel_unpreparing,
+};
+#elif defined(HYN_USE_FB_NOTIFIER)
 static int fb_notifier_callback(struct notifier_block *self, unsigned long event, void *data)
 {
     int blank_value;
@@ -598,32 +598,39 @@ static int fb_notifier_callback(struct notifier_block *self, unsigned long event
     const unsigned long event_enum[2] = {FB_EARLY_EVENT_BLANK, FB_EVENT_BLANK};
     const int blank_enum[2] = {FB_BLANK_POWERDOWN, FB_BLANK_UNBLANK};
 
-    if (IS_ERR_OR_NULL(data))
+    if (IS_ERR_OR_NULL(data) || IS_ERR_OR_NULL(hyn_data))
         return 0;
 
     blank_value = *((int *)(((struct fb_event *)data)->data));
 
-    HYN_INFO("notifier,event:%lu,blank:%d", event, blank_value);
-    if (hyn_data->old_fb_state == blank_value ||
-        (event != event_enum[0] && event != event_enum[1])) {
-        HYN_INFO("don't care");
+    HYN_INFO("notifier,event:%lu,blank:%d,suspend:%d,old:%d",
+             event, blank_value, hyn_data->state_is_sunpend, hyn_data->old_fb_state);
+
+    if (event != event_enum[0] && event != event_enum[1]) {
+        HYN_INFO("don't care event");
         return 0;
     }
 
-    if (blank_enum[1] == blank_value)
-        queue_work(hyn_data->hyn_workqueue, &hyn_data->work_resume);
-    else {
-        cancel_work_sync(&hyn_data->work_resume);
-        hyn_suspend(hyn_data->dev);
+    if (blank_enum[1] == blank_value) {
+        if (hyn_data->state_is_sunpend)
+            queue_work(hyn_data->hyn_workqueue, &hyn_data->work_resume);
+        hyn_data->old_fb_state = blank_value;
+        return 0;
     }
 
+    if (hyn_data->old_fb_state == blank_value && hyn_data->state_is_sunpend) {
+        HYN_INFO("duplicate powerdown");
+        return 0;
+    }
+
+    hyn_suspend(hyn_data->dev);
     hyn_data->old_fb_state = blank_value;
     return 0;
 }
 #endif
 
-#if defined(CONFIG_PM) && !defined(HYN_USE_DRM_PANEL_NOTIFIER) && \
-    !(defined(CONFIG_FB) && defined(FB_EVENT_BLANK))
+#if defined(CONFIG_PM) && !defined(HYN_USE_PANEL_FOLLOWER) && \
+    !defined(HYN_USE_FB_NOTIFIER)
 static int hyn_pm_suspend(struct device *dev)
 {
     hyn_suspend(dev);
@@ -726,7 +733,10 @@ static int hyn_ts_probe(struct spi_device *client)
     ts_data->rp_buf.key_id = 0xFF;
     ts_data->work_mode = NOMAL_MODE;
     ts_data->log_level = 0;
-    
+#if defined(HYN_USE_FB_NOTIFIER)
+    ts_data->old_fb_state = -1;
+#endif
+
     hyn_data = ts_data;
     ts_data->client = client;
     ts_data->dev = &client->dev;
@@ -813,37 +823,21 @@ static int hyn_ts_probe(struct spi_device *client)
     atomic_set(&ts_data->irq_is_disable,ENABLE);
     hyn_irq_set(ts_data , DISABLE);
 
-#if defined(HYN_USE_DRM_PANEL_NOTIFIER)
+#if defined(HYN_USE_PANEL_FOLLOWER)
+    ts_data->panel_follower.funcs = &hyn_panel_follower_funcs;
+    if (drm_is_panel_follower(ts_data->dev)) {
+        ret = drm_panel_add_follower(ts_data->dev, &ts_data->panel_follower);
+        if (ret < 0)
+            HYN_ERROR("drm_panel_add_follower failed: %d (touch stays always-on)", ret);
+        else
+            HYN_INFO("registered as drm_panel follower");
+    } else {
+        HYN_INFO("no \"panel\" phandle; touch power not tied to panel");
+    }
+#elif defined(HYN_USE_FB_NOTIFIER)
     ts_data->fb_notif.notifier_call = fb_notifier_callback;
-    HYN_INFO("drm_panel register");
-    {
-        int i,count;
-        struct device_node *node;
-        struct drm_panel *panel;
-        struct device_node *np = ts_data->dev->of_node;
-        count = of_count_phandle_with_args(np, "panel", NULL);
-        ts_data->active_panel = NULL;
-        if (count > 0){
-            for (i = 0; i < count; i++) {
-                node = of_parse_phandle(np, "panel", i);
-                panel = of_drm_find_panel(node);
-                of_node_put(node);
-                if (!IS_ERR(panel)) {
-                    ts_data->active_panel = panel;
-                    break;
-                }
-            }
-        }
-        if(IS_ERR_OR_NULL(ts_data->active_panel)){
-            HYN_ERROR("node cant not find DRM panel ");
-        }
-    }
-    if(!IS_ERR_OR_NULL(ts_data->active_panel)){
-        ret = drm_panel_notifier_register(ts_data->active_panel,&ts_data->fb_notif);
-        if(ret < 0){
-             HYN_ERROR("drm_panel_notifier_register failed: %d", ret);
-        }
-    }
+    if (fb_register_client(&ts_data->fb_notif))
+        HYN_ERROR("fb_register_client failed");
 #elif defined(CONFIG_HAS_EARLYSUSPEND)
     ts_data->early_suspend.level = EARLY_SUSPEND_LEVEL_BLANK_SCREEN + 1;
     ts_data->early_suspend.suspend = hyn_ts_early_suspend;
@@ -901,10 +895,10 @@ static int hyn_ts_remove(struct spi_device *client)
             input_unregister_device(ts_data->input_dev);
         }
         HYN_INFO("ts_remove4");
-#if defined(HYN_USE_DRM_PANEL_NOTIFIER)
-        if (!IS_ERR_OR_NULL(ts_data->active_panel))
-            drm_panel_notifier_unregister(ts_data->active_panel, &ts_data->fb_notif);
-#elif defined(CONFIG_FB) && defined(FB_EVENT_BLANK)
+#if defined(HYN_USE_PANEL_FOLLOWER)
+        if (ts_data->panel_follower.panel)
+            drm_panel_remove_follower(&ts_data->panel_follower);
+#elif defined(HYN_USE_FB_NOTIFIER)
         fb_unregister_client(&ts_data->fb_notif);
 #elif defined(CONFIG_HAS_EARLYSUSPEND)
         unregister_early_suspend(&ts_data->early_suspend);
@@ -947,8 +941,8 @@ static struct i2c_driver hyn_ts_driver = {
         .name = HYN_DRIVER_NAME,
         .owner = THIS_MODULE,
         .of_match_table = hyn_of_match_table,
-#if defined(CONFIG_PM) && !defined(HYN_USE_DRM_PANEL_NOTIFIER) && \
-    !(defined(CONFIG_FB) && defined(FB_EVENT_BLANK))
+#if defined(CONFIG_PM) && !defined(HYN_USE_PANEL_FOLLOWER) && \
+    !defined(HYN_USE_FB_NOTIFIER)
         .pm      = &hyn_pm_ops,
 #endif
     },
@@ -960,8 +954,8 @@ static struct spi_driver hyn_ts_driver = {
         .name = HYN_DRIVER_NAME,
         .of_match_table = hyn_of_match_table,
         .owner = THIS_MODULE,
-#if defined(CONFIG_PM) && !defined(HYN_USE_DRM_PANEL_NOTIFIER) && \
-    !(defined(CONFIG_FB) && defined(FB_EVENT_BLANK))
+#if defined(CONFIG_PM) && !defined(HYN_USE_PANEL_FOLLOWER) && \
+    !defined(HYN_USE_FB_NOTIFIER)
         .pm      = &hyn_pm_ops,
 #endif
 	},

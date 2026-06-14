@@ -1,7 +1,7 @@
 
 obj-m += hyn_ts.o
-# Out-of-tree builds may not see CONFIG_DRM_PANEL; Pi 5 uses DRM panel blank events.
-ccflags-y += -DHYN_DRM_PANEL_NOTIFIER
+# Touch follows panel power via the mainline drm_panel_follower API
+# (CONFIG_DRM_PANEL), not the Qualcomm-only drm_panel_notifier.
 
 MODEL_FILE := /proc/device-tree/model
 MODEL_EXISTS := $(wildcard $(MODEL_FILE))
@@ -21,11 +21,13 @@ hyn_ts-objs += hyn_chips/hyn_cst8xxT.o
 hyn_ts-objs += hyn_chips/hyn_cst226se.o
 hyn_ts-objs += hyn_chips/hyn_cst36xxes.o
 
+# Use $(CURDIR), not $(PWD): under `sudo make` the PWD env var is stripped,
+# which would make M= empty and try to build the whole kernel instead.
 modules:
-	$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules
+	$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(CURDIR) modules
 	
 clean:
-	$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean
+	$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(CURDIR) clean
 
 touch: modules
 

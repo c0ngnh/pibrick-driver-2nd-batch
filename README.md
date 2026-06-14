@@ -9,7 +9,7 @@ Kernel modules and user-space helpers for the piBrick CM5 handheld (Raspberry Pi
 | Battery | `battery/bq25890_battery.c` | TI BQ25895 PMIC (no separate fuel gauge) |
 | Buttons | `button-service/` | GPIO daemon for power + user buttons |
 | Desktop | `desktop/` | GTK taskbar battery indicator, `pibrick-display-settings` |
-| Tools | `tools/` | Display settings menu, GNOME refresh helper, OCV calibration |
+| Tools | `tools/` | Display settings menu, GNOME refresh helper, touch reset, OCV calibration |
 
 Original maker sources (Amarullz / [amarullz.com](https://amarullz.com)) ship as two separate trees:
 
@@ -82,9 +82,10 @@ Baseline for the tables below:
 | Topic | Amarullz | This repo |
 |-------|----------|-----------|
 | Chip support | CST66xx, CST92xx, and other Hynitron variants | Same vendor tree |
-| DRM panel sync | `drm_panel_notifier` code in `hyn_core.c` | Same logic |
-| Out-of-tree build | No explicit `CONFIG_DRM_PANEL` workaround | `-DHYN_DRM_PANEL_NOTIFIER` in `Makefile` so panel blank/unblank events work on Pi 5 without patching the kernel tree |
-| Button daemon interaction | `pibrickbtn` reloads `hyn_ts` on every start (`rmmod` + `modprobe`) | Button daemon only unloads `gpio_keys`; touch module left alone |
+| Panel power sync | `drm_panel_notifier` / `DRM_PANEL_EVENT_BLANK` (Qualcomm-downstream API) | **`drm_panel_follower`** (mainline API) — the notifier API does not exist on the Pi kernel and made `hyn_ts.ko` fail to build, so touch broke on kernel updates |
+| Build on Pi 6.x | Fails: `FB_EVENT_BLANK` / `drm_panel_notifier_register` undeclared | Builds against `CONFIG_DRM_PANEL`; falls back to `dev_pm_ops` (touch always-on) if panel-follower support is absent |
+| Suspend/resume races | early/late duplicate blank events + `cancel_work_sync` could leave touch stuck suspended | Follower callbacks are serialised by the panel core around the real power transition; `hyntpdbg rst` resumes touch when suspended |
+| Button daemon interaction | `pibrickbtn` reloads `hyn_ts` on every start (`rmmod` + `modprobe`) | Button daemon only unloads `gpio_keys`; touch module left alone; display toggle sends touch wake |
 
 ### Battery driver (`battery/bq25890_battery.c`)
 
@@ -235,9 +236,52 @@ python3 /usr/lib/pibrick/tools/gnome-display-rate.py debug
 Installed by `desktop/setup-desktop.sh`:
 
 - `/usr/local/bin/pibrick-display-settings`
+- `/usr/local/bin/pibrick-touch-reset`
 - `/usr/lib/pibrick/tools/gnome-display-rate.py`
 
 Dependencies: `python3-gi`, `python3-dbus` (installed by `setup-desktop.sh` when missing).
+
+---
+
+## Touch troubleshooting
+
+Touch is driven by `hyn_ts` and follows panel power via the mainline `drm_panel_follower` API. Earlier revisions used the Qualcomm-only `drm_panel_notifier` API, which does not exist on the Pi kernel — so a kernel update would rebuild `hyn_ts` and it would fail to compile, leaving you with no working touch. That is the most likely cause of "touch stopped after an update."
+
+**Quick recovery (no rebuild):**
+
+```bash
+pibrick-touch-reset
+```
+
+This turns the panel on if needed, then sends `rst` to the driver's `hyntpdbg` sysfs node (full resume when suspended, hardware reset otherwise).
+
+**After updating drivers**, rebuild and reload touch:
+
+```bash
+sudo bash ./install.sh
+# or: cd /usr/lib/pibrick/hyn_driver_release_qm && sudo make touch install
+sudo modprobe -r hyn_ts && sudo modprobe hyn_ts
+```
+
+**Diagnostics on the device:**
+
+```bash
+lsmod | grep -E 'hyn_ts|gpio_keys'
+dmesg | tail -50 | grep -iE 'hyn|touch|cst66'
+find /sys/bus/i2c/devices -name hyntpdbg
+libinput list-devices | grep -i touch
+```
+
+**What this repo fixes vs Amarullz:**
+
+| Issue | Cause | Fix in this repo |
+|-------|-------|------------------|
+| `hyn_ts.ko` fails to build (no touch after kernel update) | Code used `drm_panel_notifier_register` / `DRM_PANEL_EVENT_BLANK`, which are Qualcomm-downstream only and absent on the Pi kernel | Switched to mainline `drm_panel_follower` (`drm_panel_add_follower`) gated on `CONFIG_DRM_PANEL` |
+| Touch stuck suspended after blank/unblank | early/late duplicate blank events + `cancel_work_sync` race | Follower callbacks (`panel_prepared` / `panel_unpreparing`) are serialised by the panel core around the real power transition |
+| Touch dead after user-button display toggle | no userspace wake | `display-on-off.sh` sends touch `rst` after turning panel on |
+| `rst` sysfs useless while suspended | only reset chip, IRQ still disabled | `hyntpdbg` `rst` queues driver resume when suspended |
+
+If the panel never registers a follower (older kernel without `CONFIG_DRM_PANEL`), touch falls back to `dev_pm_ops` and simply stays active whenever the system is awake. For a stuck session without rebuilding, use `pibrick-touch-reset`.
 
 ---
 

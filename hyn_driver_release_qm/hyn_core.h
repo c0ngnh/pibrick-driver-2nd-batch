@@ -57,15 +57,25 @@
 #include <linux/wakelock.h>
 #endif
 
-#if defined(CONFIG_DRM)
+/*
+ * Coordinate touch suspend/resume with the panel. Mainline (and the Raspberry
+ * Pi kernel) expose the drm_panel_follower API for exactly this; the older
+ * drm_panel_notifier / DRM_PANEL_EVENT_BLANK API is Qualcomm-downstream only
+ * and does not exist here, so we must not reference it.
+ */
+/*
+ * IS_ENABLED() (not defined()) so this works whether DRM is built-in (=y) or a
+ * module (=m); on the Pi CONFIG_DRM is =m, so the preprocessor only sees
+ * CONFIG_DRM_MODULE, and a plain defined(CONFIG_DRM) check would miss it.
+ */
+#if IS_ENABLED(CONFIG_DRM_PANEL)
 #include <linux/notifier.h>
-#if defined(CONFIG_DRM_PANEL) || defined(HYN_DRM_PANEL_NOTIFIER)
 #include <drm/drm_panel.h>
-#define HYN_USE_DRM_PANEL_NOTIFIER 1
-#endif
-#elif defined(CONFIG_FB)
+#define HYN_USE_PANEL_FOLLOWER 1
+#elif IS_ENABLED(CONFIG_FB) && defined(FB_EVENT_BLANK)
 #include <linux/notifier.h>
 #include <linux/fb.h>
+#define HYN_USE_FB_NOTIFIER 1
 #elif defined(CONFIG_HAS_EARLYSUSPEND)
 #include <linux/earlysuspend.h>
 #endif
@@ -299,11 +309,9 @@ struct hyn_ts_data {
     u8 charge_is_enable;
     u8 glove_is_enable;
 
-#if defined(HYN_USE_DRM_PANEL_NOTIFIER)
-    struct notifier_block fb_notif;
-    int old_fb_state;
-    struct drm_panel *active_panel;
-#elif defined(CONFIG_FB)
+#if defined(HYN_USE_PANEL_FOLLOWER)
+    struct drm_panel_follower panel_follower;
+#elif defined(HYN_USE_FB_NOTIFIER)
     struct notifier_block fb_notif;
     int old_fb_state;
 #elif defined(CONFIG_HAS_EARLYSUSPEND)

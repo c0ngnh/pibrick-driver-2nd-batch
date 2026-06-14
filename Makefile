@@ -12,10 +12,10 @@ $(PANEL_OBJ): $(PANEL_SRC)
 	ln -sf $(PANEL_SRC) $(PANEL_OBJ)
 
 modules: $(PANEL_OBJ)
-	$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules
+	$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(CURDIR) modules
 
 clean:
-	$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean
+	$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(CURDIR) clean
 	rm -f $(PANEL_OBJ) *.dtbo
 
 amoled: modules

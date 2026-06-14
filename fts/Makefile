@@ -7,10 +7,10 @@ MODULE_INSTALL_DIR := /lib/modules/$(shell uname -r)/kernel/drivers/input/touchs
 
 
 modules:
-	$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules
+	$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(CURDIR) modules
 	
 clean:
-	$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean
+	$(MAKE) -C /lib/modules/$(shell uname -r)/build M=$(CURDIR) clean
 
 touch: modules
 
