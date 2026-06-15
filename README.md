@@ -48,7 +48,6 @@ The default refresh rate is **60 Hz** (saved to `/etc/pibrick.display-refresh` a
 - **Color profiles** (9203) via sysfs `color_profile`: `natural`, `vivid`, `srgb`, `warm`, `cool`, `night`, `soft`.
 - **Display on/off** via sysfs `pibrick_display_enable`. The attribute is `0644` in-driver (kernel 6.18 forbids world-writable `0666` sysfs attrs); user write access is granted at runtime by the `99-pibrick-display.rules` udev rule and the button service.
 - **Backlight** as the `pibrick-backlight` class (0–1023).
-- **DDIC identification** logged once per boot to dmesg (`dmesg | grep -i 'panel-pibrick.*DDIC'`) to help confirm the installed panel variant.
 
 ### Device tree (`dts/vc4-kms-dsi-pibrick.dts`)
 
