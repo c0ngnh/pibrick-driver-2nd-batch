@@ -373,13 +373,6 @@ u32 hyn_sum32(int val, u32* buf,u16 len);
 int hyn_power_source_ctrl(struct hyn_ts_data *ts_data, int enable); 
 
 //ic type
-extern const struct hyn_ts_fuc cst3xx_fuc;
 extern const struct hyn_ts_fuc cst66xx_fuc;
-extern const struct hyn_ts_fuc cst7xx_fuc;
-extern const struct hyn_ts_fuc cst8xxT_fuc;
-extern const struct hyn_ts_fuc cst92xx_fuc;
-extern const struct hyn_ts_fuc cst3240_fuc;
-extern const struct hyn_ts_fuc cst226se_fuc;
-extern const struct hyn_ts_fuc cst36xxes_fuc;
 
 #endif

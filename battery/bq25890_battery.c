@@ -175,13 +175,31 @@ struct bq25890_device {
  * No discharge-current sense on this hardware, so assume a typical average.
  * Measured runtime is ~3.5-4.0 h on 5000 mAh => ~1.30 A average. This also
  * drives UPower's "time remaining" (it computes charge_now / current_now).
+ * Override at load time if your pack or workload differs, e.g.:
+ *   modprobe bq25890_battery discharge_current_ua=1100000 charge_full_uah=5000000 batt_ir_mohm=200
  */
-#define BQ25890_DISCHARGE_CURRENT_UA	1300000
-/* Single-cell 3.7 V nominal LiPo, 5000 mAh (charger VREG = 4.176 V in DTS). */
-#define BQ25890_CHARGE_FULL_UAH		5000000
-/* time_to_empty and current_now share the same assumed average load (seconds at 100%). */
-#define BQ25890_FULL_RUNTIME_SEC \
-	((int)((long)BQ25890_CHARGE_FULL_UAH * 3600L / BQ25890_DISCHARGE_CURRENT_UA))
+static int discharge_current_ua = 1300000;
+module_param(discharge_current_ua, int, 0644);
+MODULE_PARM_DESC(discharge_current_ua,
+		 "Assumed average discharge current (uA) for time-to-empty");
+
+static int charge_full_uah = 5000000;
+module_param(charge_full_uah, int, 0644);
+MODULE_PARM_DESC(charge_full_uah, "Battery capacity (uAh) for charge_now/full");
+
+static int batt_ir_mohm = 220;
+module_param(batt_ir_mohm, int, 0644);
+MODULE_PARM_DESC(batt_ir_mohm,
+		 "Cell + wiring IR (mOhm) for charge-time OCV estimate");
+
+static int bq25890_full_runtime_sec(void)
+{
+	if (discharge_current_ua <= 0)
+		return 0;
+
+	return (int)((long)charge_full_uah * 3600L / discharge_current_ua);
+}
+
 #define BQ25890_CAPACITY_REFRESH_INTERVAL	(30 * HZ)
 /*
  * After unplug the terminal relaxes toward true OCV in ~1 min on this pack.
@@ -195,7 +213,6 @@ struct bq25890_device {
  * over-voltage that remains as current tapers. Tuned on pocketcm5 (~1.6 A @
  * 4.14 V terminal -> rested ~3.82 V after unplug).
  */
-#define BQ25890_BATT_IR_MOHM			220
 #define BQ25890_CHARGE_POLARIZATION_UV		50000
 #define BQ25890_CHARGE_INTEGRATE_MAX_SEC	60
 /* Terminal above this while charging cannot mean a near-empty cell. */
@@ -661,7 +678,7 @@ static long bq25890_get_battery_current_ua(struct bq25890_device *bq,
 	if (ichgr > 0)
 		return -ichgr;
 
-	return -BQ25890_DISCHARGE_CURRENT_UA;
+	return -discharge_current_ua;
 }
 
 static int bq25890_read_capacity_voltage(struct bq25890_device *bq,
@@ -688,7 +705,7 @@ static int bq25890_read_capacity_voltage(struct bq25890_device *bq,
 		if (ichgr < 0)
 			ichgr = 0;
 
-		ir_drop_uv = (long)ichgr * BQ25890_BATT_IR_MOHM / 1000;
+		ir_drop_uv = (long)ichgr * batt_ir_mohm / 1000;
 		voltage -= (int)ir_drop_uv;
 		voltage -= BQ25890_CHARGE_POLARIZATION_UV;
 	}
@@ -799,7 +816,7 @@ static int bq25890_charge_session_percent(struct bq25890_device *bq)
 	long pct;
 
 	pct = bq->charge_session_pct +
-	      (bq->charge_added_uah * 100L) / BQ25890_CHARGE_FULL_UAH;
+	      (bq->charge_added_uah * 100L) / charge_full_uah;
 	return (int)clamp(pct, (long)bq->charge_session_pct, 99L);
 }
 
@@ -1174,7 +1191,7 @@ static int bq25890_power_supply_get_property(struct power_supply *psy,
 		break;
 	case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
 	case POWER_SUPPLY_PROP_CHARGE_FULL:
-		val->intval = BQ25890_CHARGE_FULL_UAH;
+		val->intval = charge_full_uah;
 		break;
 	case POWER_SUPPLY_PROP_CHARGE_NOW:
 		ret = bq25890_capacity_cached(bq);
@@ -1182,7 +1199,7 @@ static int bq25890_power_supply_get_property(struct power_supply *psy,
 			ret = bq25890_update_capacity(bq, &state);
 		if (ret < 0)
 			return ret;
-		val->intval = ret * (BQ25890_CHARGE_FULL_UAH / 100);
+		val->intval = ret * (charge_full_uah / 100);
 		break;
 	case POWER_SUPPLY_PROP_TIME_TO_EMPTY_AVG: {
 		int cap = bq25890_capacity_cached(bq);
@@ -1191,7 +1208,7 @@ static int bq25890_power_supply_get_property(struct power_supply *psy,
 		if (ext_pwr || cap < 0)
 			val->intval = 0;
 		else
-			val->intval = cap * BQ25890_FULL_RUNTIME_SEC / 100;
+			val->intval = cap * bq25890_full_runtime_sec() / 100;
 		break;
 	}
 	case POWER_SUPPLY_PROP_TIME_TO_FULL_NOW: {
@@ -1205,7 +1222,7 @@ static int bq25890_power_supply_get_property(struct power_supply *psy,
 			val->intval = 0;
 		} else {
 			long remaining_uah = (long)(100 - cap) *
-					     BQ25890_CHARGE_FULL_UAH / 100;
+					     charge_full_uah / 100;
 
 			val->intval = (int)(remaining_uah * 3600 / ichgr);
 		}
@@ -2323,19 +2340,8 @@ static void bq25890_shutdown(struct i2c_client *client)
 	struct bq25890_device *bq = i2c_get_clientdata(client);
 
 	/*
-	 * TODO this if + return should probably be removed, but that would
-	 * introduce a function change for boards using the usb-phy framework.
-	 * This needs to be tested on such a board before making this change.
-	 */
-	if (!IS_ERR_OR_NULL(bq->usb_phy))
-		return;
-
-	/*
-	 * Turn off the 5v Boost regulator which outputs Vbus to the device's
-	 * Micro-USB or Type-C USB port. Leaving this on drains power and
-	 * this avoids the PMIC on some device-models seeing this as Vbus
-	 * getting inserted after shutdown, causing the device to immediately
-	 * power-up again.
+	 * Turn off the 5 V boost so VBUS does not look like a plug-in event
+	 * after power-off (PocketCM5 / piBrick).
 	 */
 	bq25890_set_otg_cfg(bq, 0);
 }

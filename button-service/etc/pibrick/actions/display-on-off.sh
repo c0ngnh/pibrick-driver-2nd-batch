@@ -22,9 +22,11 @@ fi
 
 # After turning the panel on, nudge touch in case drm_panel resume raced with suspend.
 if [ "$new_value" -eq 1 ]; then
-	sleep 0.15
-	dbg=$(find /sys/bus/i2c/devices -name hyntpdbg 2>/dev/null | head -n 1)
-	if [ -n "$dbg" ]; then
-		echo rst >"$dbg" 2>/dev/null || true
-	fi
+	for delay in 0.15 0.35; do
+		sleep "$delay"
+		dbg=$(find /sys/bus/i2c/devices -name hyntpdbg 2>/dev/null | head -n 1)
+		if [ -n "$dbg" ]; then
+			echo rst >"$dbg" 2>/dev/null || true
+		fi
+	done
 fi

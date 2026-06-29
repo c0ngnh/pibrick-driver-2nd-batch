@@ -1,7 +1,7 @@
 [Desktop Entry]
 Type=Application
 Name=piBrick display defaults
-Comment=Set 60 Hz refresh rate on login
+Comment=Apply saved display refresh rate on login
 Exec=/usr/local/bin/pibrick-apply-display-defaults
 X-GNOME-Autostart-enabled=true
 NoDisplay=true

@@ -1,10 +1,10 @@
 # piBrick pocketcm5 drivers
 
-Kernel modules and user-space helpers for the piBrick CM5 handheld (Raspberry Pi CM5 + Visionox 1080×1240 AMOLED). Both Visionox panel variants are supported and selectable at install time: **9203** (SD5302H) and **9202** (VTDR6110).
+Kernel modules and user-space helpers for the piBrick CM5 handheld (Raspberry Pi CM5 + Visionox AMOLED). The default panel is **9203** (SD5302H, PocketCM5); **9202**, **5.48 inch**, and **5 inch** variants are selectable at install time.
 
 | Component | Path | Hardware |
 |-----------|------|----------|
-| Display | `panel-pibrick.9203.c`, `panel-pibrick.9202.c`, `dts/vc4-kms-dsi-pibrick.dts` | Visionox 1080×1240 AMOLED, DSI1 — 9203 (SD5302H, 90/60 Hz) or 9202 (VTDR6110, 60 Hz) |
+| Display | `panel-pibrick.9203.c`, `panel-pibrick.9202.c`, `panel-pibrick.548.c`, `panel-pibrick.5inch.c`, `dts/` | Visionox AMOLED on DSI1 — 9203 default (1080×1240 @ 90/60 Hz) |
 | Touch | `hyn_driver_release_qm/` | Hynitron CST66xx (`compatible = "hyn,66xx"` in DTS) |
 | Battery | `battery/bq25890_battery.c` | TI BQ25895 PMIC (no separate fuel gauge) |
 | Buttons | `button-service/` | GPIO daemon for power + user buttons |
@@ -28,12 +28,13 @@ sudo bash ./install.sh
 `install.sh` prompts for the panel variant and saves the choice to `/etc/pibrick.panel`. You can also pick it non-interactively:
 
 ```bash
-sudo PANEL=9203 bash ./install.sh   # SD5302H (90/60 Hz)
-sudo PANEL=9202 bash ./install.sh   # VTDR6110 (60 Hz)
-sudo PANEL=548  bash ./install.sh   # 5.48 inch 1080×1920 (legacy)
+sudo PANEL=9203  bash ./install.sh   # SD5302H (90/60 Hz, 90 Hz default)
+sudo PANEL=9202  bash ./install.sh   # legacy 1080×1240 @ 60 Hz
+sudo PANEL=548   bash ./install.sh   # 5.48 inch 1080×1920 @ 60 Hz
+sudo PANEL=5inch bash ./install.sh   # 5 inch 1080×1240 @ 90/60 Hz
 ```
 
-The default refresh rate is **60 Hz** (saved to `/etc/pibrick.display-refresh` and applied on login), which is within the panel's 57–63 Hz frame-rate spec. The 9203 panel can additionally run 90 Hz via `pibrick-display-settings --refresh 90`.
+The default refresh rate is **90 Hz** for the 9203 panel (saved to `/etc/pibrick.display-refresh` and applied on login). Use `pibrick-display-settings --refresh 60` for lower power.
 
 ---
 
@@ -41,10 +42,10 @@ The default refresh rate is **60 Hz** (saved to `/etc/pibrick.display-refresh` a
 
 ### Display
 
-- **Two maintained panel drivers** at the repo root: `panel-pibrick.9203.c` (SD5302H) and `panel-pibrick.9202.c` (VTDR6110). The build picks one via `PANEL=9203|9202` (or `548` for the legacy 5.48 inch panel); `install.sh` prompts and remembers the choice in `/etc/pibrick.panel`.
+- **Panel drivers** at the repo root: `panel-pibrick.9203.c` (default), `panel-pibrick.9202.c`, `panel-pibrick.548.c`, `panel-pibrick.5inch.c`. The build picks one via `PANEL=`; `install.sh` prompts and remembers the choice in `/etc/pibrick.panel`.
 - **Kernel 6.18 panel allocation** — both drivers use `devm_drm_panel_alloc()` (refcounted) instead of the deprecated `devm_kzalloc` + `drm_panel_init` pattern, which prevents a panel use-after-free on unbind / session restart.
 - **Full power lifecycle** — `prepare` / `unprepare` plus `enable` / `disable` and a `shutdown` handler, with LPM-safe DSI sequencing during power transitions.
-- **Selectable refresh** — 60 Hz default; the 9203 panel also exposes 90 Hz.
+- **Selectable refresh** — 90 Hz default on 9203; 60 Hz available for lower power.
 - **Color profiles** (9203) via sysfs `color_profile`: `natural`, `vivid`, `srgb`, `warm`, `cool`, `night`, `soft`.
 - **Display on/off** via sysfs `pibrick_display_enable`. The attribute is `0644` in-driver (kernel 6.18 forbids world-writable `0666` sysfs attrs); user write access is granted at runtime by the `99-pibrick-display.rules` udev rule and the button service.
 - **Backlight** as the `pibrick-backlight` class (0–1023).
@@ -71,7 +72,7 @@ The default refresh rate is **60 Hz** (saved to `/etc/pibrick.display-refresh` a
 
 - `install.sh` — `set -euo pipefail`, interactive panel prompt, saves panel + default refresh, removes any stale `panel-pibrick.c`, runs the desktop and button-service installers, and regenerates the initramfs when `auto_initramfs=1`.
 - `build.sh` — `--force` / `--no-reboot` flags, rebuilds on kernel change, synchronous install, initramfs regen.
-- `Makefile` — `make amoled PANEL=9203|9202|548`; symlinks the chosen source to `panel-pibrick.c`; refuses to uninstall if the new `.ko` is missing.
+- `Makefile` — `make amoled PANEL=9203|9202|548|5inch`; symlinks the chosen source to `panel-pibrick.c`; refuses to uninstall if the new `.ko` is missing.
 - `pibrick.service` — rebuilds the out-of-tree modules automatically on kernel updates.
 
 ### Desktop & tools
@@ -126,7 +127,8 @@ Power does **not** pull line 23 low; only the user button does. The daemon decod
 | Script | Role |
 |--------|------|
 | `display-on-off.sh` | Toggle panel; safe `find` with clear errors for missing node / permission denied |
-| `brightness.sh` | Backlight step (present, not wired to user-short by default) |
+| `brightness.sh` | Legacy wrapper → `pibrick-brightness up` |
+| `pibrick-brightness` | Backlight up/down for labwc / Pi OS Trixie (`XF86MonBrightness*` keys) |
 | `run-as-session-user.sh` | Run GUI commands as the logged-in desktop user (`loginctl` + `/run/user` fallback, `runuser` / `su`) |
 | `power-menu.sh` | DE-aware power menu (GNOME, XFCE, Pi OS `pishutdown`; KDE/MATE/LXQt fallbacks) |
 
@@ -177,7 +179,7 @@ pibrick-display-settings
 Interactive menu for:
 
 - **Color profile** — sysfs `color_profile` (9203 only)
-- **Refresh rate** — 60 Hz default @ 1080×1240; the 9203 panel also offers 90 Hz (9202 and 5.48 inch are 60 Hz only)
+- **Refresh rate** — 90 Hz default @ 1080×1240 on 9203; 60 Hz optional. The 5.48 inch panel is 60 Hz only.
 
 Refresh-rate backend is chosen automatically:
 
@@ -270,9 +272,11 @@ sudo /usr/local/bin/pibrickbtn --test
 
 ---
 
-## Legacy hardware
+## Legacy panels
 
-Older panel sizes and DTS variants are kept under `archive/` for reference. They are **not** built or installed by default. To switch panels you would need to restore the matching source + DTS from `archive/` and adjust the top-level `Makefile` / `build.sh` targets accordingly.
+**9202**, **5.48 inch** (`548`), and **5 inch** (`5inch`) drivers and matching DTS overlays live alongside the default **9203** sources. Select the panel during `install.sh` or with `PANEL=`; the choice is saved to `/etc/pibrick.panel`.
+
+Note: the **548** overlay uses an FocalTech touch controller (`edt-ft5406`); the default **9203** / **9202** / **5 inch** overlays use Hynitron CST66xx (`hyn,66xx`). Re-run install after switching panel so the correct overlay and touch driver are built.
 
 ---
 

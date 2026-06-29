@@ -31,6 +31,13 @@ if [ -f "$TOUCH_RESET" ]; then
 	install -m 755 "$TOUCH_RESET" /usr/local/bin/pibrick-touch-reset
 fi
 
+BRIGHTNESS_HELPER="$SCRIPT_DIR/../tools/pibrick-brightness.sh"
+if [ -f "$BRIGHTNESS_HELPER" ]; then
+	install -m 755 "$BRIGHTNESS_HELPER" /usr/local/bin/pibrick-brightness
+	apt-get install -y brightnessctl 2>/dev/null || true
+	/usr/local/bin/pibrick-brightness install-labwc || true
+fi
+
 if [ -f "$GNOME_RATE_HELPER" ]; then
 	install -d "$TOOLS_DIR"
 	if [ "$(realpath "$GNOME_RATE_HELPER")" != "$(realpath "$TOOLS_DIR/gnome-display-rate.py" 2>/dev/null)" ]; then
@@ -61,4 +68,5 @@ fi
 
 echo "piBrick battery taskbar indicator installed (autostart enabled)."
 echo "Display settings: pibrick-display-settings"
-echo "Default refresh: 60 Hz (applied on login via pibrick-apply-display-defaults)"
+echo "Brightness keys (Pi OS / labwc): pibrick-brightness up|down (XF86MonBrightness keys)"
+echo "Default refresh: 90 Hz for 9203 (applied on login via pibrick-apply-display-defaults)"

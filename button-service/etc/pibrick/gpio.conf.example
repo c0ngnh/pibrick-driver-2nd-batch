@@ -1,0 +1,6 @@
+# PocketCM5 button GPIO defaults (pibrickbtn reads /etc/pibrick/gpio.conf if present).
+# Uncomment and edit only if your wiring differs from stock PocketCM5.
+#PRESS_CHIP=/dev/gpiochip0
+#PRESS_OFFSET=23
+#SELECT_CHIP=/dev/gpiochip10
+#SELECT_OFFSET=20

@@ -5,10 +5,11 @@ PANEL_CONFIG=/etc/pibrick.panel
 
 panel_label() {
 	case "$1" in
-	9203) echo "9203 - Visionox 1080x1240 @ 90/60 Hz (PocketCM5 default)" ;;
-	9202) echo "9202 - Visionox 1080x1240 @ 60 Hz" ;;
-	548)  echo "5.48 inch - 1080x1920 @ 60 Hz" ;;
-	*)    echo "$1" ;;
+	9203)  echo "9203 - Visionox 1080x1240 @ 90/60 Hz (PocketCM5 default)" ;;
+	9202)  echo "9202 - Visionox 1080x1240 @ 60 Hz (legacy)" ;;
+	548)   echo "5.48 inch - 1080x1920 @ 60 Hz" ;;
+	5inch) echo "5 inch - 1080x1240 @ 90/60 Hz" ;;
+	*)     echo "$1" ;;
 	esac
 }
 
@@ -17,9 +18,9 @@ choose_panel() {
 
 	if [ -n "${PANEL:-}" ]; then
 		case "$PANEL" in
-		9203|9202|548) echo "$PANEL"; return 0 ;;
+		9203|9202|548|5inch) echo "$PANEL"; return 0 ;;
 		*)
-			echo "ERROR: invalid PANEL=$PANEL (use 9203, 9202, or 548)" >&2
+			echo "ERROR: invalid PANEL=$PANEL (use 9203, 9202, 548, or 5inch)" >&2
 			exit 1
 			;;
 		esac
@@ -33,7 +34,7 @@ choose_panel() {
 
 	# No terminal on stdin (piped/automated): use saved/default without blocking.
 	if [ ! -t 0 ]; then
-		echo "No terminal for panel prompt; using ${saved}. Override with PANEL=9203|9202|548." >&2
+		echo "No terminal for panel prompt; using ${saved}. Override with PANEL=9203|9202|548|5inch." >&2
 		echo "$saved"
 		return 0
 	fi
@@ -43,10 +44,11 @@ choose_panel() {
 	echo >&2
 	echo "=== piBrick display panel ===" >&2
 	echo "1) 9203 - Visionox 1080x1240 @ 90/60 Hz (PocketCM5 default)" >&2
-	echo "2) 9202 - Visionox 1080x1240 @ 60 Hz" >&2
+	echo "2) 9202 - Visionox 1080x1240 @ 60 Hz (legacy)" >&2
 	echo "3) 5.48 inch - 1080x1920 @ 60 Hz" >&2
+	echo "4) 5 inch - 1080x1240 @ 90/60 Hz" >&2
 	echo >&2
-	printf "Choose panel [1-3] (default: %s): " "$saved" >&2
+	printf "Choose panel [1-4] (default: %s): " "$saved" >&2
 
 	if ! read -r choice; then
 		echo "ERROR: no panel selected." >&2
@@ -54,10 +56,11 @@ choose_panel() {
 	fi
 
 	case "${choice:-}" in
-	"")          echo "$saved" ;;
-	"9203"|1)    echo 9203 ;;
-	"9202"|2)    echo 9202 ;;
-	"548"|3)     echo 548 ;;
+	"")           echo "$saved" ;;
+	"9203"|1)     echo 9203 ;;
+	"9202"|2)     echo 9202 ;;
+	"548"|3)      echo 548 ;;
+	"5inch"|4)    echo 5inch ;;
 	*)
 		echo "ERROR: invalid choice: $choice" >&2
 		exit 1
@@ -83,9 +86,12 @@ regenerate_initramfs_if_needed() {
 
 SELECTED_PANEL="$(choose_panel)"
 echo "$SELECTED_PANEL" > "$PANEL_CONFIG"
-echo 60 > /etc/pibrick.display-refresh
+case "$SELECTED_PANEL" in
+9203|5inch) echo 90 > /etc/pibrick.display-refresh ;;
+*)        echo 60 > /etc/pibrick.display-refresh ;;
+esac
 echo "Selected panel: $(panel_label "$SELECTED_PANEL")"
-echo "Default refresh: 60 Hz (saved to /etc/pibrick.display-refresh)"
+echo "Default refresh: $(tr -d '[:space:]' < /etc/pibrick.display-refresh) Hz (saved to /etc/pibrick.display-refresh)"
 echo "Saved panel to $PANEL_CONFIG"
 
 # Install piBrick autoBuild Kernel Modules
@@ -106,5 +112,5 @@ regenerate_initramfs_if_needed
 
 echo
 echo "Install complete. Panel: $(panel_label "$SELECTED_PANEL")"
-echo "Default refresh: 60 Hz (kernel preferred + applied on next login)"
+echo "Default refresh: $(tr -d '[:space:]' < /etc/pibrick.display-refresh) Hz (kernel preferred + applied on next login)"
 echo "Reboot to apply: sudo reboot"

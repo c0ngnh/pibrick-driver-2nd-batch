@@ -1,3 +1,12 @@
 # Allow users to toggle display via pibrick_display_enable (panel sysfs).
 ACTION=="add|bind", SUBSYSTEM=="platform", KERNEL=="*.dsi.0", \
 	RUN+="/bin/sh -c 'test -f /sys%p/pibrick_display_enable && /bin/chmod 0666 /sys%p/pibrick_display_enable'"
+
+# Color profile sysfs (0644 in-driver; grant session write like backlight).
+ACTION=="add|bind", SUBSYSTEM=="platform", KERNEL=="*.dsi.0", \
+	RUN+="/bin/sh -c 'test -f /sys%p/color_profile && /bin/chmod 0664 /sys%p/color_profile && /bin/chgrp video /sys%p/color_profile 2>/dev/null || /bin/chmod 0666 /sys%p/color_profile'"
+
+# Backlight: labwc on Pi OS Trixie uses brightnessctl; both need session write access.
+SUBSYSTEM=="backlight", KERNEL=="pibrick-backlight", TAG+="uaccess"
+ACTION=="add|change", SUBSYSTEM=="backlight", KERNEL=="pibrick-backlight", \
+	RUN+="/bin/sh -c 'test -f /sys/class/backlight/pibrick-backlight/brightness && /bin/chmod 0664 /sys/class/backlight/pibrick-backlight/brightness && /bin/chgrp video /sys/class/backlight/pibrick-backlight/brightness 2>/dev/null || /bin/chmod 0666 /sys/class/backlight/pibrick-backlight/brightness'"

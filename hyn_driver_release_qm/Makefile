@@ -13,13 +13,6 @@ hyn_ts-objs += hyn_lib/hyn_tool.o
 hyn_ts-objs += hyn_lib/hyn_gesture.o
 hyn_ts-objs += hyn_lib/hyn_prox.o
 hyn_ts-objs += hyn_chips/hyn_cst66xx.o
-hyn_ts-objs += hyn_chips/hyn_cst3240.o
-hyn_ts-objs += hyn_chips/hyn_cst92xx.o
-hyn_ts-objs += hyn_chips/hyn_cst3xx.o
-hyn_ts-objs += hyn_chips/hyn_cst7xx.o
-hyn_ts-objs += hyn_chips/hyn_cst8xxT.o
-hyn_ts-objs += hyn_chips/hyn_cst226se.o
-hyn_ts-objs += hyn_chips/hyn_cst36xxes.o
 
 # Use $(CURDIR), not $(PWD): under `sudo make` the PWD env var is stripped,
 # which would make M= empty and try to build the whole kernel instead.

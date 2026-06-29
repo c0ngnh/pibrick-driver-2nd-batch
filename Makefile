@@ -1,4 +1,4 @@
-# Panel variant: make amoled PANEL=9203|9202|548
+# Panel variant: make amoled PANEL=9203|9202|548|5inch
 PANEL ?= 9203
 
 ifeq ($(PANEL),9203)
@@ -10,15 +10,19 @@ PANEL_SRC := panel-pibrick.9202.c
 DTS_SRC := dts/vc4-kms-dsi-pibrick.dts
 DTBO_NAME := vc4-kms-dsi-pibrick
 else ifeq ($(PANEL),548)
-PANEL_SRC := archive/panels/panel-pibrick-548inch.c
-DTS_SRC := archive/dts/vc-548inch.dts
+PANEL_SRC := panel-pibrick.548.c
+DTS_SRC := dts/vc-548inch.dts
 DTBO_NAME := vc-548inch
+else ifeq ($(PANEL),5inch)
+PANEL_SRC := panel-pibrick.5inch.c
+DTS_SRC := dts/vc4-5inch.dts
+DTBO_NAME := vc4-5inch
 else
-$(error Unknown PANEL=$(PANEL): use 9203, 9202, or 548)
+$(error Unknown PANEL=$(PANEL): use 9203, 9202, 548, or 5inch)
 endif
 
 PANEL_OBJ := panel-pibrick.c
-KNOWN_DTBO := vc4-kms-dsi-pibrick vc-548inch
+KNOWN_DTBO := vc4-kms-dsi-pibrick vc-548inch vc4-5inch
 
 obj-m += panel-pibrick.o
 MODULE_NAME := panel-pibrick.ko

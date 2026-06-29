@@ -24,14 +24,25 @@ install -m 644 99-pibrick-display.rules /etc/udev/rules.d/99-pibrick-display.rul
 
 # Keep gpio_keys from reclaiming button lines on later modprobe -r cycles.
 cat >/etc/modprobe.d/pibrick-btn.conf <<'EOF'
-# piBrick buttons are handled by pibrickbtn (userspace), not gpio_keys.
+# PiBrick PocketCM5 only: userspace pibrickbtn owns the button GPIOs.
+# Other boards are unaffected unless they install this package.
 blacklist gpio_keys
 EOF
 udevadm control --reload-rules
 while IFS= read -r sysfs_path; do
 	chmod 0666 "$sysfs_path"
 done < <(find /sys/devices -name pibrick_display_enable 2>/dev/null)
+while IFS= read -r sysfs_path; do
+	chmod 0664 "$sysfs_path" 2>/dev/null || chmod 0666 "$sysfs_path"
+	chgrp video "$sysfs_path" 2>/dev/null || true
+done < <(find /sys/devices -name color_profile 2>/dev/null | grep dsi || true)
+if [ -f /sys/class/backlight/pibrick-backlight/brightness ]; then
+	chmod 0664 /sys/class/backlight/pibrick-backlight/brightness 2>/dev/null || \
+		chmod 0666 /sys/class/backlight/pibrick-backlight/brightness
+	chgrp video /sys/class/backlight/pibrick-backlight/brightness 2>/dev/null || true
+fi
 udevadm trigger --subsystem-match=platform
+udevadm trigger --subsystem-match=backlight
 
 systemctl daemon-reload
 systemctl enable pibrickbtn.service

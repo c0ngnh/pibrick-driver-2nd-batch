@@ -1,8 +1,8 @@
 #!/bin/bash
-# Apply piBrick display defaults on graphical login (60 Hz refresh).
+# Apply piBrick display defaults on graphical login (saved refresh rate).
 set -euo pipefail
 
-REFRESH="${PIBRICK_DEFAULT_REFRESH:-60}"
+REFRESH="${PIBRICK_DEFAULT_REFRESH:-90}"
 if [ -f /etc/pibrick.display-refresh ]; then
 	REFRESH="$(tr -d '[:space:]' < /etc/pibrick.display-refresh)"
 fi

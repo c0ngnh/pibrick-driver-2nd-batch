@@ -101,17 +101,60 @@ struct visionox_vtdr6110 {
 	struct drm_panel panel;
 	struct mipi_dsi_device *dsi;
 	struct gpio_desc *reset_gpio;
-	struct regulator_bulk_data *supplies;
+	struct regulator_bulk_data supplies[3];
+	int num_supplies;
 
 	enum visionox_color_profile profile;
 	bool enabled;
 };
 
-static const struct regulator_bulk_data visionox_vtdr6110_supplies[] = {
-	{ .supply = "vddio" },
-	{ .supply = "vci" },
-	{ .supply = "vdd" },
+static const char * const visionox_vtdr6110_supply_names[] = {
+	"vddio",
+	"vci",
+	"vdd",
 };
+
+static int visionox_vtdr6110_init_supplies(struct device *dev,
+					 struct visionox_vtdr6110 *ctx)
+{
+	int i;
+
+	ctx->num_supplies = 0;
+	for (i = 0; i < ARRAY_SIZE(visionox_vtdr6110_supply_names); i++) {
+		struct regulator *reg;
+
+		reg = devm_regulator_get_optional(dev,
+						  visionox_vtdr6110_supply_names[i]);
+		if (IS_ERR(reg)) {
+			if (PTR_ERR(reg) == -ENODEV)
+				continue;
+			return PTR_ERR(reg);
+		}
+
+		ctx->supplies[ctx->num_supplies].supply =
+			visionox_vtdr6110_supply_names[i];
+		ctx->supplies[ctx->num_supplies].consumer = reg;
+		ctx->num_supplies++;
+	}
+
+	return 0;
+}
+
+static int visionox_vtdr6110_regulator_enable(struct visionox_vtdr6110 *ctx)
+{
+	if (!ctx->num_supplies)
+		return 0;
+
+	return regulator_bulk_enable(ctx->num_supplies, ctx->supplies);
+}
+
+static int visionox_vtdr6110_regulator_disable(struct visionox_vtdr6110 *ctx)
+{
+	if (!ctx->num_supplies)
+		return 0;
+
+	return regulator_bulk_disable(ctx->num_supplies, ctx->supplies);
+}
 
 static inline struct visionox_vtdr6110 *to_visionox_vtdr6110(struct drm_panel *panel)
 {
@@ -508,20 +551,13 @@ static ssize_t pibrick_display_enable_store(struct device *dev,
 			     size_t count)
 {
 	struct visionox_vtdr6110 *ctx = dev_get_drvdata(dev);
+
 	if (sysfs_streq(buf, "on") || sysfs_streq(buf, "1")) {
-
-		if (!ctx->enabled) {
-    		drm_panel_enable(&ctx->panel);
-			ctx->enabled = true;
-		}
-
+		if (!ctx->enabled)
+			drm_panel_enable(&ctx->panel);
 	} else if (sysfs_streq(buf, "off") || sysfs_streq(buf, "0")) {
-
-		if (ctx->enabled) {
+		if (ctx->enabled)
 			drm_panel_disable(&ctx->panel);
-			ctx->enabled = false;
-		}
-
 	} else {
 		return -EINVAL;
 	}
@@ -1103,8 +1139,7 @@ static int visionox_vtdr6110_prepare(struct drm_panel *panel)
 	struct visionox_vtdr6110 *ctx = to_visionox_vtdr6110(panel);
 	int ret;
 
-	ret = regulator_bulk_enable(ARRAY_SIZE(visionox_vtdr6110_supplies),
-				    ctx->supplies);
+	ret = visionox_vtdr6110_regulator_enable(ctx);
 	if (ret < 0)
 		return ret;
 
@@ -1113,8 +1148,7 @@ static int visionox_vtdr6110_prepare(struct drm_panel *panel)
 	ret = visionox_vtdr6110_on(ctx);
 	if (ret < 0) {
 		gpiod_set_value_cansleep(ctx->reset_gpio, 1);
-		regulator_bulk_disable(ARRAY_SIZE(visionox_vtdr6110_supplies),
-				       ctx->supplies);
+		visionox_vtdr6110_regulator_disable(ctx);
 		return ret;
 	}
 
@@ -1157,10 +1191,7 @@ static int visionox_vtdr6110_unprepare(struct drm_panel *panel)
 	visionox_vtdr6110_off(ctx);
 	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
 
-	regulator_bulk_disable(ARRAY_SIZE(visionox_vtdr6110_supplies),
-			       ctx->supplies);
-
-	return 0;
+	return visionox_vtdr6110_regulator_disable(ctx);
 }
 
 static void visionox_vtdr6110_shutdown(struct mipi_dsi_device *dsi)
@@ -1268,21 +1299,13 @@ static int visionox_vtdr6110_probe(struct mipi_dsi_device *dsi)
 	struct visionox_vtdr6110 *ctx;
 	int ret;
 
-	// New Linux Kernel Allocation
-	// ctx = devm_drm_panel_alloc(dev, struct visionox_vtdr6110, panel,
-	// 			   &visionox_vtdr6110_panel_funcs,
-	// 			   DRM_MODE_CONNECTOR_DSI);
-	// if (IS_ERR(ctx))
-	// 	return PTR_ERR(ctx);
+	ctx = devm_drm_panel_alloc(dev, struct visionox_vtdr6110, panel,
+				   &visionox_vtdr6110_panel_funcs,
+				   DRM_MODE_CONNECTOR_DSI);
+	if (IS_ERR(ctx))
+		return PTR_ERR(ctx);
 
-	ctx = devm_kzalloc(dev, sizeof(*ctx), GFP_KERNEL);
-	if (!ctx)
-		return -ENOMEM;
-
-	ret = devm_regulator_bulk_get_const(&dsi->dev,
-					    ARRAY_SIZE(visionox_vtdr6110_supplies),
-					    visionox_vtdr6110_supplies,
-					    &ctx->supplies);
+	ret = visionox_vtdr6110_init_supplies(dev, ctx);
 	if (ret < 0)
 		return ret;
 
@@ -1291,11 +1314,10 @@ static int visionox_vtdr6110_probe(struct mipi_dsi_device *dsi)
 		return dev_err_probe(dev, PTR_ERR(ctx->reset_gpio),
 				     "Failed to get reset-gpios\n");
 
-	drm_panel_init(&ctx->panel, &dsi->dev, &visionox_vtdr6110_panel_funcs,
-		       DRM_MODE_CONNECTOR_DSI);
-
 	ctx->dsi = dsi;
 	mipi_dsi_set_drvdata(dsi, ctx);
+	dev_set_drvdata(dev, ctx);
+	ctx->profile = VISIONOX_PROFILE_NATURAL;
 
 	/* DSI Configuration */
 	dsi->lanes = 4;
@@ -1373,5 +1395,5 @@ static struct mipi_dsi_driver visionox_vtdr6110_driver = {
 module_mipi_dsi_driver(visionox_vtdr6110_driver);
 
 MODULE_AUTHOR("me@amarullz.com");
-MODULE_DESCRIPTION("piBrick Amoled and XGA Panel Driver");
+MODULE_DESCRIPTION("piBrick 5 inch AMOLED panel (1080x1240 @ 90/60 Hz) for Raspberry Pi 5 DSI1");
 MODULE_LICENSE("GPL");

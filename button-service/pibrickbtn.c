@@ -18,11 +18,19 @@
 #define IDENTITY_SAMPLES	3
 #define GPIO_INIT_RETRIES	15
 #define GPIO_INIT_RETRY_MS	200
+#define GPIO_CONF_PATH		"/etc/pibrick/gpio.conf"
 
-#define PRESS_CHIP_PATH		"/dev/gpiochip0"
-#define PRESS_LINE_OFFSET	23
-#define SELECT_CHIP_PATH	"/dev/gpiochip10"
-#define SELECT_LINE_OFFSET	20
+#define PRESS_CHIP_PATH_DEFAULT		"/dev/gpiochip0"
+#define PRESS_LINE_OFFSET_DEFAULT	23
+#define SELECT_CHIP_PATH_DEFAULT	"/dev/gpiochip10"
+#define SELECT_LINE_OFFSET_DEFAULT	20
+
+static const char *press_chip_path = PRESS_CHIP_PATH_DEFAULT;
+static unsigned int press_line_offset = PRESS_LINE_OFFSET_DEFAULT;
+static const char *select_chip_path = SELECT_CHIP_PATH_DEFAULT;
+static unsigned int select_line_offset = SELECT_LINE_OFFSET_DEFAULT;
+static char press_chip_path_buf[128];
+static char select_chip_path_buf[128];
 
 static int uk_fd = -1;
 static int power_key_held = 0;
@@ -43,6 +51,52 @@ static inline long monotonic_ms(void)
 		return 0;
 
 	return (long)(now.tv_sec * 1000 + now.tv_nsec / 1000000);
+}
+
+static void load_gpio_config(void)
+{
+	FILE *fp;
+	char line[256];
+	char key[64];
+	char value[192];
+
+	strncpy(press_chip_path_buf, PRESS_CHIP_PATH_DEFAULT,
+		sizeof(press_chip_path_buf) - 1);
+	press_chip_path_buf[sizeof(press_chip_path_buf) - 1] = '\0';
+	strncpy(select_chip_path_buf, SELECT_CHIP_PATH_DEFAULT,
+		sizeof(select_chip_path_buf) - 1);
+	select_chip_path_buf[sizeof(select_chip_path_buf) - 1] = '\0';
+	press_chip_path = press_chip_path_buf;
+	select_chip_path = select_chip_path_buf;
+	press_line_offset = PRESS_LINE_OFFSET_DEFAULT;
+	select_line_offset = SELECT_LINE_OFFSET_DEFAULT;
+
+	fp = fopen(GPIO_CONF_PATH, "r");
+	if (!fp)
+		return;
+
+	while (fgets(line, sizeof(line), fp)) {
+		if (line[0] == '#' || line[0] == '\n')
+			continue;
+		if (sscanf(line, " %63[^=]= %191[^\n]", key, value) != 2)
+			continue;
+
+		if (strcmp(key, "PRESS_CHIP") == 0) {
+			strncpy(press_chip_path_buf, value,
+				sizeof(press_chip_path_buf) - 1);
+			press_chip_path_buf[sizeof(press_chip_path_buf) - 1] = '\0';
+		} else if (strcmp(key, "PRESS_OFFSET") == 0) {
+			press_line_offset = (unsigned int)strtoul(value, NULL, 0);
+		} else if (strcmp(key, "SELECT_CHIP") == 0) {
+			strncpy(select_chip_path_buf, value,
+				sizeof(select_chip_path_buf) - 1);
+			select_chip_path_buf[sizeof(select_chip_path_buf) - 1] = '\0';
+		} else if (strcmp(key, "SELECT_OFFSET") == 0) {
+			select_line_offset = (unsigned int)strtoul(value, NULL, 0);
+		}
+	}
+
+	fclose(fp);
 }
 
 static struct gpiod_line_request *request_input_line(struct gpiod_chip *chip,
@@ -123,22 +177,22 @@ static void gpio_release_partial(void)
 
 static int gpio_init_once(void)
 {
-	press_chip = gpiod_chip_open(PRESS_CHIP_PATH);
+	press_chip = gpiod_chip_open(press_chip_path);
 	if (!press_chip)
 		return -1;
 
-	select_chip = gpiod_chip_open(SELECT_CHIP_PATH);
+	select_chip = gpiod_chip_open(select_chip_path);
 	if (!select_chip) {
 		gpiod_chip_close(press_chip);
 		press_chip = NULL;
 		return -1;
 	}
 
-	press_request = request_input_line(press_chip, PRESS_LINE_OFFSET, 1);
+	press_request = request_input_line(press_chip, press_line_offset, 1);
 	if (!press_request)
 		goto fail;
 
-	select_request = request_input_line(select_chip, SELECT_LINE_OFFSET, 0);
+	select_request = request_input_line(select_chip, select_line_offset, 0);
 	if (!select_request)
 		goto fail;
 
@@ -202,7 +256,7 @@ static int gpio_press_read(void)
 {
 	enum gpiod_line_value value;
 
-	value = gpiod_line_request_get_value(press_request, PRESS_LINE_OFFSET);
+	value = gpiod_line_request_get_value(press_request, press_line_offset);
 	if (value == GPIOD_LINE_VALUE_ERROR)
 		return -1;
 	return (value == GPIOD_LINE_VALUE_ACTIVE) ? 1 : 0;
@@ -212,7 +266,7 @@ static int gpio_select_read(void)
 {
 	enum gpiod_line_value value;
 
-	value = gpiod_line_request_get_value(select_request, SELECT_LINE_OFFSET);
+	value = gpiod_line_request_get_value(select_request, select_line_offset);
 	if (value == GPIOD_LINE_VALUE_ERROR)
 		return -1;
 	return (value == GPIOD_LINE_VALUE_ACTIVE) ? 1 : 0;
@@ -421,8 +475,12 @@ static void handle_one_gesture(void)
 		if (!long_done &&
 		    monotonic_ms() - press_start_ms >= LONG_PRESS_MS) {
 			long_done = 1;
-			if (is_power)
+			if (is_power) {
 				power_key_long_press_down();
+			} else {
+				syslog(LOG_INFO, "user long -> brightness up");
+				run_script_async("/etc/pibrick/user-long.sh");
+			}
 		}
 
 		usleep(POLL_US);
@@ -434,6 +492,9 @@ static void handle_one_gesture(void)
 		power_key_long_press_up();
 		return;
 	}
+
+	if (long_done && !is_power)
+		return;
 
 	if (!long_done && held_ms < LONG_PRESS_MS) {
 		if (is_power) {
@@ -498,14 +559,17 @@ static void gpio_test_loop(void)
 int main(int argc, char *argv[])
 {
 	openlog("pibrickbtn", LOG_PID, LOG_DAEMON);
+	load_gpio_config();
 
 	if (gpio_init() < 0) {
 		fprintf(stderr,
-			"pibrickbtn: GPIO init failed (%s) — unload gpio_keys and retry\n",
-			strerror(errno));
+			"pibrickbtn: GPIO init failed (%s:%u / %s:%u) — unload gpio_keys and retry\n",
+			press_chip_path, press_line_offset,
+			select_chip_path, select_line_offset);
 		syslog(LOG_ERR,
-		       "GPIO init failed (%s); gpio_keys may still own gpiochip0:23 / gpiochip10:20",
-		       strerror(errno));
+		       "GPIO init failed (%s:%u / %s:%u); gpio_keys may still own the lines",
+		       press_chip_path, press_line_offset,
+		       select_chip_path, select_line_offset);
 		return 1;
 	}
 

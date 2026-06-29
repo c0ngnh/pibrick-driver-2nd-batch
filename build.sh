@@ -1,6 +1,7 @@
 #!/bin/bash
 set -euo pipefail
-cd "$(dirname "$0")"
+ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$ROOT_DIR"
 
 force_rebuild=0
 skip_reboot=0
@@ -19,9 +20,9 @@ else
 fi
 
 case "$PANEL" in
-9203|9202|548) ;;
+9203|9202|548|5inch) ;;
 *)
-	echo "ERROR: invalid PANEL=$PANEL (expected 9203, 9202, or 548)" >&2
+	echo "ERROR: invalid PANEL=$PANEL (expected 9203, 9202, 548, or 5inch)" >&2
 	exit 1
 	;;
 esac
@@ -57,12 +58,23 @@ rm -f panel-pibrick.c
 make -j4 amoled "PANEL=${PANEL}"
 make install "PANEL=${PANEL}"
 
-cd hyn_driver_release_qm
-make clean
-make -j4 touch
-make install
+if [ "$PANEL" = 548 ]; then
+	cd fts
+	make clean
+	make -j4 touch
+	make install
+	cd ../hyn_driver_release_qm
+	make remove 2>/dev/null || true
+else
+	cd hyn_driver_release_qm
+	make clean
+	make -j4 touch
+	make install
+	cd ../fts
+	make remove 2>/dev/null || true
+fi
 
-cd ../battery
+cd "$ROOT_DIR/battery"
 make clean
 make
 make install

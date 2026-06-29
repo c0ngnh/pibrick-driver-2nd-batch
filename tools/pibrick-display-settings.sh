@@ -16,9 +16,18 @@ if [ -r /etc/pibrick.panel ]; then
 fi
 
 case "$PIBRICK_PANEL" in
-9202|548)
+548)
+	PANEL_HEIGHT=1920
 	REFRESH_RATES=(60)
 	PANEL_MODES_LABEL="60 @ ${PANEL_MODE}"
+	;;
+9202)
+	REFRESH_RATES=(60)
+	PANEL_MODES_LABEL="60 @ ${PANEL_MODE}"
+	;;
+5inch)
+	REFRESH_RATES=(90 60)
+	PANEL_MODES_LABEL="90 / 60 @ ${PANEL_MODE}"
 	;;
 *)
 	PANEL_MODES_LABEL="90 / 60 @ ${PANEL_MODE}"
@@ -595,7 +604,7 @@ choose_refresh_rate() {
 	echo
 
 	if [ "${#REFRESH_RATES[@]}" -eq 1 ]; then
-		echo "  (9202/548 panel: 60 Hz only)"
+		echo "  (5.48 inch panel: 60 Hz only)"
 		return 0
 	fi
 

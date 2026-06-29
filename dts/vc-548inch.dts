@@ -116,6 +116,7 @@
 			bq25890: bq25890@6a {
 				compatible = "ti,bq25890";
 				reg = <0x6a>;
+				linux,skip-reset;
 				
 				ti,battery-regulation-voltage = <4100000>;
 				ti,charge-current = <4000000>;
