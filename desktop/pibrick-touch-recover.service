@@ -4,7 +4,7 @@ After=display-manager.service
 
 [Service]
 Type=oneshot
-ExecStartPre=/bin/sleep 6
+ExecStartPre=/bin/sleep 10
 ExecStart=/usr/local/bin/pibrick-touch-reset
 RemainAfterExit=yes
 
