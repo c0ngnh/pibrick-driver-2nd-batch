@@ -42,6 +42,10 @@ write_brightness() {
 	[ "$value" -lt 1 ] && value=1
 	[ "$value" -gt "$max" ] && value="$max"
 	printf '%s' "$value" >"$BACKLIGHT"
+
+	if [ -x /usr/local/bin/pibrick-persist-display-prefs.sh ]; then
+		/usr/local/bin/pibrick-persist-display-prefs.sh save-backlight 2>/dev/null || true
+	fi
 }
 
 adjust_brightness() {

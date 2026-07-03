@@ -1,0 +1,12 @@
+[Unit]
+Description=Recover piBrick touch after panel power-up
+After=display-manager.service
+
+[Service]
+Type=oneshot
+ExecStartPre=/bin/sleep 6
+ExecStart=/usr/local/bin/pibrick-touch-reset
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

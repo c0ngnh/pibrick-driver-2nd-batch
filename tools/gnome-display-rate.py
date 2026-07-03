@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Read/set refresh rate via org.gnome.Mutter.DisplayConfig (GNOME Wayland)."""
 
+import os
 import subprocess
 import sys
 
@@ -290,6 +291,10 @@ def cmd_set(proxy, Gio, GLib, refresh_hz):
     if not ok:
         print(f"ApplyMonitorsConfig failed: {error}", file=sys.stderr)
         return 1
+
+    persist = "/usr/local/bin/pibrick-persist-display-prefs.sh"
+    if os.path.isfile(persist) and os.access(persist, os.X_OK):
+        subprocess.run([persist, "save-refresh", str(int(refresh_hz))], check=False)
 
     print(round(float(refresh_hz)))
     return 0

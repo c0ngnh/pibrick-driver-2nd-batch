@@ -14,6 +14,10 @@ clean:
 install: remove
 	install -m 644 -D $(MODULE_NAME) $(MODULE_INSTALL_DIR)
 	depmod -a
+	@if command -v update-initramfs >/dev/null 2>&1; then \
+		echo "Updating initramfs (bq25890_battery.ko)..."; \
+		update-initramfs -u -k all || update-initramfs -u || true; \
+	fi
 
 remove:
 	rm -rf $(MODULE_INSTALL_DIR)/$(MODULE_NAME)

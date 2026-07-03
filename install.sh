@@ -86,10 +86,12 @@ regenerate_initramfs_if_needed() {
 
 SELECTED_PANEL="$(choose_panel)"
 echo "$SELECTED_PANEL" > "$PANEL_CONFIG"
-case "$SELECTED_PANEL" in
-9203|5inch) echo 90 > /etc/pibrick.display-refresh ;;
-*)        echo 60 > /etc/pibrick.display-refresh ;;
-esac
+if [ ! -f /etc/pibrick.display-refresh ]; then
+	case "$SELECTED_PANEL" in
+	9203|5inch) echo 90 > /etc/pibrick.display-refresh ;;
+	*)        echo 60 > /etc/pibrick.display-refresh ;;
+	esac
+fi
 echo "Selected panel: $(panel_label "$SELECTED_PANEL")"
 echo "Default refresh: $(tr -d '[:space:]' < /etc/pibrick.display-refresh) Hz (saved to /etc/pibrick.display-refresh)"
 echo "Saved panel to $PANEL_CONFIG"
@@ -103,6 +105,7 @@ cp /usr/lib/pibrick/pibrick.service /etc/systemd/system/
 chmod +x /usr/lib/pibrick/build.sh
 systemctl daemon-reload
 systemctl enable pibrick.service
+install -m 644 battery/pibrick-battery.conf /etc/modprobe.d/pibrick-battery.conf
 cd /usr/lib/pibrick/
 PANEL="$SELECTED_PANEL" /usr/lib/pibrick/build.sh --force --no-reboot
 bash /usr/lib/pibrick/desktop/setup-desktop.sh

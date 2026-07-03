@@ -1,0 +1,7 @@
+[Desktop Entry]
+Type=Application
+Name=piBrick disable battery auto-shutdown
+Comment=Prevent KDE PowerDevil from shutting down on false low battery
+Exec=/usr/local/bin/pibrick-disable-battery-shutdown
+X-GNOME-Autostart-enabled=true
+NoDisplay=true

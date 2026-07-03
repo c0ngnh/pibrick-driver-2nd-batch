@@ -10,6 +10,23 @@ PANEL_MODE="${PANEL_WIDTH}x${PANEL_HEIGHT}"
 COLOR_PROFILES=(natural vivid srgb warm cool night soft)
 REFRESH_RATES=(90 60)
 
+REFRESH_FILE=/etc/pibrick.display-refresh
+PERSIST_PREFS=/usr/local/bin/pibrick-persist-display-prefs.sh
+
+save_refresh_preference() {
+	local refresh="$1"
+
+	if [ -x "$PERSIST_PREFS" ]; then
+		"$PERSIST_PREFS" save-refresh "$refresh"
+		return
+	fi
+
+	if [ -w "$REFRESH_FILE" ]; then
+		printf '%s\n' "$refresh" >"$REFRESH_FILE"
+	else
+		printf '%s\n' "$refresh" | sudo tee "$REFRESH_FILE" >/dev/null
+	fi
+}
 PIBRICK_PANEL="9203"
 if [ -r /etc/pibrick.panel ]; then
 	PIBRICK_PANEL=$(tr -d '[:space:]' </etc/pibrick.panel)
@@ -464,7 +481,7 @@ set_refresh_rate() {
 			return 1
 		fi
 		;;
-	xrandr)
+		xrandr)
 		if ! xrandr --output "$display_output" --mode "$panel_mode" --rate "$refresh"; then
 			echo "xrandr failed for $display_output @ ${panel_mode} ${refresh} Hz." >&2
 			refresh_rate_help
@@ -472,6 +489,8 @@ set_refresh_rate() {
 		fi
 		;;
 	esac
+
+	save_refresh_preference "$refresh"
 }
 
 profile_label() {

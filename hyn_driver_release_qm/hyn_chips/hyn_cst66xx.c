@@ -59,7 +59,10 @@ static int cst66xx_init(struct hyn_ts_data* ts_data)
     u32 read_part_no,module_id;
     HYN_ENTER();
     hyn_66xxdata = ts_data;
-    
+
+    /* Touch shares power with the panel; wait for DSI bring-up on cold boot. */
+    msleep(2000);
+
     ret = cst66xx_enter_boot();
     if(ret){
         HYN_ERROR("cst66xx_enter_boot failed");

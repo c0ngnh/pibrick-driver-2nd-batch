@@ -137,11 +137,21 @@ struct bq25890_device {
 	struct bq25890_init_data init_data;
 	struct bq25890_state state;
 
-	int capacity_cache;
+	/* --- Software fuel gauge (no coulomb-counter IC on PocketCM5) --- */
+	int capacity_cache;		/* displayed SOC 0-100 */
 	bool capacity_valid;
 	bool last_ext_pwr;
 	unsigned long capacity_jiffies;
-	unsigned long unplug_relax_jiffies;
+
+	long batv_smoothed_uv;		/* load-filtered terminal voltage */
+	unsigned long batv_smoothed_jiffies;
+	unsigned long batv_load_glitch_until;
+	unsigned long batv_unplug_until;	/* post-charge relax: SOC may only fall */
+
+	/* Coulomb counting while charging (ICHGR from PMIC ADC). */
+	long chg_remain_uah;		/* estimated remain at plug-in */
+	long chg_added_uah;
+	unsigned long chg_last_jiffies;
 
 	/* Coalesce ADC conversions / chip-state reads from bursty sysfs polls. */
 	unsigned long adc_jiffies;
@@ -149,48 +159,43 @@ struct bq25890_device {
 	int notified_capacity;
 	int notified_status;
 
-	/*
-	 * Last reliable on-battery % (updated when terminal voltage is trusted).
-	 * Used to seed charge-session integration on plug-in.
-	 */
-	int last_battery_pct;
-
-	/* Time-weighted average of BATV (µV) to reject CPU-load voltage sag. */
-	long batv_smoothed_uv;
-	unsigned long batv_smoothed_jiffies;
-
-	/* Charge session: integrate ICHGR from % at plug-in (voltage is unreliable while charging). */
-	bool charge_session_active;
-	int charge_session_pct;
-	long charge_added_uah;
-	unsigned long charge_last_jiffies;
-
 	struct mutex lock; /* protect state data */
 };
 
 #define BQ25890_CHARGE_CURRENT_MIN_UA	100000
 #define BQ25890_VBUS_MIN_UV		4000000
 #define BQ25890_CAPACITY_BOOT_CALIB_DELAY	(30 * HZ)
+#define BQ25890_CAPACITY_REFRESH_INTERVAL	(30 * HZ)
+#define BQ25890_ADC_MIN_INTERVAL		(1 * HZ)
+
 /*
- * No discharge-current sense on this hardware, so assume a typical average.
- * Measured runtime is ~3.5-4.0 h on 5000 mAh => ~1.30 A average. This also
- * drives UPower's "time remaining" (it computes charge_now / current_now).
- * Override at load time if your pack or workload differs, e.g.:
- *   modprobe bq25890_battery discharge_current_ua=1100000 charge_full_uah=5000000 batt_ir_mohm=200
+ * Fuel-gauge tuning (PocketCM5 / BQ25895, 5000 mAh 1S LiPo @ 4.176 V full).
+ * No pack-side current sense: discharge current is unknown; SOC on battery
+ * comes from rested OCV.  Charge SOC integrates measured ICHGR.
  */
-static int discharge_current_ua = 1300000;
+#define BQ25890_FG_V_TAU_SEC			20
+#define BQ25890_FG_UNPLUG_RELAX_SEC		90
+#define BQ25890_FG_LOAD_GLITCH_SEC		5
+#define BQ25890_FG_LOAD_MAX_DROP_PCT_MIN	2
+#define BQ25890_FG_CHG_POLAR_UV			50000
+#define BQ25890_FG_CHG_INTEGRATE_MAX_SEC	60
+#define BQ25890_BATV_ADC_FLOOR_UV		2304000
+#define BQ25890_BATV_ADC_FLOOR_MAX_UV		2344000
+#define BQ25890_BATV_REST_MIN_UV		3150000
+
+static int discharge_current_ua = 900000;
 module_param(discharge_current_ua, int, 0644);
 MODULE_PARM_DESC(discharge_current_ua,
-		 "Assumed average discharge current (uA) for time-to-empty");
+		 "Assumed average discharge (uA) for time-to-empty only");
 
 static int charge_full_uah = 5000000;
 module_param(charge_full_uah, int, 0644);
-MODULE_PARM_DESC(charge_full_uah, "Battery capacity (uAh) for charge_now/full");
+MODULE_PARM_DESC(charge_full_uah, "Battery capacity (uAh)");
 
-static int batt_ir_mohm = 220;
+static int batt_ir_mohm = 180;
 module_param(batt_ir_mohm, int, 0644);
 MODULE_PARM_DESC(batt_ir_mohm,
-		 "Cell + wiring IR (mOhm) for charge-time OCV estimate");
+		 "Pack IR (mOhm) for charge-time OCV estimate only");
 
 static int bq25890_full_runtime_sec(void)
 {
@@ -199,35 +204,6 @@ static int bq25890_full_runtime_sec(void)
 
 	return (int)((long)charge_full_uah * 3600L / discharge_current_ua);
 }
-
-#define BQ25890_CAPACITY_REFRESH_INTERVAL	(30 * HZ)
-/*
- * After unplug the terminal relaxes toward true OCV in ~1 min on this pack.
- * Hold % steady (block upward moves) during this window so the indicator does
- * not chase the decaying post-charge ghost; then allow correction to rested V.
- */
-#define BQ25890_UNPLUG_RELAX_INTERVAL		(60 * HZ)
-/*
- * Charge-time OCV estimate: V_ocv ~= V_term - I_charge * R_internal - polar.
- * R_internal lumps cell + wiring impedance; the polarization term is the slow
- * over-voltage that remains as current tapers. Tuned on pocketcm5 (~1.6 A @
- * 4.14 V terminal -> rested ~3.82 V after unplug).
- */
-#define BQ25890_CHARGE_POLARIZATION_UV		50000
-#define BQ25890_CHARGE_INTEGRATE_MAX_SEC	60
-/* Terminal above this while charging cannot mean a near-empty cell. */
-#define BQ25890_CHARGE_HIGH_TERM_UV		4000000
-#define BQ25890_CHARGE_SEED_FLOOR_PCT		40
-#define BQ25890_CHARGE_SEED_STALE_GAP		25
-#define BQ25890_CHARGE_SEED_COMP_MARGIN		15
-/* BATV exponential averaging time constant (seconds) — smooths load sag. */
-#define BQ25890_BATV_SMOOTH_TAU_SEC		15
-/* On battery, allow % to rise only if it is at least this far above cache
- * (a real stale-low correction); smaller rises are load recovery, ignored. */
-#define BQ25890_DISCHARGE_RECOVER_GAP		10
-/* Coalesce ADC conversions: at most one per this interval, however bursty
- * the sysfs reads are (UPower reads several ADC properties per poll cycle). */
-#define BQ25890_ADC_MIN_INTERVAL		(1 * HZ)
 
 static DEFINE_IDR(bq25890_id);
 static DEFINE_MUTEX(bq25890_id_mutex);
@@ -587,6 +563,22 @@ static int bq25890_calc_lipo_percentage(int voltage_uv)
 	return 100;
 }
 
+static bool bq25890_batv_is_adc_floor(int uv)
+{
+	return uv >= BQ25890_BATV_ADC_FLOOR_UV &&
+	       uv <= BQ25890_BATV_ADC_FLOOR_MAX_UV;
+}
+
+/*
+ * Under heavy CPU/display load the BATV ADC often pegs at 2.304 V even though
+ * the cell is still well above empty. Treat that as a bad sample, not a real
+ * collapse — otherwise userspace (e.g. KDE PowerDevil) sees 0 % and shuts down.
+ */
+static bool bq25890_batv_is_load_glitch(int raw, long smoothed_uv)
+{
+	return bq25890_batv_is_adc_floor(raw) && smoothed_uv > 2800000;
+}
+
 static int bq25890_get_batv_uv(struct bq25890_device *bq)
 {
 	int ret = bq25890_field_read(bq, F_BATV);
@@ -596,13 +588,6 @@ static int bq25890_get_batv_uv(struct bq25890_device *bq)
 
 	/* converted_val = 2.304V + ADC_val * 20mV (table 10.3.15) */
 	return 2304000 + ret * 20000;
-}
-
-static int bq25890_get_batv(struct power_supply *psy)
-{
-	struct bq25890_device *bq = power_supply_get_drvdata(psy);
-
-	return bq25890_get_batv_uv(bq);
 }
 
 static int bq25890_get_charge_current_ua(struct bq25890_device *bq)
@@ -664,53 +649,40 @@ static long bq25890_get_battery_current_ua(struct bq25890_device *bq,
 					   const struct bq25890_state *state)
 {
 	int ichgr;
-	bool ext_pwr;
 
 	ichgr = bq25890_get_charge_current_ua(bq);
 	if (ichgr < 0)
 		ichgr = 0;
 
-	ext_pwr = bq25890_has_external_power(bq, state);
-
-	if (ext_pwr)
+	if (bq25890_has_external_power(bq, state) &&
+	    bq25890_is_actively_charging(bq, state))
 		return ichgr;
 
-	if (ichgr > 0)
-		return -ichgr;
-
-	return -discharge_current_ua;
+	return 0;
 }
 
-static int bq25890_read_capacity_voltage(struct bq25890_device *bq,
-					 const struct bq25890_state *state,
-					 bool compensate_charge)
+static int bq25890_fg_charge_ocv_uv(struct bq25890_device *bq,
+				    const struct bq25890_state *state,
+				    int v_term)
 {
-	int voltage = bq25890_get_batv_uv(bq);
+	int ichgr;
+	long ir_drop_uv;
 
-	if (voltage < 0)
-		return voltage;
+	if (v_term < 0)
+		return v_term;
 
-	if (state->chrg_status == STATUS_TERMINATION_DONE)
-		return 100;
+	if (!bq25890_has_external_power(bq, state))
+		return v_term;
 
-	/*
-	 * While charging the terminal voltage is well above the cell's true OCV.
-	 * Estimate OCV with a current-aware model so a fixed offset doesn't
-	 * over-/under-correct: higher charge current => larger terminal rise.
-	 */
-	if (compensate_charge && bq25890_has_external_power(bq, state)) {
-		int ichgr = bq25890_get_charge_current_ua(bq);
-		long ir_drop_uv;
+	ichgr = bq25890_get_charge_current_ua(bq);
+	if (ichgr < 0)
+		ichgr = 0;
 
-		if (ichgr < 0)
-			ichgr = 0;
+	ir_drop_uv = (long)ichgr * batt_ir_mohm / 1000;
+	v_term -= (int)ir_drop_uv;
+	v_term -= BQ25890_FG_CHG_POLAR_UV;
 
-		ir_drop_uv = (long)ichgr * batt_ir_mohm / 1000;
-		voltage -= (int)ir_drop_uv;
-		voltage -= BQ25890_CHARGE_POLARIZATION_UV;
-	}
-
-	return bq25890_calc_lipo_percentage(voltage);
+	return v_term;
 }
 
 static int bq25890_get_status(struct bq25890_device *bq,
@@ -726,98 +698,13 @@ static int bq25890_get_status(struct bq25890_device *bq,
 	if (state->chrg_status == STATUS_TERMINATION_DONE)
 		return POWER_SUPPLY_STATUS_FULL;
 
-	if (bq->capacity_valid && bq->capacity_cache >= 95)
-		return POWER_SUPPLY_STATUS_FULL;
-
 	return POWER_SUPPLY_STATUS_NOT_CHARGING;
 }
 
-static void bq25890_charge_session_start(struct bq25890_device *bq,
-					 const struct bq25890_state *state,
-					 int seed_pct)
+static bool bq25890_fg_under_load(struct bq25890_device *bq)
 {
-	int comp_pct;
-
-	comp_pct = bq25890_read_capacity_voltage(bq, state, true);
-	if (comp_pct < 0)
-		comp_pct = 50;
-
-	if (seed_pct < 0)
-		seed_pct = comp_pct;
-
-	/*
-	 * Trust the last on-battery reading over a noisy compensated estimate,
-	 * unless the seed is clearly stale (boot glitch / stuck cache).
-	 */
-	if (seed_pct + BQ25890_CHARGE_SEED_STALE_GAP < comp_pct)
-		seed_pct = comp_pct - BQ25890_CHARGE_SEED_COMP_MARGIN;
-
-	/*
-	 * High terminal voltage while charging rules out a single-digit seed
-	 * (IR model can still under-shoot at very high ICHGR).
-	 */
-	{
-		int v_term = bq25890_get_batv_uv(bq);
-
-		if (v_term > BQ25890_CHARGE_HIGH_TERM_UV) {
-			int floor_pct = comp_pct - BQ25890_CHARGE_SEED_COMP_MARGIN;
-
-			if (floor_pct < BQ25890_CHARGE_SEED_FLOOR_PCT)
-				floor_pct = BQ25890_CHARGE_SEED_FLOOR_PCT;
-			if (seed_pct < floor_pct)
-				seed_pct = floor_pct;
-		}
-	}
-
-	bq->charge_session_active = true;
-	bq->charge_session_pct = clamp(seed_pct, 0, 99);
-	bq->charge_added_uah = 0;
-	bq->charge_last_jiffies = jiffies;
-}
-
-static void bq25890_charge_session_stop(struct bq25890_device *bq)
-{
-	bq->charge_session_active = false;
-	bq->charge_session_pct = 0;
-	bq->charge_added_uah = 0;
-	bq->charge_last_jiffies = 0;
-}
-
-static void bq25890_charge_integrate(struct bq25890_device *bq)
-{
-	unsigned long now = jiffies;
-	unsigned long delta_jiffies;
-	long delta_sec, ichgr, delta_uah;
-
-	if (!bq->charge_session_active)
-		return;
-
-	delta_jiffies = now - bq->charge_last_jiffies;
-	if (delta_jiffies < HZ)
-		return;
-
-	delta_sec = delta_jiffies / HZ;
-	if (delta_sec > BQ25890_CHARGE_INTEGRATE_MAX_SEC)
-		delta_sec = BQ25890_CHARGE_INTEGRATE_MAX_SEC;
-
-	ichgr = bq25890_get_charge_current_ua(bq);
-	if (ichgr < 0)
-		ichgr = 0;
-
-	delta_uah = ichgr * delta_sec / 3600;
-	if (delta_uah > 0)
-		bq->charge_added_uah += delta_uah;
-
-	bq->charge_last_jiffies = now;
-}
-
-static int bq25890_charge_session_percent(struct bq25890_device *bq)
-{
-	long pct;
-
-	pct = bq->charge_session_pct +
-	      (bq->charge_added_uah * 100L) / charge_full_uah;
-	return (int)clamp(pct, (long)bq->charge_session_pct, 99L);
+	return bq->batv_load_glitch_until &&
+	       time_before(jiffies, bq->batv_load_glitch_until);
 }
 
 static int bq25890_capacity_cached(struct bq25890_device *bq)
@@ -828,12 +715,6 @@ static int bq25890_capacity_cached(struct bq25890_device *bq)
 	return bq->capacity_cache;
 }
 
-/*
- * Time-weighted EWMA of terminal voltage. A single CPU spike sags BATV by
- * 100-200 mV; averaging over ~15 s rejects that without a fuel-gauge IC.
- * reseed=true snaps the average to the current reading (e.g. right after a
- * charge->battery transition where the previous trend is irrelevant).
- */
 static int bq25890_update_smoothed_batv(struct bq25890_device *bq, bool reseed)
 {
 	int raw = bq25890_get_batv_uv(bq);
@@ -844,147 +725,219 @@ static int bq25890_update_smoothed_batv(struct bq25890_device *bq, bool reseed)
 	if (raw < 0)
 		return raw;
 
+	if (bq25890_batv_is_adc_floor(raw)) {
+		bq->batv_load_glitch_until = now + BQ25890_FG_LOAD_GLITCH_SEC * HZ;
+		if (bq->batv_smoothed_uv > BQ25890_BATV_REST_MIN_UV)
+			return (int)bq->batv_smoothed_uv;
+	}
+
 	if (reseed || bq->batv_smoothed_uv <= 0) {
 		bq->batv_smoothed_uv = raw;
 		bq->batv_smoothed_jiffies = now;
 		return raw;
 	}
 
-	/*
-	 * BATV is only re-sampled about once per second (ADC coalescing), so a
-	 * sub-second re-read carries no new information — return the current
-	 * average instead of folding the same sample in twice.
-	 */
+	if (bq25890_batv_is_load_glitch(raw, bq->batv_smoothed_uv)) {
+		bq->batv_load_glitch_until = now + BQ25890_FG_LOAD_GLITCH_SEC * HZ;
+		return (int)bq->batv_smoothed_uv;
+	}
+
+	if (raw - (int)bq->batv_smoothed_uv > 350000) {
+		bq->batv_smoothed_uv = raw;
+		bq->batv_smoothed_jiffies = now;
+		return raw;
+	}
+
+	if ((int)bq->batv_smoothed_uv - raw > 350000 &&
+	    bq25890_batv_is_adc_floor(raw))
+		return (int)bq->batv_smoothed_uv;
+
 	dt_jiffies = now - bq->batv_smoothed_jiffies;
 	if (dt_jiffies < HZ)
 		return (int)bq->batv_smoothed_uv;
 
 	dt_sec = (long)(dt_jiffies / HZ);
-	if (dt_sec > BQ25890_BATV_SMOOTH_TAU_SEC)
-		dt_sec = BQ25890_BATV_SMOOTH_TAU_SEC;
+	if (dt_sec > BQ25890_FG_V_TAU_SEC)
+		dt_sec = BQ25890_FG_V_TAU_SEC;
 
-	/* alpha = dt / (tau + dt); smoothed += alpha * (raw - smoothed) */
 	bq->batv_smoothed_uv += (raw - bq->batv_smoothed_uv) * dt_sec /
-				(BQ25890_BATV_SMOOTH_TAU_SEC + dt_sec);
+				(BQ25890_FG_V_TAU_SEC + dt_sec);
 	bq->batv_smoothed_jiffies = now;
 
 	return (int)bq->batv_smoothed_uv;
 }
 
-static int bq25890_capacity_from_battery(struct bq25890_device *bq,
-					 const struct bq25890_state *state,
-					 bool just_unplugged)
+static void bq25890_fg_charge_reset(struct bq25890_device *bq)
 {
-	int voltage, raw;
-
-	voltage = bq25890_update_smoothed_batv(bq, just_unplugged);
-	if (voltage < 0)
-		return voltage;
-
-	if (state->chrg_status == STATUS_TERMINATION_DONE)
-		raw = 100;
-	else
-		raw = bq25890_calc_lipo_percentage(voltage);
-
-	if (just_unplugged)
-		bq->unplug_relax_jiffies = jiffies + BQ25890_UNPLUG_RELAX_INTERVAL;
-
-	/*
-	 * On battery, % must not climb (a discharging cell cannot gain charge):
-	 *  - during the post-unplug relax window the terminal V is still elevated
-	 *    and decaying, so block ALL upward moves and hold the (IR-seeded)
-	 *    value until the cell settles to its true OCV;
-	 *  - afterwards, ignore small upward drift from load recovery, but still
-	 *    allow a large jump up (a genuinely stale/low cached value).
-	 */
-	if (bq->capacity_valid && raw > bq->capacity_cache) {
-		bool relaxing = just_unplugged ||
-				(bq->unplug_relax_jiffies &&
-				 time_before(jiffies, bq->unplug_relax_jiffies));
-
-		if (relaxing)
-			raw = bq->capacity_cache;
-		else if (raw - bq->capacity_cache < BQ25890_DISCHARGE_RECOVER_GAP)
-			raw = bq->capacity_cache;
-	}
-
-	if (!bq->unplug_relax_jiffies ||
-	    !time_before(jiffies, bq->unplug_relax_jiffies))
-		bq->unplug_relax_jiffies = 0;
-
-	return clamp(raw, 0, 100);
+	bq->chg_remain_uah = -1;
+	bq->chg_added_uah = 0;
+	bq->chg_last_jiffies = 0;
 }
 
-static int bq25890_capacity_from_charger(struct bq25890_device *bq,
-					 const struct bq25890_state *state,
-					 bool just_plugged)
+static void bq25890_fg_charge_begin(struct bq25890_device *bq,
+				    const struct bq25890_state *state,
+				    int v_smooth)
 {
-	int raw, seed;
+	int seed_pct, ocv_pct, ocv_uv;
 
-	if (state->chrg_status == STATUS_TERMINATION_DONE) {
-		bq25890_charge_session_stop(bq);
-		return 100;
+	if (bq->capacity_valid)
+		seed_pct = bq->capacity_cache;
+	else
+		seed_pct = -1;
+
+	ocv_uv = bq25890_fg_charge_ocv_uv(bq, state, v_smooth);
+	if (ocv_uv < 0)
+		ocv_pct = 50;
+	else
+		ocv_pct = bq25890_calc_lipo_percentage(ocv_uv);
+
+	if (seed_pct < 0)
+		seed_pct = ocv_pct;
+	else if (seed_pct + 15 < ocv_pct)
+		seed_pct = ocv_pct - 10;
+
+	seed_pct = clamp(seed_pct, 0, 99);
+	bq->chg_remain_uah = (long)seed_pct * charge_full_uah / 100;
+	bq->chg_added_uah = 0;
+	bq->chg_last_jiffies = jiffies;
+}
+
+static void bq25890_fg_charge_integrate(struct bq25890_device *bq)
+{
+	unsigned long now = jiffies;
+	unsigned long delta_jiffies;
+	long delta_sec, ichgr, delta_uah;
+
+	if (bq->chg_remain_uah < 0)
+		return;
+
+	delta_jiffies = now - bq->chg_last_jiffies;
+	if (delta_jiffies < HZ)
+		return;
+
+	delta_sec = delta_jiffies / HZ;
+	if (delta_sec > BQ25890_FG_CHG_INTEGRATE_MAX_SEC)
+		delta_sec = BQ25890_FG_CHG_INTEGRATE_MAX_SEC;
+
+	ichgr = bq25890_get_charge_current_ua(bq);
+	if (ichgr < 0)
+		ichgr = 0;
+
+	delta_uah = ichgr * delta_sec / 3600;
+	if (delta_uah > 0)
+		bq->chg_added_uah += delta_uah;
+
+	bq->chg_last_jiffies = now;
+}
+
+static int bq25890_fg_charge_percent(struct bq25890_device *bq)
+{
+	long remain_uah, pct;
+
+	if (bq->chg_remain_uah < 0)
+		return -ENODATA;
+
+	remain_uah = bq->chg_remain_uah + bq->chg_added_uah;
+	pct = remain_uah * 100L / charge_full_uah;
+	return (int)clamp(pct, 0L, 99L);
+}
+
+static int bq25890_fg_battery_percent(struct bq25890_device *bq,
+				      const struct bq25890_state *state,
+				      int v_smooth, bool just_unplugged)
+{
+	int ocv_pct, soc, max_drop;
+	unsigned long now = jiffies;
+	unsigned long dt_jiffies;
+	long dt_min;
+
+	ocv_pct = bq25890_calc_lipo_percentage(v_smooth);
+
+	if (!bq->capacity_valid)
+		return clamp(ocv_pct, 0, 100);
+
+	soc = bq->capacity_cache;
+
+	if (just_unplugged)
+		bq->batv_unplug_until = now + BQ25890_FG_UNPLUG_RELAX_SEC * HZ;
+
+	/* Post-charge terminal is inflated: SOC may fall, never rise. */
+	if (bq->batv_unplug_until && time_before(now, bq->batv_unplug_until)) {
+		if (ocv_pct < soc)
+			soc = ocv_pct;
+		return clamp(soc, 0, 100);
+	}
+	bq->batv_unplug_until = 0;
+
+	/*
+	 * Stale high SOC (e.g. boot/post-charge ghost) vs rested terminal V:
+	 * correct immediately when the cell has clearly settled.
+	 */
+	if (soc - ocv_pct > 12 && !bq25890_fg_under_load(bq))
+		return clamp(ocv_pct, 0, 100);
+
+	/* CPU load sags ADC: limit how fast SOC can drop; never hit 0 from glitch. */
+	if (bq25890_fg_under_load(bq)) {
+		dt_jiffies = now - bq->capacity_jiffies;
+		dt_min = max_t(long, 1L, (long)(dt_jiffies / (60 * HZ)));
+		max_drop = BQ25890_FG_LOAD_MAX_DROP_PCT_MIN * (int)dt_min;
+		if (ocv_pct < soc - max_drop)
+			ocv_pct = soc - max_drop;
+		if (ocv_pct < 1 && v_smooth > BQ25890_BATV_REST_MIN_UV)
+			ocv_pct = max_t(int, 1, soc - max_drop);
+		if (ocv_pct > soc)
+			ocv_pct = soc;
+		return clamp(ocv_pct, 0, 100);
 	}
 
-	if (just_plugged || !bq->charge_session_active) {
-		/*
-		 * Prefer the last trusted on-battery %; fall back to compensated
-		 * voltage only when no battery reading exists yet (boot on charger).
-		 */
-		if (bq->last_battery_pct >= 0)
-			seed = bq->last_battery_pct;
-		else if (bq->capacity_valid)
-			seed = bq->capacity_cache;
-		else
-			seed = -1;
+	/* Rested on battery: terminal voltage tracks OCV; SOC follows, only down. */
+	if (ocv_pct > soc)
+		ocv_pct = soc;
 
-		bq25890_charge_session_start(bq, state, seed);
-	}
-
-	bq25890_charge_integrate(bq);
-	raw = bq25890_charge_session_percent(bq);
-
-	return clamp(raw, 0, 99);
+	return clamp(ocv_pct, 0, 100);
 }
 
 static int bq25890_update_capacity(struct bq25890_device *bq,
 				   const struct bq25890_state *state)
 {
-	int raw;
-	bool ext_pwr, plug_in, plug_out;
+	bool ext_pwr, charging, plug_in, plug_out;
+	int v_smooth, soc;
 
 	ext_pwr = bq25890_has_external_power(bq, state);
+	charging = bq25890_is_actively_charging(bq, state);
 	plug_in = ext_pwr && !bq->last_ext_pwr;
 	plug_out = !ext_pwr && bq->last_ext_pwr;
 
-	if (plug_out)
-		bq25890_charge_session_stop(bq);
-
-	if (!ext_pwr) {
-		raw = bq25890_capacity_from_battery(bq, state, plug_out);
-	} else {
-		bq->unplug_relax_jiffies = 0;
-		raw = bq25890_capacity_from_charger(bq, state, plug_in);
-	}
-
-	if (raw < 0) {
+	v_smooth = bq25890_update_smoothed_batv(bq, plug_in || plug_out);
+	if (v_smooth < 0) {
 		if (bq->capacity_valid)
 			return bq->capacity_cache;
-		return raw;
+		return v_smooth;
 	}
 
-	bq->capacity_cache = raw;
+	if (state->chrg_status == STATUS_TERMINATION_DONE && ext_pwr) {
+		bq25890_fg_charge_reset(bq);
+		soc = 100;
+	} else if (ext_pwr && charging) {
+		if (plug_in || bq->chg_remain_uah < 0)
+			bq25890_fg_charge_begin(bq, state, v_smooth);
+		bq25890_fg_charge_integrate(bq);
+		soc = bq25890_fg_charge_percent(bq);
+		if (soc < 0)
+			soc = bq->capacity_valid ? bq->capacity_cache : 50;
+	} else {
+		if (plug_out)
+			bq25890_fg_charge_reset(bq);
+		soc = bq25890_fg_battery_percent(bq, state, v_smooth, plug_out);
+	}
+
+	bq->capacity_cache = clamp(soc, 0, 100);
 	bq->capacity_valid = true;
 	bq->capacity_jiffies = jiffies;
 	bq->last_ext_pwr = ext_pwr;
 
-	if (!ext_pwr && (!bq->unplug_relax_jiffies ||
-			 !time_before(jiffies, bq->unplug_relax_jiffies)))
-		bq->last_battery_pct = raw;
-
 	return bq->capacity_cache;
 }
-
 
 
 static bool bq25890_is_adc_property(enum power_supply_property psp)
@@ -1076,15 +1029,14 @@ static void bq25890_capacity_calibrate_work(struct work_struct *work)
 	int ret;
 
 	mutex_lock(&bq->lock);
-	if (bq->capacity_valid) {
-		mutex_unlock(&bq->lock);
-		return;
-	}
-	bq->last_battery_pct = -1;
+	/* Always re-sync from rested OCV once after boot (UPower may read too early). */
+	bq->capacity_valid = false;
+	bq->capacity_cache = 0;
 	bq->batv_smoothed_uv = 0;
 	bq->batv_smoothed_jiffies = 0;
-	bq25890_charge_session_stop(bq);
-	bq->unplug_relax_jiffies = 0;
+	bq->batv_load_glitch_until = 0;
+	bq->batv_unplug_until = 0;
+	bq25890_fg_charge_reset(bq);
 	mutex_unlock(&bq->lock);
 
 	ret = bq25890_get_chip_state(bq, &state);
@@ -1240,6 +1192,12 @@ static int bq25890_power_supply_get_property(struct power_supply *psy,
 			ret = bq25890_update_capacity(bq, &state);
 		if (ret < 0)
 			return ret;
+		/*
+		 * Do not report CRITICAL when smoothed terminal V shows a healthy
+		 * cell — avoids KDE/UPower emergency shutdown on ADC glitches.
+		 */
+		if (ret < 20 && bq->batv_smoothed_uv > 3200000)
+			ret = 20;
 		if (ret >= 95)
 			val->intval = POWER_SUPPLY_CAPACITY_LEVEL_FULL;
 		else if (ret >= 70)
@@ -1257,7 +1215,7 @@ static int bq25890_power_supply_get_property(struct power_supply *psy,
 			ret = bq25890_update_capacity(bq, &state);
 		if (ret < 0)
 			return ret;
-		val->intval = ret < 20;
+		val->intval = ret < 20 && bq->batv_smoothed_uv <= 3200000;
 		break;
 
 	case POWER_SUPPLY_PROP_STATUS:
@@ -1356,13 +1314,11 @@ static int bq25890_power_supply_get_property(struct power_supply *psy,
 
 	case POWER_SUPPLY_PROP_VOLTAGE_NOW:	/* V_BAT now */
 		/*
-		 * This is ADC-sampled immediate charge voltage supplied
-		 * from charger to battery. The property name is confusing,
-		 * for clarification refer to:
-		 * Documentation/ABI/testing/sysfs-class-power
-		 * /sys/class/power_supply/<supply_name>/voltage_now
+		 * Return the load-smoothed terminal voltage. Raw ADC pegs at
+		 * 2.304 V under heavy load and causes false critical-battery
+		 * shutdowns in userspace power managers.
 		 */
-		ret = bq25890_get_batv(psy);
+		ret = bq25890_update_smoothed_batv(bq, false);
 		if (ret < 0)
 			return ret;
 		val->intval = ret;
@@ -1777,14 +1733,13 @@ static int bq25890_power_supply_init(struct bq25890_device *bq)
 	bq->capacity_valid = false;
 	bq->last_ext_pwr = false;
 	bq->capacity_jiffies = 0;
-	bq->unplug_relax_jiffies = 0;
-	bq->charge_session_active = false;
-	bq->charge_session_pct = 0;
-	bq->charge_added_uah = 0;
-	bq->charge_last_jiffies = 0;
-	bq->last_battery_pct = -1;
 	bq->batv_smoothed_uv = 0;
 	bq->batv_smoothed_jiffies = 0;
+	bq->batv_load_glitch_until = 0;
+	bq->batv_unplug_until = 0;
+	bq->chg_remain_uah = -1;
+	bq->chg_added_uah = 0;
+	bq->chg_last_jiffies = 0;
 	bq->adc_jiffies = 0;
 	bq->notified_capacity = -1;
 	bq->notified_status = -1;

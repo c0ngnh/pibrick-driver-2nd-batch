@@ -1,0 +1,11 @@
+[Unit]
+Description=Save piBrick display refresh on session end
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStop=/usr/local/bin/pibrick-persist-display-prefs.sh sync-all
+TimeoutStopSec=15
+
+[Install]
+WantedBy=default.target

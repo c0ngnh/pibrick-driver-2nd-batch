@@ -31,11 +31,44 @@ if [ -f "$TOUCH_RESET" ]; then
 	install -m 755 "$TOUCH_RESET" /usr/local/bin/pibrick-touch-reset
 fi
 
+PERSIST_PREFS="$SCRIPT_DIR/../tools/pibrick-persist-display-prefs.sh"
+if [ -f "$PERSIST_PREFS" ]; then
+	install -m 755 "$PERSIST_PREFS" /usr/local/bin/pibrick-persist-display-prefs
+fi
+
+SYNC_PREFS_SERVICE="$SCRIPT_DIR/pibrick-sync-display-prefs.service"
+if [ -f "$SYNC_PREFS_SERVICE" ]; then
+	install -d /etc/systemd/user
+	install -m 644 "$SYNC_PREFS_SERVICE" /etc/systemd/user/pibrick-sync-display-prefs.service
+	for user_home in /home/*; do
+		[ -d "$user_home" ] || continue
+		user_name=$(basename "$user_home")
+		id "$user_name" >/dev/null 2>&1 || continue
+		sudo -u "$user_name" XDG_RUNTIME_DIR="/run/user/$(id -u "$user_name")" \
+			systemctl --user daemon-reload 2>/dev/null || true
+		sudo -u "$user_name" XDG_RUNTIME_DIR="/run/user/$(id -u "$user_name")" \
+			systemctl --user enable pibrick-sync-display-prefs.service 2>/dev/null || true
+	done
+fi
+
+TOUCH_RECOVER_SERVICE="$SCRIPT_DIR/pibrick-touch-recover.service"
+if [ -f "$TOUCH_RECOVER_SERVICE" ]; then
+	install -m 644 "$TOUCH_RECOVER_SERVICE" /etc/systemd/system/pibrick-touch-recover.service
+	systemctl daemon-reload
+	systemctl enable pibrick-touch-recover.service
+fi
+
 BRIGHTNESS_HELPER="$SCRIPT_DIR/../tools/pibrick-brightness.sh"
 if [ -f "$BRIGHTNESS_HELPER" ]; then
 	install -m 755 "$BRIGHTNESS_HELPER" /usr/local/bin/pibrick-brightness
 	apt-get install -y brightnessctl 2>/dev/null || true
 	/usr/local/bin/pibrick-brightness install-labwc || true
+fi
+
+DISABLE_BAT_SHUTDOWN="$SCRIPT_DIR/../tools/pibrick-disable-battery-shutdown.sh"
+if [ -f "$DISABLE_BAT_SHUTDOWN" ]; then
+	install -m 755 "$DISABLE_BAT_SHUTDOWN" /usr/local/bin/pibrick-disable-battery-shutdown
+	install -m 644 "$SCRIPT_DIR/pibrick-disable-battery-shutdown.desktop" "$AUTOSTART_DIR/"
 fi
 
 if [ -f "$GNOME_RATE_HELPER" ]; then
