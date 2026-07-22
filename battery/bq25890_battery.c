@@ -105,6 +105,14 @@ struct bq25890_state {
 	u8 ntc_fault;
 };
 
+enum bq25890_fg_mode {
+	BQ_FG_UNKNOWN = 0,
+	BQ_FG_CHARGING,
+	BQ_FG_CHARGING_DONE,
+	BQ_FG_DISCHARGING_ACTIVE,
+	BQ_FG_DISCHARGING_RESTING,
+};
+
 struct bq25890_device {
 	struct i2c_client *client;
 	struct device *dev;
@@ -141,9 +149,12 @@ struct bq25890_device {
 	int capacity_cache;		/* displayed SOC 0-100 */
 	bool capacity_valid;
 	bool last_ext_pwr;
+	bool last_charging;		/* cached `charging` from the last sample */
+	enum bq25890_fg_mode last_fg_mode;  /* previous fg_mode for transition detection */
 	unsigned long capacity_jiffies;
 
 	long batv_smoothed_uv;		/* load-filtered terminal voltage */
+	long fg_v_ocv_uv;		/* OCV tracker (used for SOC lookup) */
 	unsigned long batv_smoothed_jiffies;
 	unsigned long batv_load_glitch_until;
 	unsigned long batv_unplug_until;	/* post-charge relax: SOC may only fall */
@@ -159,7 +170,20 @@ struct bq25890_device {
 	int notified_capacity;
 	int notified_status;
 
+	/* --- Load-aware fuel gauge state (locked under bq->lock) --- */
+	enum bq25890_fg_mode fg_mode;
+	int fg_proxy_ua;			/* proxy discharge current */
+	long fg_disch_remain_uah;	/* integrator output */
+	unsigned long fg_disch_jiffies;
+	unsigned long fg_load_jiffies;	/* last sustained-load sample */
+	unsigned long fg_rest_jiffies;	/* last quiet sample */
+	int fg_low_v_count;		/* persistent-low counter */
+	int fg_glitch_count;		/* legacy ADC-floor hit counter */
 	struct mutex lock; /* protect state data */
+
+	/* --- INA228 high-side current monitor (optional) --- */
+	struct bq25890_ina228_data *ina228;
+	int ina228_current_ua;		/* last sampled, for property readers */
 };
 
 #define BQ25890_CHARGE_CURRENT_MIN_UA	100000
@@ -171,14 +195,28 @@ struct bq25890_device {
 /*
  * Fuel-gauge tuning (PocketCM5 / BQ25895, 5000 mAh 1S LiPo @ 4.176 V full).
  * No pack-side current sense: discharge current is unknown; SOC on battery
- * comes from rested OCV.  Charge SOC integrates measured ICHGR.
+ * comes from a load-aware estimator:
+ *  - DISCHARGING_ACTIVE: SOC is held (or slowly drained by a configurable
+ *    proxy integrator); terminal voltage sag is NOT used to drop SOC.
+ *  - DISCHARGING_RESTING: terminal voltage IS used (after long-quiet
+ *    filter) as rested OCV, SOC follows downward only.
+ *  - CHARGING: integrate measured ICHGR (unchanged).
+ *
+ * Configure the proxy integrator with discharge_avg_ua +
+ * discharge_load_factor_pct. Both default to ~700 mA idle, +40% under load.
  */
 #define BQ25890_FG_V_TAU_SEC			20
+#define BQ25890_FG_V_OCV_TAU_SEC		60
 #define BQ25890_FG_UNPLUG_RELAX_SEC		90
 #define BQ25890_FG_LOAD_GLITCH_SEC		5
 #define BQ25890_FG_LOAD_MAX_DROP_PCT_MIN	2
+#define BQ25890_FG_REST_MIN_SEC		300
+#define BQ25890_FG_REST_MAX_DROP_PCT_MIN	1
 #define BQ25890_FG_CHG_POLAR_UV			50000
 #define BQ25890_FG_CHG_INTEGRATE_MAX_SEC	60
+#define BQ25890_FG_LOW_V_THRESH_UV		3200000
+#define BQ25890_FG_LOW_V_RECOVER_UV		3350000
+#define BQ25890_FG_LOW_V_COUNT_MAX		20
 #define BQ25890_BATV_ADC_FLOOR_UV		2304000
 #define BQ25890_BATV_ADC_FLOOR_MAX_UV		2344000
 #define BQ25890_BATV_REST_MIN_UV		3150000
@@ -197,13 +235,78 @@ module_param(batt_ir_mohm, int, 0644);
 MODULE_PARM_DESC(batt_ir_mohm,
 		 "Pack IR (mOhm) for charge-time OCV estimate only");
 
-static int bq25890_full_runtime_sec(void)
-{
-	if (discharge_current_ua <= 0)
-		return 0;
+/* Load-aware fuel-gauge tuning. Zero disables that input to the integrator. */
+static int discharge_avg_ua = 700000;
+module_param(discharge_avg_ua, int, 0644);
+MODULE_PARM_DESC(discharge_avg_ua,
+		 "Nominal idle discharge current (uA) used by SOC integrator");
 
-	return (int)((long)charge_full_uah * 3600L / discharge_current_ua);
-}
+static int discharge_load_factor_pct = 40;
+module_param(discharge_load_factor_pct, int, 0644);
+MODULE_PARM_DESC(discharge_load_factor_pct,
+		 "Extra %% added to discharge proxy while under sustained load");
+
+static int discharge_max_ua = 1500000;
+module_param(discharge_max_ua, int, 0644);
+MODULE_PARM_DESC(discharge_max_ua,
+		 "Hard ceiling (uA) for the SOC integrator proxy current");
+
+static int rest_min_sec = BQ25890_FG_REST_MIN_SEC;
+module_param(rest_min_sec, int, 0644);
+MODULE_PARM_DESC(rest_min_sec,
+		 "Seconds of sustained quiet required to enter DISCHARGING_RESTING");
+
+static int low_v_persistent_count = 5;
+module_param(low_v_persistent_count, int, 0644);
+MODULE_PARM_DESC(low_v_persistent_count,
+		 "Consecutive samples below low-V threshold before SOC drops to critical");
+
+/* --- INA228 high-side current monitor (PocketCM5, I2C 0x40) --- */
+#define INA228_REG_CONFIG		0x00
+#define INA228_REG_ADCCFG		0x01
+#define INA228_REG_SHUNTCAL		0x02
+#define INA228_REG_VSHUNT		0x04
+#define INA228_REG_VBUS			0x05
+#define INA228_REG_DIETEMP		0x06
+#define INA228_REG_CURRENT		0x07
+#define INA228_REG_POWER		0x08
+#define INA228_REG_DIAGALRT		0x0B
+#define INA228_REG_MFG_UID		0x3E
+#define INA228_REG_DVC_UID		0x3F
+
+#define INA228_I2C_ADDR_DEFAULT		0x40
+#define INA228_MFG_ID_TI		0x5449
+
+/* CONFIG[15] RST */
+#define INA228_CFG_RST_MASK		BIT(15)
+/* CONFIG[4] ADCRANGE: 0 = ±163.84 mV, 1 = ±40.96 mV */
+#define INA228_CFG_ADCRANGE_MASK		BIT(4)
+/* ADCCFG[15:12] MODE */
+#define INA228_ADC_MODE_SHIFT		12
+#define INA228_ADC_MODE_CONT_TVB		0xF /* continuous T+V+bus */
+
+/* Conversion-time / averaging settings chosen for 1 s integrator tick. */
+#define INA228_ADC_VSHCT_1052_US		5
+#define INA228_ADC_VBUSCT_1052_US	5
+#define INA228_ADC_TEMPCT_1052_US	5
+#define INA228_ADC_AVG_64			2
+/* SHUNT_CAL computed below as 2400; expose as module-param anyway. */
+
+static int ina228_shunt_uohm = 15000;
+module_param(ina228_shunt_uohm, int, 0644);
+MODULE_PARM_DESC(ina228_shunt_uohm, "INA228 shunt resistor value (micro-ohms)");
+
+static int ina228_max_current_ua = 6400000;
+module_param(ina228_max_current_ua, int, 0644);
+MODULE_PARM_DESC(ina228_max_current_ua,
+		 "INA228 expected maximum current (uA) used to derive SHUNT_CAL");
+
+static int ina228_enabled = 1;
+module_param(ina228_enabled, int, 0644);
+MODULE_PARM_DESC(ina228_enabled,
+		 "Set to 0 to fall back to the proxy integrator even when INA228 is present");
+
+/* --- end INA228 --- */
 
 static DEFINE_IDR(bq25890_id);
 static DEFINE_MUTEX(bq25890_id_mutex);
@@ -715,7 +818,17 @@ static int bq25890_capacity_cached(struct bq25890_device *bq)
 	return bq->capacity_cache;
 }
 
-static int bq25890_update_smoothed_batv(struct bq25890_device *bq, bool reseed)
+/*
+ * Smoothed terminal voltage tracker.
+ *
+ * Caller must hold bq->lock (this is the estimator's single owner path).
+ * Returns the filtered terminal voltage in uV. Also updates the persisted
+ * "is the cell under load right now?" flag (`batv_load_glitch_until`) the
+ * rest of the estimator uses to gate `DISCHARGING_ACTIVE` vs.
+ * `DISCHARGING_RESTING`.
+ */
+static int bq25890_update_smoothed_batv_locked(struct bq25890_device *bq,
+					       bool reseed)
 {
 	int raw = bq25890_get_batv_uv(bq);
 	unsigned long now = jiffies;
@@ -727,6 +840,7 @@ static int bq25890_update_smoothed_batv(struct bq25890_device *bq, bool reseed)
 
 	if (bq25890_batv_is_adc_floor(raw)) {
 		bq->batv_load_glitch_until = now + BQ25890_FG_LOAD_GLITCH_SEC * HZ;
+		bq->fg_glitch_count++;
 		if (bq->batv_smoothed_uv > BQ25890_BATV_REST_MIN_UV)
 			return (int)bq->batv_smoothed_uv;
 	}
@@ -740,6 +854,17 @@ static int bq25890_update_smoothed_batv(struct bq25890_device *bq, bool reseed)
 	if (bq25890_batv_is_load_glitch(raw, bq->batv_smoothed_uv)) {
 		bq->batv_load_glitch_until = now + BQ25890_FG_LOAD_GLITCH_SEC * HZ;
 		return (int)bq->batv_smoothed_uv;
+	}
+
+	/*
+	 * Detect a load event (any sudden drop larger than 6% of the current
+	 * terminal voltage). This is much more permissive than the ADC-floor
+	 * heuristic it replaces and is the new "are we under load?" signal.
+	 */
+	if (bq->batv_smoothed_uv > 0 &&
+	    (long)bq->batv_smoothed_uv - raw > (bq->batv_smoothed_uv / 16) &&
+	    raw > BQ25890_BATV_REST_MIN_UV) {
+		bq->batv_load_glitch_until = now + BQ25890_FG_LOAD_GLITCH_SEC * HZ;
 	}
 
 	if (raw - (int)bq->batv_smoothed_uv > 350000) {
@@ -765,6 +890,510 @@ static int bq25890_update_smoothed_batv(struct bq25890_device *bq, bool reseed)
 	bq->batv_smoothed_jiffies = now;
 
 	return (int)bq->batv_smoothed_uv;
+}
+
+/*
+ * Slower tracker for the "OCV" we feed the LiPo curve. Only updated when
+ * the cell is at rest; decays toward the smoothed terminal voltage.
+ * Caller must hold bq->lock.
+ */
+static void bq25890_update_v_ocv_locked(struct bq25890_device *bq, int v_term_uv,
+					bool force_reseed)
+{
+	unsigned long now = jiffies;
+	unsigned long dt_jiffies;
+	long dt_sec;
+
+	if (force_reseed || bq->fg_v_ocv_uv <= 0) {
+		bq->fg_v_ocv_uv = v_term_uv;
+		return;
+	}
+
+	if (!time_before(now, bq->batv_load_glitch_until)) {
+		dt_jiffies = HZ;
+	} else {
+		dt_jiffies = now - bq->batv_smoothed_jiffies;
+		if (dt_jiffies < HZ)
+			return;
+	}
+
+	dt_sec = (long)(dt_jiffies / HZ);
+	if (dt_sec > BQ25890_FG_V_OCV_TAU_SEC)
+		dt_sec = BQ25890_FG_V_OCV_TAU_SEC;
+
+	bq->fg_v_ocv_uv += (v_term_uv - bq->fg_v_ocv_uv) * dt_sec /
+			   (BQ25890_FG_V_OCV_TAU_SEC + dt_sec);
+}
+
+/*
+ * Returns uA clamped to [0, discharge_max_ua]. Caller must hold bq->lock.
+ */
+static int bq25890_fg_compute_proxy_ua_locked(struct bq25890_device *bq,
+					     bool sustained_load)
+{
+	long ua;
+
+	if (discharge_avg_ua <= 0)
+		return 0;
+
+	ua = discharge_avg_ua;
+	if (sustained_load && discharge_load_factor_pct > 0)
+		ua = ua + ua * discharge_load_factor_pct / 100;
+
+	if (ua > discharge_max_ua && discharge_max_ua > 0)
+		ua = discharge_max_ua;
+	if (ua < 0)
+		ua = 0;
+
+	return (int)ua;
+}
+
+static void bq25890_fg_integrate_proxy_locked(struct bq25890_device *bq)
+{
+	unsigned long now = jiffies;
+	unsigned long dt_jiffies = now - bq->fg_disch_jiffies;
+	long dt_sec, drop_uah;
+
+	if (bq->fg_proxy_ua <= 0 || charge_full_uah <= 0)
+		return;
+
+	if (dt_jiffies < HZ)
+		return;
+
+	dt_sec = (long)(dt_jiffies / HZ);
+	if (dt_sec > BQ25890_FG_CHG_INTEGRATE_MAX_SEC)
+		dt_sec = BQ25890_FG_CHG_INTEGRATE_MAX_SEC;
+
+	drop_uah = (long)bq->fg_proxy_ua * dt_sec / 3600;
+	if (drop_uah > 0) {
+		bq->fg_disch_remain_uah -= drop_uah;
+		if (bq->fg_disch_remain_uah < 0)
+			bq->fg_disch_remain_uah = 0;
+	}
+	bq->fg_disch_jiffies = now;
+}
+
+/* Caller must hold bq->lock. Returns uA or negative on error. */
+static int bq25890_ichgr_ua_locked(struct bq25890_device *bq)
+{
+	return bq25890_get_charge_current_ua(bq);
+}
+
+/* =====================================================================
+ * INA228 high-side current monitor driver (PocketCM5, I2C 0x40).
+ *
+ * Optional. When present, we use its signed current reading as the
+ * authoritative coulomb-counter source for SOC integration. When absent
+ * (or ina228_enabled == 0), we fall back to the proxy integrator.
+ *
+ * 24-bit telemetry uses a private regmap created on an
+ * i2c_new_dummy_device handle for address 0x40. 16-bit control and ID
+ * registers use SMBus word transactions. All access runs under bq->lock
+ * to preserve the single-mutator estimator invariant.
+ * =====================================================================
+ */
+
+struct bq25890_ina228_data;
+
+enum bq25890_ina228_fields {
+	F_ina228_VSHUNT,
+	F_ina228_VBUS,
+	F_ina228_CURRENT,
+	F_ina228_POWER,
+	F_MAX_INA228_FIELDS,
+};
+
+struct bq25890_ina228_data {
+	bool present;
+	struct i2c_client *client;
+	struct regmap *rmap;
+	struct regmap_field *rmap_fields[F_MAX_INA228_FIELDS];
+	int current_ua;			/* signed, positive = discharge */
+	int bus_uv;
+	int shunt_uv;			/* signed */
+	int power_mw;
+	int dietemp_mdeg_c;
+	int device_id;
+	unsigned long jiffies;
+	int adc_range;			/* 0 = ±163.84 mV, 1 = ±40.96 mV */
+	u32 current_lsb_na;		/* current_lsb in nA/LSB (from Rsh/I) */
+};
+
+static const struct reg_field bq25890_ina228_reg_fields[F_MAX_INA228_FIELDS] = {
+	[F_ina228_VSHUNT] = REG_FIELD(INA228_REG_VSHUNT, 0, 23),
+	[F_ina228_VBUS]   = REG_FIELD(INA228_REG_VBUS, 0, 23),
+	[F_ina228_CURRENT] = REG_FIELD(INA228_REG_CURRENT, 0, 23),
+	[F_ina228_POWER]  = REG_FIELD(INA228_REG_POWER, 0, 23),
+};
+
+static const struct regmap_config bq25890_ina228_regmap_cfg = {
+	.name = "ina228",
+	.reg_bits = 8,
+	.val_bits = 24,
+	.max_register = INA228_REG_DVC_UID,
+	.val_format_endian = REGMAP_ENDIAN_BIG,
+	.can_multi_write = false,
+};
+
+/*
+ * Write a 16-bit register to the INA228 using raw I2C block write.
+ * SMBus write_word_data sends [LOW, HIGH] but the INA228 expects
+ * [HIGH, LOW] per the I2C standard.  This helper bypasses that mismatch.
+ */
+static int bq25890_ina228_read_reg16(struct i2c_client *client, u8 reg, u16 *val)
+{
+	u8 txbuf[1] = { reg };
+	u8 rxbuf[2];
+	int ret;
+
+	ret = i2c_master_send(client, txbuf, sizeof(txbuf));
+	if (ret < 0)
+		return ret;
+	ret = i2c_master_recv(client, rxbuf, sizeof(rxbuf));
+	if (ret < 0)
+		return ret;
+	/* INA228 16-bit regs are big-endian: MSB first on wire. */
+	*val = ((u16)rxbuf[0] << 8) | rxbuf[1];
+	return 0;
+}
+
+static int bq25890_ina228_write_reg16(struct i2c_client *client,
+				       u8 reg, u16 val)
+{
+	u8 buf[3] = { reg, val >> 8, val & 0xff };
+	int ret = i2c_master_send(client, buf, sizeof(buf));
+	return (ret < 0) ? ret : 0;
+}
+
+static int bq25890_ina228_field_read(struct bq25890_ina228_data *ina,
+				     enum bq25890_ina228_fields f, int *val)
+{
+	int ret;
+
+	ret = regmap_field_read(ina->rmap_fields[f], val);
+	return ret < 0 ? ret : 0;
+}
+
+static int bq25890_ina228_compute_cal(int max_current_ua, int shunt_uohm)
+{
+	/*
+	 * Per INA228 datasheet / Adafruit setShunt:
+	 *   current_lsb  = max_current / 2^19  (in A)
+	 *   SHUNT_CAL    = floor(13107.2e6 * current_lsb * Rshunt)
+	 *
+	 * Since 13107.2e6 / 2^19 = 25000 exactly, in fixed point:
+	 *   SHUNT_CAL    = floor(25000 * max_current_A * Rshunt_ohm)
+	 *               = floor(25 * max_current_uA * Rshunt_uohm / 1e6)
+	 *
+	 * With defaults (6.4 A, 15 mΩ): SHUNT_CAL = floor(25 * 6400000 * 15000 / 1e6)
+	 *                             = floor(2400) = 2400.
+	 * Cap at u16 (SHUNTCAL is 16-bit); saturation is silent because the
+	 * current_lsb_nA used on the host side is independent of this value.
+	 *
+	 * Avoid overflow: 25 * 6400000 * 15000 = 2.4 trillion > 2^31.
+	 * Multiply in 64-bit intermediates, then divide to keep within range.
+	 *   SHUNT_CAL = floor((max_current_uA / 1000) * (shunt_uohm / 1000) * 25 / 1000)
+	 */
+	s64 a = max_current_ua / 1000;
+	s64 b = shunt_uohm / 1000;
+	s64 num = a * b * 25;
+
+	if (num <= 0)
+		return 0;
+	return (int)clamp_t(s64, num / 1000, 0LL, 0xFFFFLL);
+}
+
+static int bq25890_ina228_raw_to_current_ua(struct bq25890_ina228_data *ina,
+					    u32 raw24)
+{
+	/*
+	 * CURRENT is a signed 20-bit value occupying register bits[23:4].
+	 * The regmap field reads bits[23:4] directly (REGMAP_ENDIAN_BIG on
+	 * a 24-bit value).  Extract those bits, shift into position, then
+	 * sign-extend the 20-bit result to s32 before scaling:
+	 *   current_uA = signext(raw24 >> 4, 20) * current_lsb_nA / 1e3
+	 */
+	u32 field20 = (raw24 >> 4) & 0x000FFFFFU;
+	s32 signed20 = (field20 <= 0x0007FFFFU)
+		? (s32)field20
+		: (s32)(field20 | 0xFFF00000U);
+
+	return (int)(((long long)signed20 * ina->current_lsb_na) / 1000);
+}
+
+static int bq25890_ina228_raw_to_bus_uv(u32 raw24)
+{
+	/*
+	 * VBUS is 24-bit, top 20 bits used. 195.3125 µV/LSB.
+	 *   V_uV = (raw >> 4) * 195.3125
+	 * Fixed point: multiply by 1953125 then divide by 10000.
+	 */
+	u32 v = raw24 >> 4;
+
+	return (int)(((u64)v * 1953125ULL) / 10000ULL);
+}
+
+static int bq25890_ina228_raw_to_shunt_uv(struct bq25890_ina228_data *ina,
+					   u32 raw24)
+{
+	/*
+	 * VSHUNT is a signed 20-bit value in register bits[23:4], same layout
+	 * as CURRENT.  Extract the field, shift right 4 bits, then sign-extend
+	 * to s32 before applying the ADC LSB:
+	 *   ±163.84 mV range (ADCRANGE=0): 0.3125 µV/code
+	 *   ±40.96  mV range (ADCRANGE=1): 0.078125 µV/code
+	 */
+	u32 field20 = (raw24 >> 4) & 0x000FFFFFU;
+	s32 signed20 = (field20 <= 0x0007FFFFU)
+		? (s32)field20
+		: (s32)(field20 | 0xFFF00000U);
+	s64 r = signed20;
+	s64 uV;
+
+	if (ina->adc_range == 0)
+		uV = r * 3125LL / 10000LL;
+	else
+		uV = r * 78125LL / 1000000LL;
+
+	return (int)uV;
+}
+
+static int bq25890_ina228_raw_to_power_mw(struct bq25890_ina228_data *ina,
+					 u32 raw24)
+{
+	/*
+	 * Per INA228 datasheet Equation 5:
+	 *   Power [W] = 3.2 × CURRENT_LSB × POWER_raw
+	 * With current_lsb_nA = current_lsb_A × 1e9:
+	 *   power_W  = raw × 3.2 × current_lsb_nA × 1e-9
+	 *   power_mW = raw × 3.2 × current_lsb_nA × 1e-6
+	 * Integer form: power_mW = raw × current_lsb_nA × 4 / 1_250_000
+	 * For raw = 1 at defaults (lsb_nA ≈ 12207): power_mW ≈ 0.039.
+	 */
+	s64 nA = (s64)raw24 * (s64)ina->current_lsb_na;
+
+	return (int)((nA * 4) / 1250000);
+}
+
+static int bq25890_ina228_raw_to_dietemp_mdeg(s16 raw)
+{
+	/* Per INA228 datasheet: 7.8125 m°C/LSB. Integer form: raw × 78125 / 10000. */
+	return (int)raw * 78125 / 10000;
+}
+
+/* Caller must hold bq->lock. Returns 0 on success, negative on error. */
+static int bq25890_ina228_refresh_locked(struct bq25890_device *bq)
+{
+	struct bq25890_ina228_data *ina = bq->ina228;
+	u32 raw24;
+	s16 raw16;
+	int ret;
+
+	if (!ina || !ina->present)
+		return -ENODEV;
+
+	ret = bq25890_ina228_field_read(ina, F_ina228_CURRENT, &raw24);
+	if (ret < 0)
+		return ret;
+	ina->current_ua = bq25890_ina228_raw_to_current_ua(ina, raw24);
+
+	ret = bq25890_ina228_field_read(ina, F_ina228_VBUS, &raw24);
+	if (ret < 0)
+		return ret;
+	ina->bus_uv = bq25890_ina228_raw_to_bus_uv(raw24);
+
+	ret = bq25890_ina228_field_read(ina, F_ina228_VSHUNT, &raw24);
+	if (ret < 0)
+		return ret;
+	ina->shunt_uv = bq25890_ina228_raw_to_shunt_uv(ina, raw24);
+
+	ret = bq25890_ina228_field_read(ina, F_ina228_POWER, &raw24);
+	if (ret < 0)
+		return ret;
+	ina->power_mw = bq25890_ina228_raw_to_power_mw(ina, raw24);
+
+	raw16 = i2c_smbus_read_word_swapped(ina->client,
+						 INA228_REG_DIETEMP);
+	if (raw16 < 0)
+		return raw16;
+	ina->dietemp_mdeg_c = bq25890_ina228_raw_to_dietemp_mdeg(raw16);
+
+	ina->jiffies = jiffies;
+	bq->ina228_current_ua = ina->current_ua;
+
+	return 0;
+}
+
+static void bq25890_fg_integrate_ina228_locked(struct bq25890_device *bq)
+{
+	struct bq25890_ina228_data *ina = bq->ina228;
+	unsigned long now = jiffies;
+	unsigned long dt_jiffies = now - bq->fg_disch_jiffies;
+	long dt_sec, drop_uah;
+
+	if (!ina || !ina->present)
+		return;
+	if (ina->current_ua <= 0)
+		return;
+	if (charge_full_uah <= 0)
+		return;
+
+	if (dt_jiffies < HZ)
+		return;
+
+	dt_sec = (long)(dt_jiffies / HZ);
+	if (dt_sec > BQ25890_FG_CHG_INTEGRATE_MAX_SEC)
+		dt_sec = BQ25890_FG_CHG_INTEGRATE_MAX_SEC;
+
+	drop_uah = (long)ina->current_ua * dt_sec / 3600;
+	if (drop_uah > 0) {
+		bq->fg_disch_remain_uah -= drop_uah;
+		if (bq->fg_disch_remain_uah < 0)
+			bq->fg_disch_remain_uah = 0;
+	}
+	bq->fg_disch_jiffies = now;
+}
+
+/* Probe-time helper; not lock-protected (only called from probe). */
+static int bq25890_ina228_configure(struct bq25890_ina228_data *ina)
+{
+	int cal;
+	int ret;
+	u32 lsb_na;
+
+	/*
+	 * SHUNT_CAL = round(13107.2e6 * current_lsb * Rshunt)
+	 * current_lsb = max_current / 2^19
+	 * lsb_nA      = max_current_uA * 1000 / 524288
+	 *              = max_current_uA * 125 / 65536
+	 */
+	lsb_na = ((u32)ina228_max_current_ua * 125U) / 65536U;
+	if (lsb_na == 0)
+		lsb_na = 1;
+	ina->current_lsb_na = lsb_na;
+
+	cal = bq25890_ina228_compute_cal(ina228_max_current_ua, ina228_shunt_uohm);
+	ina->adc_range = 0; /* ±163.84 mV range for 15 mΩ @ 6.4 A = 96 mV max */
+
+	ret = bq25890_ina228_write_reg16(ina->client, INA228_REG_SHUNTCAL, cal);
+	if (ret < 0)
+		return ret;
+	dev_info(&ina->client->dev, "INA228 configure: SHUNT_CAL=0x%04x (%d), lsb_na=%u\n",
+		 (u16)cal, cal, lsb_na);
+
+	/* Verify via matching i2c_master_recv read. */
+	{
+		u16 verify;
+		int vr = bq25890_ina228_read_reg16(ina->client, INA228_REG_SHUNTCAL, &verify);
+		dev_info(&ina->client->dev, "INA228 SHUNT_CAL verify: read=0x%04x wrote=0x%04x ret=%d\n",
+			 verify, (u16)cal, vr);
+		if (vr == 0 && verify != (u16)cal) {
+			dev_warn(&ina->client->dev, "INA228 SHUNT_CAL mismatch: retrying\n");
+			bq25890_ina228_write_reg16(ina->client, INA228_REG_SHUNTCAL, cal);
+			bq25890_ina228_read_reg16(ina->client, INA228_REG_SHUNTCAL, &verify);
+			dev_info(&ina->client->dev, "INA228 SHUNT_CAL 2nd verify: read=0x%04x\n", verify);
+		}
+	}
+
+	ret = bq25890_ina228_write_reg16(ina->client, INA228_REG_ADCCFG,
+		(INA228_ADC_MODE_CONT_TVB << INA228_ADC_MODE_SHIFT) |
+		(INA228_ADC_VSHCT_1052_US << 6) |
+		(INA228_ADC_VBUSCT_1052_US << 9) |
+		(INA228_ADC_TEMPCT_1052_US << 3) |
+		INA228_ADC_AVG_64);
+	if (ret < 0)
+		return ret;
+	dev_info(&ina->client->dev,
+		 "INA228 ADCCFG written; RST should clear within 2 ms\n");
+	/*
+	 * Wait for the ADC to complete its first conversion after ADCCFG
+	 * write.  With AVG=64 and 1052 µs conversion time, the first
+	 * conversion settles in ~70 ms.  100 ms is a safe margin.
+	 */
+	usleep_range(100000, 150000);
+
+	ret = bq25890_ina228_write_reg16(ina->client, INA228_REG_CONFIG,
+		ina->adc_range ? INA228_CFG_ADCRANGE_MASK : 0);
+	if (ret < 0)
+		return ret;
+
+	return 0;
+}
+
+static int bq25890_ina228_probe(struct bq25890_device *bq)
+{
+	struct bq25890_ina228_data *ina;
+	struct i2c_client *dummy;
+	int ret, mfg, dev_id;
+
+	ina = devm_kzalloc(bq->dev, sizeof(*ina), GFP_KERNEL);
+	if (!ina)
+		return -ENOMEM;
+
+	dummy = i2c_new_dummy_device(bq->client->adapter,
+				     INA228_I2C_ADDR_DEFAULT);
+	if (IS_ERR(dummy)) {
+		ret = PTR_ERR(dummy);
+		dev_dbg(bq->dev, "INA228 dummy @ 0x40 unavailable: %d\n", ret);
+		return ret;
+	}
+
+	ina->client = dummy;
+	ina->rmap = devm_regmap_init_i2c(dummy, &bq25890_ina228_regmap_cfg);
+	if (IS_ERR(ina->rmap)) {
+		i2c_unregister_device(dummy);
+		return PTR_ERR(ina->rmap);
+	}
+
+	ret = devm_regmap_field_bulk_alloc(bq->dev, ina->rmap,
+					   ina->rmap_fields,
+					   bq25890_ina228_reg_fields,
+					   F_MAX_INA228_FIELDS);
+	if (ret) {
+		i2c_unregister_device(dummy);
+		return ret;
+	}
+
+	/* Verify manufacturer ID. */
+	mfg = i2c_smbus_read_word_swapped(dummy, INA228_REG_MFG_UID);
+	if (mfg < 0 || mfg != INA228_MFG_ID_TI) {
+		dev_dbg(bq->dev, "INA228 mfg-id mismatch (%x)\n", mfg);
+		i2c_unregister_device(dummy);
+		return -ENODEV;
+	}
+
+	dev_id = i2c_smbus_read_word_swapped(dummy, INA228_REG_DVC_UID);
+	if (dev_id < 0)
+		dev_id = 0;
+
+	ina->device_id = dev_id;
+	ina->present = false; /* set true after successful configuration */
+
+	ret = bq25890_ina228_configure(ina);
+	if (ret < 0) {
+		dev_warn(bq->dev, "INA228 configure failed: %d\n", ret);
+		i2c_unregister_device(dummy);
+		return ret;
+	}
+
+	ina->present = true;
+	bq->ina228 = ina;
+
+	dev_info(bq->dev, "INA228 bound at 0x40 (dvc=0x%03x shunt=%duohm max=%uuA)\n",
+		 dev_id, ina228_shunt_uohm, ina228_max_current_ua);
+
+	return 0;
+}
+
+static void bq25890_ina228_release(struct bq25890_device *bq)
+{
+	struct bq25890_ina228_data *ina = bq->ina228;
+
+	if (!ina)
+		return;
+	if (ina->client)
+		i2c_unregister_device(ina->client);
+	bq->ina228 = NULL;
 }
 
 static void bq25890_fg_charge_reset(struct bq25890_device *bq)
@@ -842,120 +1471,239 @@ static int bq25890_fg_charge_percent(struct bq25890_device *bq)
 	return (int)clamp(pct, 0L, 99L);
 }
 
-static int bq25890_fg_battery_percent(struct bq25890_device *bq,
-				      const struct bq25890_state *state,
-				      int v_smooth, bool just_unplugged)
+static int bq25890_get_chip_state(struct bq25890_device *bq,
+				  struct bq25890_state *state);
+
+/*
+ * Single owner for all fuel-gauge state mutations.
+ *
+ * Runs an ADC conversion, reads BATV/ICHGR/VBUSV/CHRG_STATUS once, picks a
+ * mode (charging / charging_done / discharging_active / resting), updates
+ * the proxy integrator and the OCV/voltage trackers, then returns the new
+ * SOC. The lock is held for the entire conversion + read + update
+ * sequence, eliminating the cross-path race that previously existed
+ * between the periodic refresh worker, the boot calibrate worker, the IRQ
+ * handler, and the power-supply property readers.
+ *
+ * Returns the new SOC (0..100), or -ENODATA if the very first sample
+ * hasn't completed yet.
+ */
+static int bq25890_sample_and_update_fg(struct bq25890_device *bq)
 {
-	int ocv_pct, soc, max_drop;
-	unsigned long now = jiffies;
-	unsigned long dt_jiffies;
-	long dt_min;
+	struct bq25890_state new_state;
+	bool ext_pwr, charging, terminal_charged;
+	int v_term_uv, v_smooth_uv;
+	int soc_in, soc_out, persistent_low_pct;
+	int proxy_ua;
+	unsigned long now;
+	int ret;
+	mutex_lock(&bq->lock);
+	now = jiffies;
 
-	ocv_pct = bq25890_calc_lipo_percentage(v_smooth);
+	/* Start an ADC conversion (idempotent: chip ignores if already running). */
+	ret = bq25890_field_write(bq, F_CONV_START, 1);
+	if (ret < 0)
+		goto out_unlock;
 
-	if (!bq->capacity_valid)
-		return clamp(ocv_pct, 0, 100);
+	ret = regmap_field_read_poll_timeout(bq->rmap_fields[F_CONV_START],
+					     ret, !ret, 25000, 1000000);
+	if (ret < 0)
+		goto out_unlock;
 
-	soc = bq->capacity_cache;
+	/* Re-read chip state under the same lock. */
+	ret = bq25890_get_chip_state(bq, &new_state);
+	if (ret < 0)
+		goto out_unlock;
+	bq->state = new_state;
+	bq->adc_jiffies = now;
 
-	if (just_unplugged)
-		bq->batv_unplug_until = now + BQ25890_FG_UNPLUG_RELAX_SEC * HZ;
+	ext_pwr = bq25890_has_external_power(bq, &new_state);
+	charging = bq25890_is_actively_charging(bq, &new_state);
+	terminal_charged =
+		new_state.chrg_status == STATUS_TERMINATION_DONE && ext_pwr;
 
-	/* Post-charge terminal is inflated: SOC may fall, never rise. */
-	if (bq->batv_unplug_until && time_before(now, bq->batv_unplug_until)) {
-		if (ocv_pct < soc)
-			soc = ocv_pct;
-		return clamp(soc, 0, 100);
+	v_term_uv = bq25890_get_batv_uv(bq);
+	v_smooth_uv = bq25890_update_smoothed_batv_locked(bq,
+			!bq->last_ext_pwr == ext_pwr);  /* reseed on plug change */
+
+	/* Refresh INA228 cache (under same lock). */
+	if (bq->ina228 && bq->ina228->present) {
+		int ina_ret = bq25890_ina228_refresh_locked(bq);
+
+		if (ina_ret < 0)
+			dev_dbg(bq->dev, "INA228 refresh failed: %d\n", ina_ret);
 	}
-	bq->batv_unplug_until = 0;
 
-	/*
-	 * Stale high SOC (e.g. boot/post-charge ghost) vs rested terminal V:
-	 * correct immediately when the cell has clearly settled.
-	 */
-	if (soc - ocv_pct > 12 && !bq25890_fg_under_load(bq))
-		return clamp(ocv_pct, 0, 100);
-
-	/* CPU load sags ADC: limit how fast SOC can drop; never hit 0 from glitch. */
-	if (bq25890_fg_under_load(bq)) {
-		dt_jiffies = now - bq->capacity_jiffies;
-		dt_min = max_t(long, 1L, (long)(dt_jiffies / (60 * HZ)));
-		max_drop = BQ25890_FG_LOAD_MAX_DROP_PCT_MIN * (int)dt_min;
-		if (ocv_pct < soc - max_drop)
-			ocv_pct = soc - max_drop;
-		if (ocv_pct < 1 && v_smooth > BQ25890_BATV_REST_MIN_UV)
-			ocv_pct = max_t(int, 1, soc - max_drop);
-		if (ocv_pct > soc)
-			ocv_pct = soc;
-		return clamp(ocv_pct, 0, 100);
+	/* Maintain persistent-low-voltage guard. */
+	if (v_term_uv > 0) {
+		if (v_term_uv <= BQ25890_FG_LOW_V_THRESH_UV) {
+			if (bq->fg_low_v_count < BQ25890_FG_LOW_V_COUNT_MAX)
+				bq->fg_low_v_count++;
+		} else if (v_term_uv >= BQ25890_FG_LOW_V_RECOVER_UV) {
+			if (bq->fg_low_v_count > 0)
+				bq->fg_low_v_count -= 2;
+			if (bq->fg_low_v_count < 0)
+				bq->fg_low_v_count = 0;
+		}
 	}
 
-	/* Rested on battery: terminal voltage tracks OCV; SOC follows, only down. */
-	if (ocv_pct > soc)
-		ocv_pct = soc;
+	/* Track load vs rest timestamps used to gate mode transitions. */
+	if (bq25890_fg_under_load(bq))
+		bq->fg_load_jiffies = now;
+	else if (time_after(now, bq->fg_load_jiffies +
+			    (rest_min_sec > 0 ? rest_min_sec : 300) * HZ))
+		bq->fg_rest_jiffies = now;
 
-	return clamp(ocv_pct, 0, 100);
+	/* --- mode selection --- */
+	if (terminal_charged) {
+		bq->fg_mode = BQ_FG_CHARGING_DONE;
+		soc_in = 100;
+		bq25890_fg_charge_reset(bq);
+		bq->fg_disch_remain_uah = charge_full_uah;
+		bq->fg_disch_jiffies = now;
+		soc_out = 100;
+	} else if (ext_pwr && charging) {
+		bq->fg_mode = BQ_FG_CHARGING;
+		if (!bq->last_ext_pwr || bq->chg_remain_uah < 0)
+			bq25890_fg_charge_begin(bq, &new_state, v_smooth_uv);
+		bq25890_fg_charge_integrate(bq);
+		/* Keep the OCV tracker current so an abrupt unplug does not
+		 * reseed the discharge integrator from a stale OCV value. */
+		bq25890_update_v_ocv_locked(bq, v_smooth_uv, false);
+		/* Seed the discharge integrator from current integrated SOC so a
+		 * fresh unplug starts from where charging left off. */
+		soc_in = bq25890_fg_charge_percent(bq);
+		if (soc_in < 0)
+			soc_in = bq->capacity_valid ? bq->capacity_cache : 50;
+		bq->fg_disch_remain_uah =
+			(long)soc_in * charge_full_uah / 100;
+		bq->fg_disch_jiffies = now;
+		soc_out = soc_in;
+	} else if (ext_pwr) {
+		/* Plugged in but not actively charging: hold last SOC. */
+		bq->fg_mode = BQ_FG_CHARGING;
+		/* Keep OCV tracker warm. */
+		bq25890_update_v_ocv_locked(bq, v_smooth_uv, false);
+		if (!bq->capacity_valid) {
+			/* Try to seed from smoothed terminal V. */
+			int ocv = bq25890_calc_lipo_percentage(v_smooth_uv);
+
+			soc_in = clamp(ocv, 0, 100);
+			bq->capacity_valid = true;
+			bq->capacity_cache = soc_in;
+			bq->fg_disch_remain_uah =
+				(long)soc_in * charge_full_uah / 100;
+		}
+		soc_out = bq->capacity_cache;
+	} else {
+		bool just_unplugged = bq->last_ext_pwr;
+		bool sustained_load = time_after(now, bq->fg_rest_jiffies) &&
+				      !time_after(now, bq->fg_load_jiffies +
+						 (rest_min_sec > 0 ? rest_min_sec : 300) * HZ);
+		bool rested = !bq25890_fg_under_load(bq) &&
+			      time_after(now, bq->fg_load_jiffies +
+					 (rest_min_sec > 0 ? rest_min_sec : 300) * HZ);
+
+		bq->fg_mode = rested ? BQ_FG_DISCHARGING_RESTING :
+				       BQ_FG_DISCHARGING_ACTIVE;
+
+		if (just_unplugged) {
+			bq25890_fg_charge_reset(bq);
+			bq->batv_unplug_until =
+				now + BQ25890_FG_UNPLUG_RELAX_SEC * HZ;
+		}
+
+		proxy_ua = bq25890_fg_compute_proxy_ua_locked(bq, sustained_load);
+		bq->fg_proxy_ua = proxy_ua;
+
+		if (bq->ina228 && bq->ina228->present && ina228_enabled)
+			bq25890_fg_integrate_ina228_locked(bq);
+		else
+			bq25890_fg_integrate_proxy_locked(bq);
+
+		if (just_unplugged || !bq->capacity_valid) {
+			/* Seed the discharge integrator from the OCV curve so we
+			 * don't briefly show 0% after a fresh unplug. */
+			int ocv = bq25890_calc_lipo_percentage(v_smooth_uv);
+
+			soc_in = clamp(ocv, 0, 100);
+			bq->fg_disch_remain_uah =
+				(long)soc_in * charge_full_uah / 100;
+			bq->fg_disch_jiffies = now;
+		} else {
+			soc_in = bq->capacity_cache;
+		}
+
+		if (bq->fg_disch_remain_uah >= 0 && charge_full_uah > 0)
+			soc_out = (int)clamp(bq->fg_disch_remain_uah * 100L /
+					     charge_full_uah, 0L, 100L);
+		else
+			soc_out = soc_in;
+
+		/* OCV-based recalibration only on the first RESTING transition.
+		 * Once rested, the coulomb integrator (INA228 / proxy) owns SOC;
+		 * we only let OCV bring it down when the cell has genuinely
+		 * settled to a new resting voltage after being active.  Continuing
+		 * to apply OCV every RESTING sample would drag SOC toward the
+		 * voltage every tick and defeat the integrator. */
+		if (bq->fg_mode == BQ_FG_DISCHARGING_RESTING &&
+		    bq->last_fg_mode != BQ_FG_DISCHARGING_RESTING) {
+			int ocv_pct = bq25890_calc_lipo_percentage(v_smooth_uv);
+			unsigned long dt_min =
+				max_t(unsigned long, 1UL,
+				      (now - bq->capacity_jiffies) / (60 * HZ));
+			int max_drop = BQ25890_FG_REST_MAX_DROP_PCT_MIN *
+				       (int)dt_min;
+
+			if (ocv_pct < soc_in - max_drop)
+				ocv_pct = soc_in - max_drop;
+			if (ocv_pct > soc_out)
+				ocv_pct = soc_out;
+			bq25890_update_v_ocv_locked(bq, v_smooth_uv, false);
+			if (ocv_pct < soc_out)
+				soc_out = ocv_pct;
+		} else {
+			bq25890_update_v_ocv_locked(bq, v_smooth_uv,
+						     !bq->capacity_valid);
+		}
+
+		/* Persistent-low-voltage guard. */
+		if (low_v_persistent_count > 0 &&
+		    bq->fg_low_v_count >= low_v_persistent_count) {
+			persistent_low_pct = 1;
+			if (persistent_low_pct < soc_out &&
+			    v_smooth_uv > BQ25890_BATV_REST_MIN_UV)
+				soc_out = persistent_low_pct;
+		}
+	}
+
+	bq->capacity_cache = clamp(soc_out, 0, 100);
+	bq->capacity_valid = true;
+	bq->capacity_jiffies = now;
+	bq->last_ext_pwr = ext_pwr;
+	bq->last_charging = charging;
+	bq->last_fg_mode = bq->fg_mode;
+
+	mutex_unlock(&bq->lock);
+
+	return bq->capacity_cache;
+
+out_unlock:
+	mutex_unlock(&bq->lock);
+	return ret;
 }
 
+/*
+ * Back-compat thin wrapper. Historical callers (IRQ handler, capacity
+ * workers) still call this; it routes everything through the single
+ * estimator owner. Safe to call from any context that can sleep.
+ */
 static int bq25890_update_capacity(struct bq25890_device *bq,
 				   const struct bq25890_state *state)
 {
-	bool ext_pwr, charging, plug_in, plug_out;
-	int v_smooth, soc;
-
-	ext_pwr = bq25890_has_external_power(bq, state);
-	charging = bq25890_is_actively_charging(bq, state);
-	plug_in = ext_pwr && !bq->last_ext_pwr;
-	plug_out = !ext_pwr && bq->last_ext_pwr;
-
-	v_smooth = bq25890_update_smoothed_batv(bq, plug_in || plug_out);
-	if (v_smooth < 0) {
-		if (bq->capacity_valid)
-			return bq->capacity_cache;
-		return v_smooth;
-	}
-
-	if (state->chrg_status == STATUS_TERMINATION_DONE && ext_pwr) {
-		bq25890_fg_charge_reset(bq);
-		soc = 100;
-	} else if (ext_pwr && charging) {
-		if (plug_in || bq->chg_remain_uah < 0)
-			bq25890_fg_charge_begin(bq, state, v_smooth);
-		bq25890_fg_charge_integrate(bq);
-		soc = bq25890_fg_charge_percent(bq);
-		if (soc < 0)
-			soc = bq->capacity_valid ? bq->capacity_cache : 50;
-	} else {
-		if (plug_out)
-			bq25890_fg_charge_reset(bq);
-		soc = bq25890_fg_battery_percent(bq, state, v_smooth, plug_out);
-	}
-
-	bq->capacity_cache = clamp(soc, 0, 100);
-	bq->capacity_valid = true;
-	bq->capacity_jiffies = jiffies;
-	bq->last_ext_pwr = ext_pwr;
-
-	return bq->capacity_cache;
+	return bq25890_sample_and_update_fg(bq);
 }
 
-
-static bool bq25890_is_adc_property(enum power_supply_property psp)
-{
-	switch (psp) {
-	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
-	case POWER_SUPPLY_PROP_CURRENT_NOW:
-	case POWER_SUPPLY_PROP_TEMP:
-	case POWER_SUPPLY_PROP_CAPACITY:
-	case POWER_SUPPLY_PROP_CAPACITY_LEVEL:
-	case POWER_SUPPLY_PROP_CAPACITY_ALERT_MIN:
-	case POWER_SUPPLY_PROP_CHARGE_NOW:
-		return true;
-
-	default:
-		return false;
-	}
-}
 
 static irqreturn_t __bq25890_handle_irq(struct bq25890_device *bq);
 static int bq25890_get_chip_state(struct bq25890_device *bq,
@@ -972,20 +1720,28 @@ static void bq25890_power_supply_changed(struct bq25890_device *bq)
  * Emit a uevent only when the user-visible state (capacity or status) actually
  * changes. The periodic refresh runs every 30 s; notifying unconditionally
  * would wake UPower (and re-trigger a sysfs read burst) for no reason.
+ *
+ * ext_pwr / charging must come from the same `sample_and_update_fg` call whose
+ * `state` we just snapshotted (single owner path). We don't re-derive them
+ * here — that would re-issue I2C reads that the sample already did.
  */
 static void bq25890_notify_if_changed(struct bq25890_device *bq,
-				      const struct bq25890_state *state)
+				      const struct bq25890_state *state,
+				      bool ext_pwr, bool charging)
 {
-	bool ext_pwr = bq25890_has_external_power(bq, state);
-	bool charging = bq25890_is_actively_charging(bq, state);
 	int status = bq25890_get_status(bq, state, ext_pwr, charging);
-	int capacity = bq->capacity_valid ? bq->capacity_cache : -1;
+	int capacity;
 
-	if (capacity == bq->notified_capacity && status == bq->notified_status)
+	mutex_lock(&bq->lock);
+	capacity = bq->capacity_valid ? bq->capacity_cache : -1;
+	if (capacity == bq->notified_capacity && status == bq->notified_status) {
+		mutex_unlock(&bq->lock);
 		return;
-
+	}
 	bq->notified_capacity = capacity;
 	bq->notified_status = status;
+	mutex_unlock(&bq->lock);
+
 	bq25890_power_supply_changed(bq);
 }
 
@@ -994,27 +1750,20 @@ static void bq25890_capacity_refresh_work(struct work_struct *work)
 	struct bq25890_device *bq = container_of(work, struct bq25890_device,
 						 capacity_refresh_work.work);
 	struct bq25890_state state;
-	int ret;
+	bool ext_pwr, charging;
+	int soc;
 
-	mutex_lock(&bq->lock);
-	bq25890_field_write(bq, F_CONV_START, 1);
-	mutex_unlock(&bq->lock);
-
-	ret = 0;
-	regmap_field_read_poll_timeout(bq->rmap_fields[F_CONV_START],
-				     ret, !ret, 25000, 1000000);
-
-	ret = bq25890_get_chip_state(bq, &state);
-	if (ret < 0)
+	soc = bq25890_sample_and_update_fg(bq);
+	if (soc < 0)
 		goto reschedule;
 
 	mutex_lock(&bq->lock);
-	bq->state = state;
-	bq->adc_jiffies = jiffies;
+	state = bq->state;
+	ext_pwr = bq->last_ext_pwr;
+	charging = bq->last_charging;
 	mutex_unlock(&bq->lock);
 
-	bq25890_update_capacity(bq, &state);
-	bq25890_notify_if_changed(bq, &state);
+	bq25890_notify_if_changed(bq, &state, ext_pwr, charging);
 
 reschedule:
 	schedule_delayed_work(&bq->capacity_refresh_work,
@@ -1025,8 +1774,7 @@ static void bq25890_capacity_calibrate_work(struct work_struct *work)
 {
 	struct bq25890_device *bq = container_of(work, struct bq25890_device,
 						 capacity_calibrate_work.work);
-	struct bq25890_state state;
-	int ret;
+	int soc;
 
 	mutex_lock(&bq->lock);
 	/* Always re-sync from rested OCV once after boot (UPower may read too early). */
@@ -1036,58 +1784,63 @@ static void bq25890_capacity_calibrate_work(struct work_struct *work)
 	bq->batv_smoothed_jiffies = 0;
 	bq->batv_load_glitch_until = 0;
 	bq->batv_unplug_until = 0;
+	bq->fg_v_ocv_uv = 0;
+	bq->fg_low_v_count = 0;
+	bq->fg_glitch_count = 0;
+	bq->fg_load_jiffies = 0;
+	bq->fg_rest_jiffies = 0;
+	bq->fg_disch_remain_uah = -1;
+	bq->fg_disch_jiffies = 0;
+	bq->fg_proxy_ua = 0;
+	bq->ina228_current_ua = 0;
+	if (bq->ina228) {
+		bq->ina228->current_ua = 0;
+		bq->ina228->bus_uv = 0;
+		bq->ina228->shunt_uv = 0;
+		bq->ina228->power_mw = 0;
+		bq->ina228->dietemp_mdeg_c = 0;
+		bq->ina228->jiffies = 0;
+	}
+	bq->last_ext_pwr = false;
+	bq->last_charging = false;
+	bq->last_fg_mode = BQ_FG_UNKNOWN;
 	bq25890_fg_charge_reset(bq);
 	mutex_unlock(&bq->lock);
 
-	ret = bq25890_get_chip_state(bq, &state);
-	if (ret < 0)
+	soc = bq25890_sample_and_update_fg(bq);
+	if (soc < 0)
 		return;
-
-	mutex_lock(&bq->lock);
-	bq->state = state;
-	bq->last_ext_pwr = bq25890_has_external_power(bq, &state);
-	mutex_unlock(&bq->lock);
-
-	bq25890_update_capacity(bq, &state);
 	bq25890_power_supply_changed(bq);
 }
 
 static void bq25890_update_state(struct bq25890_device *bq,
 				 enum power_supply_property psp,
-				 struct bq25890_state *state)
+				 struct bq25890_state *state,
+				 bool *ext_pwr, bool *charging)
 {
-	bool do_adc_conv = false;
-	bool need_refresh;
-	int ret;
+	/*
+	 * All estimator state, including the cached chip state, is kept under
+	 * bq->lock by `bq25890_sample_and_update_fg`. Property readers either:
+	 *  - trigger a fresh sample (if the last sample is stale), or
+	 *  - read the cached fields without writing them.
+	 * ext_pwr/charging are pulled from the same single-owner cache so the
+	 * caller doesn't re-issue I2C to recompute them.
+	 */
+	*ext_pwr = false;
+	*charging = false;
 
 	mutex_lock(&bq->lock);
-
-	/*
-	 * UPower reads several ADC properties per poll cycle. Without coalescing
-	 * that would mean one chip-state re-read + one ADC conversion (with a
-	 * sleeping poll loop) per property. Refresh at most once per second; real
-	 * plug/unplug events still arrive immediately via the IRQ handler.
-	 */
-	need_refresh = !bq->capacity_valid ||
-		       time_after(jiffies, bq->adc_jiffies + BQ25890_ADC_MIN_INTERVAL);
-
-	if (need_refresh) {
-		/* update state in case we lost an interrupt */
-		__bq25890_handle_irq(bq);
-
-		do_adc_conv = bq25890_is_adc_property(psp);
-		if (do_adc_conv)
-			bq25890_field_write(bq, F_CONV_START, 1);
-
-		bq->adc_jiffies = jiffies;
+	if (!bq->capacity_valid ||
+	    time_after(jiffies, bq->adc_jiffies + BQ25890_ADC_MIN_INTERVAL)) {
+		mutex_unlock(&bq->lock);
+		if (bq25890_sample_and_update_fg(bq) < 0)
+			return;
+		mutex_lock(&bq->lock);
 	}
-
 	*state = bq->state;
+	*ext_pwr = bq->last_ext_pwr;
+	*charging = bq->last_charging;
 	mutex_unlock(&bq->lock);
-
-	if (do_adc_conv)
-		regmap_field_read_poll_timeout(bq->rmap_fields[F_CONV_START],
-			ret, !ret, 25000, 1000000);
 }
 
 static int bq25890_ac_get_property(struct power_supply *psy,
@@ -1098,9 +1851,7 @@ static int bq25890_ac_get_property(struct power_supply *psy,
 	struct bq25890_state state;
 	bool ext_pwr, charging;
 
-	bq25890_update_state(bq, psp, &state);
-	ext_pwr = bq25890_has_external_power(bq, &state);
-	charging = bq25890_is_actively_charging(bq, &state);
+	bq25890_update_state(bq, psp, &state, &ext_pwr, &charging);
 
 	switch (psp) {
 	case POWER_SUPPLY_PROP_ONLINE:
@@ -1129,9 +1880,7 @@ static int bq25890_power_supply_get_property(struct power_supply *psy,
 	if (psy == bq->ac)
 		return bq25890_ac_get_property(psy, psp, val);
 
-	bq25890_update_state(bq, psp, &state);
-	ext_pwr = bq25890_has_external_power(bq, &state);
-	charging = bq25890_is_actively_charging(bq, &state);
+	bq25890_update_state(bq, psp, &state, &ext_pwr, &charging);
 
 	switch (psp) {
 	/* VIRTUAL BATTERY */
@@ -1145,22 +1894,53 @@ static int bq25890_power_supply_get_property(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_CHARGE_FULL:
 		val->intval = charge_full_uah;
 		break;
-	case POWER_SUPPLY_PROP_CHARGE_NOW:
+	case POWER_SUPPLY_PROP_CHARGE_NOW: {
+		long rem;
+
 		ret = bq25890_capacity_cached(bq);
 		if (ret < 0)
 			ret = bq25890_update_capacity(bq, &state);
 		if (ret < 0)
 			return ret;
-		val->intval = ret * (charge_full_uah / 100);
-		break;
-	case POWER_SUPPLY_PROP_TIME_TO_EMPTY_AVG: {
-		int cap = bq25890_capacity_cached(bq);
 
-		/* Seconds left = remaining % * nominal full runtime. */
-		if (ext_pwr || cap < 0)
+		mutex_lock(&bq->lock);
+		rem = bq->fg_disch_remain_uah >= 0 ? bq->fg_disch_remain_uah
+						   : (long)ret *
+						     charge_full_uah / 100;
+		mutex_unlock(&bq->lock);
+
+		if (rem < 0)
+			rem = 0;
+		val->intval = (int)rem;
+		break;
+	}
+	case POWER_SUPPLY_PROP_TIME_TO_EMPTY_AVG: {
+		long rem_uah, curr_ua;
+
+		/* Seconds left = coulomb_remain_uah / abs(discharge_current_ua).
+		 * Uses the same current source policy as CURRENT_NOW: prefer
+		 * the INA228 signed reading when bound, else the proxy.
+		 */
+		if (ext_pwr) {
 			val->intval = 0;
+			break;
+		}
+
+		mutex_lock(&bq->lock);
+		rem_uah = bq->fg_disch_remain_uah;
+		if (bq->ina228 && bq->ina228->present && ina228_enabled)
+			curr_ua = bq->ina228_current_ua;
 		else
-			val->intval = cap * bq25890_full_runtime_sec() / 100;
+			curr_ua = bq->fg_proxy_ua;
+		mutex_unlock(&bq->lock);
+
+		if (rem_uah <= 0 || curr_ua <= 0) {
+			val->intval = 0;
+			break;
+		}
+
+		/* curr_ua is uA: seconds = rem_uah * 1e6 / curr_ua */
+		val->intval = (int)(rem_uah * 1000000LL / curr_ua);
 		break;
 	}
 	case POWER_SUPPLY_PROP_TIME_TO_FULL_NOW: {
@@ -1181,23 +1961,40 @@ static int bq25890_power_supply_get_property(struct power_supply *psy,
 		break;
 	}
 	case POWER_SUPPLY_PROP_CAPACITY:
-		ret = bq25890_update_capacity(bq, &state);
+		ret = bq25890_capacity_cached(bq);
+		if (ret < 0)
+			ret = bq25890_sample_and_update_fg(bq);
 		if (ret < 0)
 			return ret;
 		val->intval = ret;
 		break;
-	case POWER_SUPPLY_PROP_CAPACITY_LEVEL:
+	case POWER_SUPPLY_PROP_CAPACITY_LEVEL: {
+		int low_v_count;
+		int smooth_v;
+
 		ret = bq25890_capacity_cached(bq);
 		if (ret < 0)
-			ret = bq25890_update_capacity(bq, &state);
+			ret = bq25890_sample_and_update_fg(bq);
 		if (ret < 0)
 			return ret;
+
+		mutex_lock(&bq->lock);
+		smooth_v = (int)bq->batv_smoothed_uv;
+		low_v_count = bq->fg_low_v_count;
+		mutex_unlock(&bq->lock);
+
 		/*
-		 * Do not report CRITICAL when smoothed terminal V shows a healthy
-		 * cell — avoids KDE/UPower emergency shutdown on ADC glitches.
+		 * Persistent-low-voltage gate: never report CRITICAL just because
+		 * one sample looked low. Only report CRITICAL after the
+		 * persistent counter has been pinned below the threshold long
+		 * enough, or when the smoothed terminal V is actually low.
 		 */
-		if (ret < 20 && bq->batv_smoothed_uv > 3200000)
-			ret = 20;
+		if (ret < 20) {
+			if (smooth_v > BQ25890_FG_LOW_V_RECOVER_UV &&
+			    (low_v_count < low_v_persistent_count ||
+			     low_v_persistent_count <= 0))
+				ret = 20;
+		}
 		if (ret >= 95)
 			val->intval = POWER_SUPPLY_CAPACITY_LEVEL_FULL;
 		else if (ret >= 70)
@@ -1209,14 +2006,26 @@ static int bq25890_power_supply_get_property(struct power_supply *psy,
 		else
 			val->intval = POWER_SUPPLY_CAPACITY_LEVEL_CRITICAL;
 		break;
-	case POWER_SUPPLY_PROP_CAPACITY_ALERT_MIN:
+	}
+	case POWER_SUPPLY_PROP_CAPACITY_ALERT_MIN: {
+		int low_v_count;
+		int smooth_v;
+
 		ret = bq25890_capacity_cached(bq);
 		if (ret < 0)
-			ret = bq25890_update_capacity(bq, &state);
+			ret = bq25890_sample_and_update_fg(bq);
 		if (ret < 0)
 			return ret;
-		val->intval = ret < 20 && bq->batv_smoothed_uv <= 3200000;
+
+		mutex_lock(&bq->lock);
+		smooth_v = (int)bq->batv_smoothed_uv;
+		low_v_count = bq->fg_low_v_count;
+		mutex_unlock(&bq->lock);
+
+		val->intval = ret < 20 && smooth_v <= BQ25890_FG_LOW_V_THRESH_UV
+			      && low_v_count >= low_v_persistent_count;
 		break;
+	}
 
 	case POWER_SUPPLY_PROP_STATUS:
 		val->intval = bq25890_get_status(bq, &state, ext_pwr, charging);
@@ -1269,7 +2078,22 @@ static int bq25890_power_supply_get_property(struct power_supply *psy,
 		break;
 
 	case POWER_SUPPLY_PROP_CURRENT_NOW:	/* I_BAT now */
-		val->intval = bq25890_get_battery_current_ua(bq, &state);
+		/*
+		 * Prefer the INA228 signed current (positive = discharge)
+		 * when the chip is bound; otherwise fall back to the BQ25895
+		 * ADC reading (which is zero in DISCHARGING_ACTIVE).
+		 */
+		mutex_lock(&bq->lock);
+		if (bq->ina228 && bq->ina228->present && ina228_enabled)
+			val->intval = bq->ina228_current_ua;
+		else {
+			int v = bq25890_get_battery_current_ua(bq, &state);
+
+			mutex_unlock(&bq->lock);
+			val->intval = v;
+			break;
+		}
+		mutex_unlock(&bq->lock);
 		break;
 
 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:	/* I_BAT user limit */
@@ -1312,17 +2136,61 @@ static int bq25890_power_supply_get_property(struct power_supply *psy,
 		val->intval = bq25890_find_val(bq->init_data.ichg, TBL_ICHG);
 		break;
 
-	case POWER_SUPPLY_PROP_VOLTAGE_NOW:	/* V_BAT now */
+	case POWER_SUPPLY_PROP_VOLTAGE_NOW: {
+		int report_v;
+
 		/*
-		 * Return the load-smoothed terminal voltage. Raw ADC pegs at
-		 * 2.304 V under heavy load and causes false critical-battery
-		 * shutdowns in userspace power managers.
+		 * Mode-aware voltage reporting. Prefer the INA228 bus voltage
+		 * when bound; fall back to the smoothed BQ25895 BATV.
 		 */
-		ret = bq25890_update_smoothed_batv(bq, false);
-		if (ret < 0)
-			return ret;
-		val->intval = ret;
+		mutex_lock(&bq->lock);
+		if (bq->ina228 && bq->ina228->present &&
+		    bq->ina228->bus_uv > 0) {
+			report_v = bq->ina228->bus_uv;
+		} else if (bq->last_ext_pwr &&
+			   bq->fg_mode != BQ_FG_DISCHARGING_ACTIVE &&
+			   bq->fg_mode != BQ_FG_DISCHARGING_RESTING) {
+			int ichgr_now = bq25890_ichgr_ua_locked(bq);
+
+			if (ichgr_now >= 0 && bq->batv_smoothed_uv > 0)
+				report_v = (int)bq->batv_smoothed_uv
+					   - (long)ichgr_now *
+					     batt_ir_mohm / 1000
+					   - BQ25890_FG_CHG_POLAR_UV;
+			else
+				report_v = (int)bq->batv_smoothed_uv;
+		} else if (bq->fg_mode == BQ_FG_DISCHARGING_RESTING &&
+			   bq->fg_v_ocv_uv > 0) {
+			report_v = (int)bq->fg_v_ocv_uv;
+		} else {
+			report_v = (int)bq->batv_smoothed_uv;
+		}
+		mutex_unlock(&bq->lock);
+
+		val->intval = report_v;
 		break;
+	}
+
+	/*
+	 * POWER_NOW: instantaneous power in µW.
+	 * UPower uses this (with negative sign) to derive battery state.
+	 * INA228 POWER register gives positive values regardless of direction.
+	 * Negate when charging so UPower sees negative power = charging.
+	 */
+	case POWER_SUPPLY_PROP_POWER_NOW: {
+		int power_mw;
+
+		mutex_lock(&bq->lock);
+		power_mw = bq->ina228 ? bq->ina228->power_mw : 0;
+		/* Charging: negate power so UPower derives negative energy-rate. */
+		if (bq->fg_mode == BQ_FG_CHARGING ||
+		    bq->fg_mode == BQ_FG_CHARGING_DONE)
+			power_mw = -power_mw;
+		mutex_unlock(&bq->lock);
+
+		val->intval = (int)(power_mw * 1000LL);
+		break;
+	}
 
 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE:	/* V_BAT user limit */
 		/*
@@ -1375,6 +2243,7 @@ static int bq25890_power_supply_set_property(struct power_supply *psy,
 {
 	struct bq25890_device *bq = power_supply_get_drvdata(psy);
 	struct bq25890_state state;
+	bool ext_pwr_unused, charging_unused;
 	int maxval, ret;
 	u8 lval;
 
@@ -1382,6 +2251,11 @@ static int bq25890_power_supply_set_property(struct power_supply *psy,
 		return -EINVAL;
 
 	switch (psp) {
+	case POWER_SUPPLY_PROP_CHARGE_FULL:
+	case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
+		/* Clamp to sane range; zero disables FG math. */
+		charge_full_uah = clamp(val->intval, 0, 200000000);
+		return 0;
 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
 		maxval = bq25890_find_val(bq->init_data.ichg, TBL_ICHG);
 		lval = bq25890_find_idx(min(val->intval, maxval), TBL_ICHG);
@@ -1397,7 +2271,7 @@ static int bq25890_power_supply_set_property(struct power_supply *psy,
 		ret = bq25890_field_write(bq, F_EN_HIZ, !val->intval);
 		if (!ret)
 			bq->force_hiz = !val->intval;
-		bq25890_update_state(bq, psp, &state);
+		bq25890_update_state(bq, psp, &state, &ext_pwr_unused, &charging_unused);
 		return ret;
 	default:
 		return -EINVAL;
@@ -1408,6 +2282,8 @@ static int bq25890_power_supply_property_is_writeable(struct power_supply *psy,
 						      enum power_supply_property psp)
 {
 	switch (psp) {
+	case POWER_SUPPLY_PROP_CHARGE_FULL:
+	case POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN:
 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT:
 	case POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE:
 	case POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT:
@@ -1540,10 +2416,23 @@ static irqreturn_t __bq25890_handle_irq(struct bq25890_device *bq)
 	}
 
 	if (new_state.vbus_gd != bq->state.vbus_gd ||
-	    new_state.chrg_status != bq->state.chrg_status)
-		bq25890_update_capacity(bq, &new_state);
+	    new_state.chrg_status != bq->state.chrg_status) {
+		/*
+		 * Estimator state is owned by `bq25890_sample_and_update_fg`,
+		 * which takes `bq->lock` itself; we must release the IRQ-held
+		 * lock before calling it. The chip-state fields we need were
+		 * already mirrored above (force_hiz handling + adc_conv_rate),
+		 * so dropping the lock for the function call is safe.
+		 */
+		memcpy(&bq->state, &new_state, sizeof(new_state));
+		bq->adc_jiffies = jiffies;
+		mutex_unlock(&bq->lock);
+		bq25890_sample_and_update_fg(bq);
+		mutex_lock(&bq->lock);
+	} else {
+		bq->state = new_state;
+	}
 
-	bq->state = new_state;
 	bq25890_power_supply_changed(bq);
 
 	return IRQ_HANDLED;
@@ -1687,14 +2576,25 @@ static const enum power_supply_property bq25890_power_supply_props[] = {
 	POWER_SUPPLY_PROP_CHARGE_FULL_DESIGN,
 	POWER_SUPPLY_PROP_CHARGE_FULL,
 	POWER_SUPPLY_PROP_CHARGE_NOW,
+	POWER_SUPPLY_PROP_CHARGE_TYPE,
 	POWER_SUPPLY_PROP_CAPACITY_LEVEL,
 	POWER_SUPPLY_PROP_CAPACITY,
+	POWER_SUPPLY_PROP_CAPACITY_ALERT_MIN,
 	POWER_SUPPLY_PROP_MANUFACTURER,
 	POWER_SUPPLY_PROP_MODEL_NAME,
 	POWER_SUPPLY_PROP_STATUS,
 	POWER_SUPPLY_PROP_HEALTH,
-	POWER_SUPPLY_PROP_VOLTAGE_NOW,
 	POWER_SUPPLY_PROP_CURRENT_NOW,
+	POWER_SUPPLY_PROP_VOLTAGE_NOW,
+	POWER_SUPPLY_PROP_POWER_NOW,
+	POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT,
+	POWER_SUPPLY_PROP_CONSTANT_CHARGE_CURRENT_MAX,
+	POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE,
+	POWER_SUPPLY_PROP_CONSTANT_CHARGE_VOLTAGE_MAX,
+	POWER_SUPPLY_PROP_PRECHARGE_CURRENT,
+	POWER_SUPPLY_PROP_CHARGE_TERM_CURRENT,
+	POWER_SUPPLY_PROP_INPUT_CURRENT_LIMIT,
+	POWER_SUPPLY_PROP_TEMP,
 	POWER_SUPPLY_PROP_TIME_TO_EMPTY_AVG,
 	POWER_SUPPLY_PROP_TIME_TO_FULL_NOW,
 };
@@ -1725,9 +2625,398 @@ static const struct power_supply_desc bq25890_ac_desc = {
 	.get_property = bq25890_power_supply_get_property,
 };
 
+/* --- Diagnostic sysfs (read-only) --- */
+static const char *bq25890_fg_mode_name(enum bq25890_fg_mode mode)
+{
+	switch (mode) {
+	case BQ_FG_CHARGING:		return "charging";
+	case BQ_FG_CHARGING_DONE:	return "full";
+	case BQ_FG_DISCHARGING_ACTIVE:	return "active";
+	case BQ_FG_DISCHARGING_RESTING:	return "resting";
+	default:			return "unknown";
+	}
+}
+
+static ssize_t bq25890_fg_show_str(struct device *dev,
+				   struct device_attribute *attr, char *buf)
+{
+	struct power_supply *psy = to_power_supply(dev);
+	struct bq25890_device *bq = power_supply_get_drvdata(psy);
+	enum bq25890_fg_mode mode;
+
+	mutex_lock(&bq->lock);
+	mode = bq->fg_mode;
+	mutex_unlock(&bq->lock);
+
+	return sysfs_emit(buf, "%s\n", bq25890_fg_mode_name(mode));
+}
+
+static int bq25890_fg_get_v_term(struct bq25890_device *bq, bool rd)
+{
+	int v;
+
+	mutex_lock(&bq->lock);
+	v = (int)bq->batv_smoothed_uv;
+	mutex_unlock(&bq->lock);
+	return v;
+}
+
+static int bq25890_fg_get_v_ocv(struct bq25890_device *bq, bool rd)
+{
+	int v;
+
+	mutex_lock(&bq->lock);
+	v = (int)bq->fg_v_ocv_uv;
+	mutex_unlock(&bq->lock);
+	return v;
+}
+
+static int bq25890_fg_get_proxy_ua(struct bq25890_device *bq, bool rd)
+{
+	int v;
+
+	mutex_lock(&bq->lock);
+	v = bq->fg_proxy_ua;
+	mutex_unlock(&bq->lock);
+	return v;
+}
+
+static int bq25890_fg_get_remain(struct bq25890_device *bq, bool rd)
+{
+	long v;
+
+	mutex_lock(&bq->lock);
+	v = bq->fg_disch_remain_uah;
+	mutex_unlock(&bq->lock);
+	if (v < 0)
+		v = 0;
+	return (int)v;
+}
+
+static int bq25890_fg_get_added(struct bq25890_device *bq, bool rd)
+{
+	long v;
+
+	mutex_lock(&bq->lock);
+	v = bq->chg_added_uah;
+	mutex_unlock(&bq->lock);
+	return (int)v;
+}
+
+static int bq25890_fg_get_glitch(struct bq25890_device *bq, bool rd)
+{
+	int v;
+
+	mutex_lock(&bq->lock);
+	v = bq->fg_glitch_count;
+	mutex_unlock(&bq->lock);
+	return v;
+}
+
+static int bq25890_fg_get_low_v(struct bq25890_device *bq, bool rd)
+{
+	int v;
+
+	mutex_lock(&bq->lock);
+	v = bq->fg_low_v_count;
+	mutex_unlock(&bq->lock);
+	return v;
+}
+
+static int bq25890_fg_get_rest_sec(struct bq25890_device *bq, bool rd)
+{
+	int v;
+
+	mutex_lock(&bq->lock);
+	if (bq->fg_load_jiffies == 0)
+		v = 0;
+	else
+		v = (int)((long)(jiffies - bq->fg_load_jiffies) / HZ);
+	mutex_unlock(&bq->lock);
+	if (v < 0)
+		v = 0;
+	return v;
+}
+
+/* --- INA228 sysfs getters --- */
+
+static int bq25890_fg_get_ina228_present(struct bq25890_device *bq, bool rd)
+{
+	int v;
+
+	mutex_lock(&bq->lock);
+	v = (bq->ina228 && bq->ina228->present) ? 1 : 0;
+	mutex_unlock(&bq->lock);
+	return v;
+}
+
+static int bq25890_fg_get_ina228_current_ua(struct bq25890_device *bq, bool rd)
+{
+	int v;
+
+	if (!bq->ina228 || !bq->ina228->present)
+		return -1;
+	mutex_lock(&bq->lock);
+	v = bq->ina228->current_ua;
+	mutex_unlock(&bq->lock);
+	return v;
+}
+
+static int bq25890_fg_get_ina228_raw(struct bq25890_device *bq, bool rd)
+{
+	int val;
+	(void)rd;
+	if (!bq->ina228 || !bq->ina228->present)
+		return -1;
+	if (bq25890_ina228_field_read(bq->ina228, F_ina228_CURRENT, &val) < 0)
+		return -1;
+	return val;
+}
+
+static int bq25890_fg_get_ina228_shuntcal(struct bq25890_device *bq, bool rd)
+{
+	(void)rd;
+	if (!bq->ina228 || !bq->ina228->present)
+		return -1;
+	{
+		u16 v;
+		int r = bq25890_ina228_read_reg16(bq->ina228->client, INA228_REG_SHUNTCAL, &v);
+		return r < 0 ? -1 : (int)(s16)v;
+	}
+}
+
+static int bq25890_fg_get_ina228_bus_uv(struct bq25890_device *bq, bool rd)
+{
+	int v;
+
+	if (!bq->ina228 || !bq->ina228->present)
+		return -1;
+	mutex_lock(&bq->lock);
+	v = bq->ina228->bus_uv;
+	mutex_unlock(&bq->lock);
+	return v;
+}
+
+static int bq25890_fg_get_ina228_shunt_uv(struct bq25890_device *bq, bool rd)
+{
+	int v;
+
+	if (!bq->ina228 || !bq->ina228->present)
+		return -1;
+	mutex_lock(&bq->lock);
+	v = bq->ina228->shunt_uv;
+	mutex_unlock(&bq->lock);
+	return v;
+}
+
+static int bq25890_fg_get_ina228_power_mw(struct bq25890_device *bq, bool rd)
+{
+	int v;
+
+	if (!bq->ina228 || !bq->ina228->present)
+		return -1;
+	mutex_lock(&bq->lock);
+	v = bq->ina228->power_mw;
+	mutex_unlock(&bq->lock);
+	return v;
+}
+
+static int bq25890_fg_get_ina228_dietemp_mdeg_c(struct bq25890_device *bq, bool rd)
+{
+	int v;
+
+	if (!bq->ina228 || !bq->ina228->present)
+		return -1;
+	mutex_lock(&bq->lock);
+	v = bq->ina228->dietemp_mdeg_c;
+	mutex_unlock(&bq->lock);
+	return v;
+}
+
+static int bq25890_fg_get_coulomb_uah(struct bq25890_device *bq, bool rd)
+{
+	long v;
+
+	mutex_lock(&bq->lock);
+	v = bq->fg_disch_remain_uah;
+	mutex_unlock(&bq->lock);
+	if (v < 0)
+		v = 0;
+	return (int)v;
+}
+
+static ssize_t bq25890_fg_store_coulomb_uah(struct device *dev,
+					     struct device_attribute *attr,
+					     const char *buf, size_t count)
+{
+	struct power_supply *psy = to_power_supply(dev);
+	struct bq25890_device *bq = power_supply_get_drvdata(psy);
+	long v;
+	int err;
+
+	err = kstrtol(buf, 10, &v);
+	if (err < 0)
+		return err;
+
+	mutex_lock(&bq->lock);
+	bq->fg_disch_remain_uah = clamp(v, 0L, (long)bq->chg_remain_uah);
+	mutex_unlock(&bq->lock);
+
+	return count;
+}
+
+#define BQ25890_FG_INT_SHOW_FN(name)                                          \
+static ssize_t bq25890_fg_show_##name(struct device *dev,                     \
+				       struct device_attribute *attr,         \
+				       char *buf)                             \
+{                                                                              \
+	struct power_supply *psy = to_power_supply(dev);                       \
+	struct bq25890_device *bq = power_supply_get_drvdata(psy);              \
+	return sysfs_emit(buf, "%d\n", bq25890_fg_get_##name(bq, false));       \
+}
+
+BQ25890_FG_INT_SHOW_FN(v_term)
+BQ25890_FG_INT_SHOW_FN(v_ocv)
+BQ25890_FG_INT_SHOW_FN(proxy_ua)
+BQ25890_FG_INT_SHOW_FN(remain)
+BQ25890_FG_INT_SHOW_FN(added)
+BQ25890_FG_INT_SHOW_FN(glitch)
+BQ25890_FG_INT_SHOW_FN(low_v)
+BQ25890_FG_INT_SHOW_FN(rest_sec)
+BQ25890_FG_INT_SHOW_FN(ina228_present)
+BQ25890_FG_INT_SHOW_FN(ina228_current_ua)
+BQ25890_FG_INT_SHOW_FN(ina228_bus_uv)
+BQ25890_FG_INT_SHOW_FN(ina228_shunt_uv)
+BQ25890_FG_INT_SHOW_FN(ina228_power_mw)
+BQ25890_FG_INT_SHOW_FN(ina228_dietemp_mdeg_c)
+BQ25890_FG_INT_SHOW_FN(coulomb_uah)
+BQ25890_FG_INT_SHOW_FN(ina228_raw)
+BQ25890_FG_INT_SHOW_FN(ina228_shuntcal)
+
+static DEVICE_ATTR(fg_mode, 0444, bq25890_fg_show_str, NULL);
+static DEVICE_ATTR(v_term_uv, 0444, bq25890_fg_show_v_term, NULL);
+static DEVICE_ATTR(v_ocv_uv, 0444, bq25890_fg_show_v_ocv, NULL);
+static DEVICE_ATTR(i_proxy_ua, 0444, bq25890_fg_show_proxy_ua, NULL);
+static DEVICE_ATTR(remain_uah, 0444, bq25890_fg_show_remain, NULL);
+static DEVICE_ATTR(added_uah, 0444, bq25890_fg_show_added, NULL);
+static DEVICE_ATTR(glitch_count, 0444, bq25890_fg_show_glitch, NULL);
+static DEVICE_ATTR(low_v_count, 0444, bq25890_fg_show_low_v, NULL);
+static DEVICE_ATTR(rest_seconds, 0444, bq25890_fg_show_rest_sec, NULL);
+static DEVICE_ATTR(ina228_present, 0444, bq25890_fg_show_ina228_present, NULL);
+static DEVICE_ATTR(ina228_current_ua, 0444, bq25890_fg_show_ina228_current_ua, NULL);
+static DEVICE_ATTR(ina228_bus_uv, 0444, bq25890_fg_show_ina228_bus_uv, NULL);
+static DEVICE_ATTR(ina228_shunt_uv, 0444, bq25890_fg_show_ina228_shunt_uv, NULL);
+static DEVICE_ATTR(ina228_power_mw, 0444, bq25890_fg_show_ina228_power_mw, NULL);
+static DEVICE_ATTR(ina228_dietemp_mdeg_c, 0444, bq25890_fg_show_ina228_dietemp_mdeg_c, NULL);
+static DEVICE_ATTR(coulomb_uah, 0644,
+		   bq25890_fg_show_coulomb_uah,
+		   bq25890_fg_store_coulomb_uah);
+static ssize_t bq25890_fg_show_ina228_debug(struct device *dev,
+				       struct device_attribute *attr,
+				       char *buf)
+{
+	struct power_supply *psy = to_power_supply(dev);
+	struct bq25890_device *bq = power_supply_get_drvdata(psy);
+	u8 cbuf[3];
+	u16 shuntcal_val;
+	s32 curr_raw;
+	int ret;
+
+	if (!bq->ina228 || !bq->ina228->present)
+		return sysfs_emit(buf, "-ENODEV\n");
+
+	ret = i2c_smbus_read_i2c_block_data(bq->ina228->client,
+					    INA228_REG_CURRENT, 3, cbuf);
+	if (ret < 0)
+		return sysfs_emit(buf, "curr_read_err=%d\n", ret);
+
+	bq25890_ina228_read_reg16(bq->ina228->client, INA228_REG_SHUNTCAL, &shuntcal_val);
+
+	curr_raw = ((u32)cbuf[0] << 16) | ((u32)cbuf[1] << 8) | cbuf[2];
+
+	return sysfs_emit(buf,
+		"curr_bytes=%02x%02x%02x curr_raw=0x%06x curr_sh4=%d lsb_na=%u SHUNT_CAL=0x%04x(%d)\n",
+		cbuf[0], cbuf[1], cbuf[2],
+		curr_raw & 0xFFFFFF,
+		(int)((s32)curr_raw >> 4),
+		bq->ina228->current_lsb_na,
+		shuntcal_val, (s16)shuntcal_val);
+}
+
+static ssize_t bq25890_fg_store_ina228_debug(struct device *dev,
+					struct device_attribute *attr,
+					const char *buf, size_t count)
+{
+	struct power_supply *psy = to_power_supply(dev);
+	struct bq25890_device *bq = power_supply_get_drvdata(psy);
+	u8 cbuf[3], vbuf[3];
+	u32 curr_raw, vshunt_raw;
+	u16 shuntcal_val;
+	int ret;
+
+	if (!bq->ina228 || !bq->ina228->present)
+		return -ENODEV;
+
+	ret = i2c_smbus_read_i2c_block_data(bq->ina228->client,
+					    INA228_REG_CURRENT, 3, cbuf);
+	if (ret < 0)
+		return sysfs_emit((char *)buf, "err=%d\n", ret);
+
+	ret = i2c_smbus_read_i2c_block_data(bq->ina228->client,
+					    INA228_REG_VSHUNT, 3, vbuf);
+	if (ret < 0)
+		return sysfs_emit((char *)buf, "err=%d\n", ret);
+
+	bq25890_ina228_read_reg16(bq->ina228->client, INA228_REG_SHUNTCAL, &shuntcal_val);
+
+	curr_raw = ((u32)cbuf[0] << 16) | ((u32)cbuf[1] << 8) | cbuf[2];
+	vshunt_raw = ((u32)vbuf[0] << 16) | ((u32)vbuf[1] << 8) | vbuf[2];
+
+	dev_info(bq->dev,
+		"INA228 DEBUG: CURR_bytes=%02x%02x%02x raw24=0x%06x lsb_na=%u SHUNT_CAL=0x%04x\n"
+		"INA228 DEBUG: VSHUNT_bytes=%02x%02x%02x raw24=0x%06x adc_range=%d\n",
+		cbuf[0], cbuf[1], cbuf[2], curr_raw,
+		bq->ina228->current_lsb_na, shuntcal_val,
+		vbuf[0], vbuf[1], vbuf[2], vshunt_raw,
+		bq->ina228->adc_range);
+
+	return count;
+}
+
+static DEVICE_ATTR(ina228_raw, 0444, bq25890_fg_show_ina228_raw, NULL);
+static DEVICE_ATTR(ina228_shuntcal, 0444, bq25890_fg_show_ina228_shuntcal, NULL);
+static DEVICE_ATTR(ina228_debug, 0644, bq25890_fg_show_ina228_debug, bq25890_fg_store_ina228_debug);
+
+static struct attribute *bq25890_fg_attrs[] = {
+	&dev_attr_fg_mode.attr,
+	&dev_attr_v_term_uv.attr,
+	&dev_attr_v_ocv_uv.attr,
+	&dev_attr_i_proxy_ua.attr,
+	&dev_attr_remain_uah.attr,
+	&dev_attr_added_uah.attr,
+	&dev_attr_glitch_count.attr,
+	&dev_attr_low_v_count.attr,
+	&dev_attr_rest_seconds.attr,
+	&dev_attr_ina228_present.attr,
+	&dev_attr_ina228_current_ua.attr,
+	&dev_attr_ina228_bus_uv.attr,
+	&dev_attr_ina228_shunt_uv.attr,
+	&dev_attr_ina228_power_mw.attr,
+	&dev_attr_ina228_dietemp_mdeg_c.attr,
+	&dev_attr_coulomb_uah.attr,
+	&dev_attr_ina228_raw.attr,
+	&dev_attr_ina228_shuntcal.attr,
+	&dev_attr_ina228_debug.attr,
+	NULL,
+};
+ATTRIBUTE_GROUPS(bq25890_fg);
+
 static int bq25890_power_supply_init(struct bq25890_device *bq)
 {
-	struct power_supply_config psy_cfg = { .drv_data = bq, };
+	struct power_supply_config psy_cfg = {
+		.drv_data = bq,
+		.attr_grp = bq25890_fg_groups,
+	};
 
 	bq->capacity_cache = 0;
 	bq->capacity_valid = false;
@@ -1737,12 +3026,22 @@ static int bq25890_power_supply_init(struct bq25890_device *bq)
 	bq->batv_smoothed_jiffies = 0;
 	bq->batv_load_glitch_until = 0;
 	bq->batv_unplug_until = 0;
+	bq->fg_v_ocv_uv = 0;
 	bq->chg_remain_uah = -1;
 	bq->chg_added_uah = 0;
 	bq->chg_last_jiffies = 0;
 	bq->adc_jiffies = 0;
 	bq->notified_capacity = -1;
 	bq->notified_status = -1;
+	bq->fg_mode = BQ_FG_UNKNOWN;
+	bq->last_fg_mode = BQ_FG_UNKNOWN;
+	bq->fg_proxy_ua = 0;
+	bq->fg_disch_remain_uah = -1;
+	bq->fg_disch_jiffies = 0;
+	bq->fg_load_jiffies = 0;
+	bq->fg_rest_jiffies = 0;
+	bq->fg_low_v_count = 0;
+	bq->fg_glitch_count = 0;
 
 	/* Get ID for the device */
 	mutex_lock(&bq25890_id_mutex);
@@ -1769,6 +3068,16 @@ static int bq25890_power_supply_init(struct bq25890_device *bq)
 	bq->ac = devm_power_supply_register(bq->dev, &bq->ac_desc, &psy_cfg);
 	if (IS_ERR(bq->ac))
 		return PTR_ERR(bq->ac);
+
+	/*
+	 * Diagnostic fuel-gauge attributes (read-only). Skip silently on
+	 * kernels without struct power_supply_config.attr_grp; behavior is
+	 * unchanged otherwise.
+	 */
+#ifdef CONFIG_POWER_SUPPLY_DEBUG
+	/* placeholder: left to platform integration; intentionally no-op in
+	 * upstream driver. */
+#endif
 
 	return 0;
 }
@@ -2254,6 +3563,14 @@ static int bq25890_probe(struct i2c_client *client)
 	if (ret < 0)
 		return dev_err_probe(dev, ret, "registering power supply\n");
 
+	/*
+	 * Optional INA228 high-side current monitor at 0x40. Probe failure
+	 * is non-fatal; we just run the load-aware estimator without it.
+	 */
+	ret = bq25890_ina228_probe(bq);
+	if (ret && ret != -ENODEV)
+		dev_warn(dev, "INA228 probe failed: %d\n", ret);
+
 	schedule_delayed_work(&bq->capacity_calibrate_work,
 			      BQ25890_CAPACITY_BOOT_CALIB_DELAY);
 	schedule_delayed_work(&bq->capacity_refresh_work,
@@ -2283,6 +3600,8 @@ static void bq25890_remove(struct i2c_client *client)
 		usb_unregister_notifier(bq->usb_phy, &bq->usb_nb);
 		cancel_work_sync(&bq->usb_work);
 	}
+
+	bq25890_ina228_release(bq);
 
 	if (!bq->skip_reset) {
 		/* reset all registers to default values */
