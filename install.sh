@@ -662,6 +662,13 @@ copy_sources() {
 	if [ "$(pwd -P)" != "$PIBRICK_LIB" ]; then
 		rsync "${rsync_opts[@]}" . "$PIBRICK_LIB/"
 	fi
+	# rsync preserves the source file's mode; ensure install.sh and
+	# build.sh are executable when copied to PIBRICK_LIB. Without this,
+	# a fresh clone whose install.sh is 0644 would copy a 0644 file to
+	# /usr/lib/pibrick/install.sh, and `sudo install.sh --foo` would
+	# fail with "command not found" even though the file is there.
+	chmod +x "$PIBRICK_LIB/install.sh" 2>/dev/null || true
+	chmod +x "$PIBRICK_LIB/build.sh" 2>/dev/null || true
 }
 
 # ── Install tools ───────────────────────────────────────────────────────────────

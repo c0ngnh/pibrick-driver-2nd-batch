@@ -107,9 +107,11 @@ of the repo:
 **Always works** (no path needed):
 
 ```bash
-sudo /usr/lib/pibrick/install.sh --battery-status
-sudo /usr/lib/pibrick/install.sh --status-calibration
-sudo /usr/lib/pibrick/install.sh --apply-calibration
+# Pick whichever install.sh is on your filesystem:
+LIB="$(ls -d /usr/lib/pibrick ~/pibrick-driver-2nd-batch 2>/dev/null | head -1)"
+sudo "$LIB/install.sh" --battery-status
+sudo "$LIB/install.sh" --status-calibration
+sudo "$LIB/install.sh" --apply-calibration
 ```
 
 **Force a specific mode:**
@@ -160,23 +162,54 @@ The calibration system has **two separate functions**:
 1. **Logging Service** - Collects battery data (voltage, SOC, current) for analysis
 2. **Apply OCV Table** - Actually installs the calibrated table to the driver
 
+#### Install Layout (paths matter!)
+
+The exact paths in the commands below depend on how you installed:
+
+| Layout | Source tree | Tools dir | Wrapper script |
+|--------|-------------|-----------|----------------|
+| **System-wide** (default with `sudo bash install.sh`) | `/usr/lib/pibrick/` | `/usr/lib/pibrick/battery-tools/` | `/usr/lib/pibrick/install.sh` |
+| **Per-user / clone** (running as your normal user) | `~/pibrick-driver-2nd-batch/` | `~/battery-tools/` | `~/pibrick-driver-2nd-batch/install.sh` |
+
+If you cloned the repo and ran `sudo bash install.sh`, the install will copy
+files to `~/battery-tools/` because that's what install.sh resolves for the
+`PIBRICK_USER_HOME` env var. To use the system-wide paths, run the install
+as root without `PIBRICK_USER_HOME` set, e.g. `sudo -E bash install.sh` after
+`unset PIBRICK_USER_HOME`.
+
+You can find your layout at any time:
+
+```bash
+# Wrapper script:
+which install.sh 2>/dev/null
+ls -d ~/pibrick-driver-2nd-batch /usr/lib/pibrick 2>/dev/null
+
+# Tools dir:
+ls -d ~/battery-tools /usr/lib/pibrick/battery-tools 2>/dev/null
+```
+
+In the rest of this section, paths are shown as `<LIB>` and `<TOOLS>`
+where `<LIB>` is the source tree and `<TOOLS>` is where the Python scripts
+landed. The wrapper script (where `--enable-calibration`, `--status-calibration`,
+etc. live) is always `<LIB>/install.sh`.
+
 #### Calibration Workflow
 
 ```bash
 # Step 1: Enable logging (collects data continuously in background)
-sudo /usr/lib/pibrick/install.sh --enable-calibration
+sudo <LIB>/install.sh --enable-calibration
 
 # Step 2: Let it collect data (use your device normally for 1-2 days)
 # - Resting measurements are automatically selected
 # - At least 1000 samples recommended for accurate calibration
 
 # Step 3: Check status and confidence level
-sudo /usr/lib/pibrick/install.sh --status-calibration
+sudo <LIB>/install.sh --status-calibration
 # Look for "Confidence: 0.97 (97%)" - higher is better
 # Need at least 85% confidence to apply
 
 # Step 4: Apply the calibrated OCV table to driver (only when ready)
-sudo /usr/lib/pibrick/install.sh --apply-calibration
+sudo <LIB>/install.sh --apply-calibration
 
 # Step 5: Driver will be rebuilt and reloaded automatically
 ```
@@ -212,7 +245,7 @@ This affects calibration as follows:
 
 ```bash
 # 1. Enable logging as usual
-sudo /usr/lib/pibrick/install.sh --enable-calibration
+sudo <LIB>/install.sh --enable-calibration
 
 # 2. Use the device normally through 2-3 full charge cycles
 #    (one charge cycle = drain to ~10 % then full charge to 100 %).
@@ -220,14 +253,12 @@ sudo /usr/lib/pibrick/install.sh --enable-calibration
 
 # 3. Check status. With --no-ina228 the threshold drops to 70 % and
 #    min samples per bucket drops to 2.
-sudo /usr/lib/pibrick/install.sh --status-calibration
+sudo <LIB>/install.sh --status-calibration
 #    Or directly:
-sudo python3 /usr/lib/pibrick/battery-tools/battery-auto-calibrator.py \
-     --status --no-ina228
+sudo python3 <TOOLS>/battery-auto-calibrator.py --status --no-ina228
 
 # 4. Apply the calibrated OCV table
-sudo python3 /usr/lib/pibrick/battery-tools/battery-auto-calibrator.py \
-     --apply --no-ina228 --yes
+sudo python3 <TOOLS>/battery-auto-calibrator.py --apply --no-ina228 --yes
 ```
 
 What `--no-ina228` changes internally:
@@ -263,27 +294,28 @@ The auto-detect only applies when `fg_v_ocv_tau_sec_override` is left at -1
 
 #### Manual Calibration Tools
 
-You can also use the Python tools directly. The install path depends on whether
-you installed system-wide or per-user (see [Install Layout](#install-layout)):
+You can also use the Python tools directly. Use the same `<LIB>` / `<TOOLS>`
+paths as in the [Install Layout](#install-layout) section above.
 
 ```bash
-# System-wide install (default when run via /usr/lib/pibrick/install.sh)
+# Direct call to the auto-calibrator (system-wide install)
 sudo python3 /usr/lib/pibrick/battery-tools/battery-auto-calibrator.py --status
 
-# Per-user install (default when run as non-root from a clone)
-python3 $HOME/battery-tools/battery-auto-calibrator.py --status
+# Per-user install (most clones land here)
+sudo python3 $HOME/battery-tools/battery-auto-calibrator.py --status
 
-# Or always via install.sh wrapper (no path needed):
-sudo /usr/lib/pibrick/install.sh --status-calibration
+# Or via <TOOLS>:
+sudo python3 <TOOLS>/battery-auto-calibrator.py --status
 
 # Generate OCV table from existing data (dry run - shows what would be applied)
-sudo python3 /usr/lib/pibrick/battery-tools/battery-auto-calibrator.py --generate
+sudo python3 <TOOLS>/battery-auto-calibrator.py --check
 
 # Apply the OCV table to the driver (works with both INA228 and non-INA228 builds)
-sudo python3 /usr/lib/pibrick/battery-tools/battery-auto-calibrator.py --apply
+sudo python3 <TOOLS>/battery-auto-calibrator.py --apply
 
-# Force rebuild and reload driver with current OCV table
-sudo python3 /usr/lib/pibrick/battery-tools/battery-auto-calibrator.py --build-driver
+# Without INA228 (uses the stricter thresholds and filters described above):
+sudo python3 <TOOLS>/battery-auto-calibrator.py --check --no-ina228
+sudo python3 <TOOLS>/battery-auto-calibrator.py --apply --no-ina228 --yes
 ```
 
 **Note**: The `--apply-calibration` step works correctly **regardless of whether INA228 is present**. The OCV table affects the driver's voltage-to-SOC lookup, which is independent of the INA228 current sensor. The calibration data uses BQ25895's `voltage_now` (always available) — INA228 is only used for more accurate current measurements during data collection.
@@ -292,10 +324,15 @@ sudo python3 /usr/lib/pibrick/battery-tools/battery-auto-calibrator.py --build-d
 
 The battery driver exposes 10+ module parameters (battery capacity, INA228 shunt, discharge profiles, etc.). You can read and modify these live via `install.sh` or directly via `battery_set.py`.
 
+The `install.sh` wrapper mentioned below is `<LIB>/install.sh` from the
+[Install Layout](#install-layout) section. If you cloned the repo as a
+per-user install, that means `~/pibrick-driver-2nd-batch/install.sh` — not
+`/usr/lib/pibrick/install.sh` (which only exists after a system-wide install).
+
 #### Show Current Status & Persisted Config
 
 ```bash
-sudo /usr/lib/pibrick/install.sh --battery-status
+sudo <LIB>/install.sh --battery-status
 ```
 
 This shows:
@@ -307,7 +344,7 @@ This shows:
 #### Interactive Configuration (recommended for first-time setup)
 
 ```bash
-sudo /usr/lib/pibrick/install.sh --battery-config
+sudo <LIB>/install.sh --battery-config
 ```
 
 This launches the **interactive setter** which lets you:
@@ -322,24 +359,24 @@ Set a single value directly:
 
 ```bash
 # Set battery capacity to 3800 mAh (non-persistent, until reboot)
-sudo /usr/lib/pibrick/install.sh --battery-config charge_full_uah 3800000
+sudo <LIB>/install.sh --battery-config charge_full_uah 3800000
 
 # Set and persist (saves to /etc/modprobe.d/ + reloads driver)
-sudo /usr/lib/pibrick/install.sh --battery-config charge_full_uah 3800 mAh --persist
+sudo <LIB>/install.sh --battery-config charge_full_uah 3800 mAh --persist
 
 # Set INA228 shunt for 15 mΩ resistor, persist it
-sudo /usr/lib/pibrick/install.sh --battery-config ina228_shunt_uohm 15 mΩ --persist
+sudo <LIB>/install.sh --battery-config ina228_shunt_uohm 15 mΩ --persist
 
 # Set fuel-gauge discharge profile (700 mA idle, 40% under load, 2200 mA ceiling)
-sudo /usr/lib/pibrick/install.sh --battery-config discharge_avg_ua 700 mA --persist
-sudo /usr/lib/pibrick/install.sh --battery-config discharge_load_factor_pct 40 --persist
-sudo /usr/lib/pibrick/install.sh --battery-config discharge_max_ua 2200 mA --persist
+sudo <LIB>/install.sh --battery-config discharge_avg_ua 700 mA --persist
+sudo <LIB>/install.sh --battery-config discharge_load_factor_pct 40 --persist
+sudo <LIB>/install.sh --battery-config discharge_max_ua 2200 mA --persist
 
 # Show all values
-sudo /usr/lib/pibrick/install.sh --battery-config --show
+sudo <LIB>/install.sh --battery-config --show
 
 # List all parameters
-sudo /usr/lib/pibrick/install.sh --battery-config --list
+sudo <LIB>/install.sh --battery-config --list
 ```
 
 #### Available Battery Parameters
@@ -503,19 +540,19 @@ SOC levels: [1, 2, 3, 4, 5, ... 92, 93, 94]
 
 ```bash
 # Check calibration status
-sudo python3 /usr/lib/pibrick/battery-tools/battery-auto-calibrator.py --status
+sudo python3 <TOOLS>/battery-auto-calibrator.py --status
 
 # Or via install.sh wrapper:
-sudo /usr/lib/pibrick/install.sh --status-calibration
+sudo <LIB>/install.sh --status-calibration
 
 # Analyze existing data
-sudo python3 /usr/lib/pibrick/battery-tools/battery-auto-calibrator.py --check
+sudo python3 <TOOLS>/battery-auto-calibrator.py --check
 
 # Generate OCV table from data
-sudo python3 /usr/lib/pibrick/battery-tools/battery-calibration-logger.py --generate-ocv-table
+sudo python3 <TOOLS>/battery-calibration-logger.py --generate-ocv-table
 
 # Apply the calibrated OCV table
-sudo /usr/lib/pibrick/install.sh --apply-calibration
+sudo <LIB>/install.sh --apply-calibration
 ```
 
 #### Calibration Log Files
