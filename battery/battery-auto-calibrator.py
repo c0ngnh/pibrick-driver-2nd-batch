@@ -291,7 +291,13 @@ def show_status():
     if not STATUS_FILE.exists():
         print("No calibration data yet. Run calibration logger first.")
         print("\nTo start calibration logging:")
-        print("  sudo python3 /home/congn/battery-tools/battery-calibration-logger.py")
+        # Resolve the actual install path so the hint works for any user
+        env_path = os.environ.get("PIBRICK_USER_HOME")
+        if not env_path:
+            env_path = os.path.join(os.path.expanduser("~"), "battery-tools")
+        if not os.path.exists(os.path.join(env_path, "battery-calibration-logger.py")):
+            env_path = "/usr/lib/pibrick/battery-tools"
+        print(f"  sudo python3 {env_path}/battery-calibration-logger.py")
         print("\nOr enable the service:")
         print("  sudo systemctl enable pibrick-battery-calibration")
         print("  sudo systemctl start pibrick-battery-calibration")

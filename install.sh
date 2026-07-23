@@ -26,8 +26,87 @@ error()   { echo -e "${RED}[ERROR]${RESET} $*" >&2; }
 # ── Config paths ───────────────────────────────────────────────────────────────
 PANEL_CONFIG=/etc/pibrick.panel
 DISPLAY_REFRESH_CONFIG=/etc/pibrick.display-refresh
-PIBRICK_TOOLS=/home/congn/battery-tools
 PIBRICK_LIB=/usr/lib/pibrick
+PIBRICK_CONF=/etc/pibrick.conf
+
+# ── Determine install layout ───────────────────────────────────────────────────
+# Three installation modes are supported:
+#
+#   1. System-wide install (default when run from /usr/lib/pibrick/install.sh)
+#      - Tools go to /usr/lib/pibrick/battery-tools/
+#      - User can symlink or call via /usr/lib/pibrick/install.sh --battery-config
+#      - Most distro-friendly: single shared location
+#
+#   2. Per-user install (default when run as non-root from a clone of this repo)
+#      - Tools go to $HOME/battery-tools/ (e.g. /home/alice/battery-tools/)
+#      - Each user gets their own copy
+#      - No sudo required to call tools after install
+#
+#   3. Custom path (set PIBRICK_USER=1 or PIBRICK_USER_HOME=/some/path)
+#      - Explicit override for unusual layouts
+#
+# Auto-detection rules (in order):
+#   1. If PIBRICK_USER_HOME is set, use it.
+#   2. If running as non-root AND not from system install dir, use $HOME/battery-tools.
+#   3. Otherwise, use system-wide /usr/lib/pibrick/battery-tools.
+#
+# Override with env vars:
+#   PIBRICK_USER_HOME=/path/to/tools
+#   PIBRICK_SYSTEM=1   (force system-wide, even as non-root)
+#   PIBRICK_USER=1     (force per-user in $HOME/battery-tools)
+#   PIBRICK_USER_HOME=<path> (force per-user to specific path)
+#
+# Tools installed to PIBRICK_TOOLS_DIR can be called directly:
+#   sudo /usr/lib/pibrick/install.sh --battery-config   # always works
+#   python3 $PIBRICK_TOOLS_DIR/battery_set.py --show    # direct
+#
+# If /etc/pibrick.conf exists, it may set PIBRICK_USER_HOME for the system default.
+
+# When sudo runs, $HOME gets reset to /root. Detect this by inspecting
+# $SUDO_USER and use the original user's home if available.
+# Also, detect that we're running from a clone of this repo (not /usr/lib/pibrick/)
+# so per-user install is the right default even when sudo is involved.
+ORIG_HOME="$HOME"
+if [ -n "${SUDO_USER:-}" ] && [ "$(id -un)" = "root" ]; then
+	ORIG_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+	ORIG_HOME="${ORIG_HOME:-/root}"
+fi
+HOME="${ORIG_HOME}"
+
+# Are we running from a clone of this repo (not from /usr/lib/pibrick/)?
+# This distinguishes a fresh clone (per-user install) from a system
+# reinstall after /usr/lib/pibrick was already populated (system-wide).
+SCRIPT_REAL=$(readlink -f "${BASH_SOURCE[0]:-$0}" 2>/dev/null || echo "$0")
+RUNNING_FROM_CLONE=true
+if [[ "$SCRIPT_REAL" == /usr/lib/pibrick/* ]]; then
+	RUNNING_FROM_CLONE=false
+fi
+
+if [ -n "${PIBRICK_USER_HOME:-}" ]; then
+	# Explicit override wins
+	PIBRICK_TOOLS_DIR="$PIBRICK_USER_HOME"
+elif [ -f "$PIBRICK_CONF" ]; then
+	# Source user-provided default
+	. "$PIBRICK_CONF"
+	PIBRICK_TOOLS_DIR="${PIBRICK_USER_HOME:-$HOME/battery-tools}"
+elif [ "${PIBRICK_SYSTEM:-0}" = "1" ]; then
+	# Forced system-wide
+	PIBRICK_TOOLS_DIR="$PIBRICK_LIB/battery-tools"
+elif [ "${PIBRICK_USER:-0}" = "1" ]; then
+	# Forced per-user
+	PIBRICK_TOOLS_DIR="$HOME/battery-tools"
+elif [ "$(id -u)" = "0" ] && [ -d "$PIBRICK_LIB" ] && [ "$RUNNING_FROM_CLONE" = "false" ]; then
+	# Root running from /usr/lib/pibrick → system-wide
+	PIBRICK_TOOLS_DIR="$PIBRICK_LIB/battery-tools"
+else
+	# Non-root OR running from a clone → per-user install
+	PIBRICK_TOOLS_DIR="$HOME/battery-tools"
+fi
+PIBRICK_TOOLS="$PIBRICK_TOOLS_DIR"
+
+# Backwards compat alias for old code (Python tools read this env var)
+export PIBRICK_USER_HOME="$PIBRICK_TOOLS_DIR"
+
 
 # ── Component flags ─────────────────────────────────────────────────────────────
 INSTALL_DISPLAY=
@@ -45,33 +124,33 @@ status_calibration() {
 		echo "Run calibration logger first: sudo systemctl start pibrick-battery-calibration"
 		return 1
 	fi
-	python3 /home/congn/battery-tools/battery-auto-calibrator.py --status 2>/dev/null || \
+	python3 "$PIBRICK_TOOLS_DIR/battery-auto-calibrator.py" --status 2>/dev/null || \
 		cat /var/log/bq25890_battery/calibration_status.json
 }
 
 apply_calibration() {
 	info "Checking calibration status..."
 
-	if [ ! -f /home/congn/battery-tools/battery-auto-calibrator.py ]; then
+	if [ ! -f "$PIBRICK_TOOLS_DIR/battery-auto-calibrator.py" ]; then
 		error "Auto-calibrator not installed. Run: $0 --install calibration"
 		return 1
 	fi
 
-	python3 /home/congn/battery-tools/battery-auto-calibrator.py --apply
+	python3 "$PIBRICK_TOOLS_DIR/battery-auto-calibrator.py" --apply
 }
 
 # ── Battery status (shows current params + persisted config) ──────────────────
 battery_status() {
 	info "Battery status & custom values"
 
-	if [ ! -f "$PIBRICK_TOOLS/battery_set.py" ]; then
+	if [ ! -f "$PIBRICK_TOOLS_DIR/battery_set.py" ]; then
 		error "battery_set.py not installed. Run: $0 --install battery"
 		return 1
 	fi
 
 	echo
 	echo -e "${BOLD}=== Current Driver Values (live) ===${RESET}"
-	python3 "$PIBRICK_TOOLS/battery_set.py" --show
+	python3 "$PIBRICK_TOOLS_DIR/battery_set.py" --show
 
 	echo
 	echo -e "${BOLD}=== Persisted Config (/etc/modprobe.d/pibrick-battery.conf) ===${RESET}"
@@ -83,7 +162,7 @@ battery_status() {
 
 	echo
 	echo -e "${BOLD}=== Driver Defaults (compile-time) ===${RESET}"
-	python3 "$PIBRICK_TOOLS/battery_set.py" --list 2>&1 | \
+	python3 "$PIBRICK_TOOLS_DIR/battery_set.py" --list 2>&1 | \
 		grep -E "Driver Default" || true
 
 	echo
@@ -123,7 +202,7 @@ battery_config() {
 		shift
 	done
 
-	if [ ! -f "$PIBRICK_TOOLS/battery_set.py" ]; then
+	if [ ! -f "$PIBRICK_TOOLS_DIR/battery_set.py" ]; then
 		error "battery_set.py not installed. Run: $0 --install battery"
 		return 1
 	fi
@@ -132,12 +211,12 @@ battery_config() {
 	if [ ${#extra_args[@]} -eq 0 ]; then
 		info "Launching interactive battery configuration..."
 		# Need to be a TTY for interactive; just exec directly
-		python3 "$PIBRICK_TOOLS/battery_set.py"
+		python3 "$PIBRICK_TOOLS_DIR/battery_set.py"
 		return $?
 	fi
 
 	# Non-interactive path: build command using string concat (preserves args with spaces)
-	local cmd="python3 $PIBRICK_TOOLS/battery_set.py"
+	local cmd="python3 $PIBRICK_TOOLS_DIR/battery_set.py"
 	for a in "${extra_args[@]}"; do
 		cmd="$cmd \"$a\""
 	done
@@ -306,12 +385,22 @@ done
 
 # ── Interactive prompts ───────────────────────────────────────────────────────
 choose_components() {
-	# Non-interactive: install all if no selection
+	# Non-interactive (no terminal): if user is non-root AND we are running
+	# from a clone of the repo (not /usr/lib/pibrick/), default to per-user
+	# install of just battery + calibration tools — the components that work
+	# without privileged writes. The user can always re-run with explicit
+	# --install <component> or as root.
 	if [ ! -t 0 ] && [ -z "$INSTALL_EXPLICIT" ]; then
+		if [ "$(id -u)" != "0" ]; then
+			info "No terminal detected; running as $USER with install path: $PIBRICK_TOOLS_DIR"
+			info "Defaulting to install battery + calibration tools (no privileged ops)."
+			INSTALL_BATTERY_NEW=1
+			INSTALL_CALIBRATION=1
+			return 0
+		fi
 		info "No terminal detected. Installing all components."
 		INSTALL_DISPLAY=1
-		INSTALL_DISPLAY_NEW=1
-		INSTALL_BATTERY=1
+		INSTALL_BATTERY_NEW=1
 		INSTALL_CALIBRATION=1
 		INSTALL_UPower=1
 		INSTALL_BUTTON=1
@@ -547,6 +636,13 @@ restart_upower() {
 
 # ── Copy source tree ────────────────────────────────────────────────────────────
 copy_sources() {
+	# In per-user mode (no system write access), skip this — the repo IS
+	# the source tree, so there's nothing to copy.
+	if [ "$(id -u)" != "0" ]; then
+		info "Per-user mode (not root): skipping source copy (repo is the source tree)"
+		return 0
+	fi
+
 	info "Copying source files to $PIBRICK_LIB..."
 	mkdir -p "$PIBRICK_LIB"
 	rsync_opts=(
@@ -603,19 +699,49 @@ install_tools() {
 	fi
 }
 
+# ── Service install helper ─────────────────────────────────────────────────────
+# Substitutes __PIBRICK_TOOLS__ placeholder with the actual install path
+# and installs to /etc/systemd/system/.
+install_service() {
+	local src="$1"
+	local dst="/etc/systemd/system/$(basename "$src")"
+
+	if [ ! -f "$src" ]; then
+		return 1
+	fi
+
+	# Substitute __PIBRICK_TOOLS__ with the resolved install path
+	sed "s|__PIBRICK_TOOLS__|$PIBRICK_TOOLS_DIR|g" "$src" > "$dst"
+	chmod 644 "$dst"
+
+	systemctl daemon-reload
+}
+
 # ── Install battery driver (with INA228) ───────────────────────────────────────
 install_battery() {
 	info "Installing Battery Driver (bq25895 + INA228)..."
 
-	# Copy tools
+	# Copy tools (Python helpers always go to $PIBRICK_TOOLS_DIR)
 	install_tools
+
+	# Kernel module build/install requires root.
+	# In per-user mode, skip and instruct the user how to complete the install.
+	if [ "$(id -u)" != "0" ]; then
+		warn "Not running as root — skipping kernel module build/install."
+		warn "To install the kernel module, re-run as root:"
+		warn "    sudo bash $PIBRICK_LIB/install.sh --install battery-new"
+		warn "Python tools are available at: $PIBRICK_TOOLS_DIR"
+		return 0
+	fi
 
 	# Build and install module with INA228 support
 	cd "$PIBRICK_LIB/battery"
 	make clean
-	# INA228 support is enabled by default in Makefile
-	make
-	make install
+	# INA228 support is enabled by default in Makefile.
+	# PIBRICK_USER_HOME tells the Makefile where to install Python helpers
+	# (it writes to the system service file with the resolved path).
+	PIBRICK_USER_HOME="$PIBRICK_TOOLS_DIR" make
+	PIBRICK_USER_HOME="$PIBRICK_TOOLS_DIR" make install
 
 	# Config
 	if [ -f "$PIBRICK_LIB/battery/pibrick-battery.conf" ]; then
@@ -628,9 +754,7 @@ install_battery() {
 	mkdir -p "$PIBRICK_TOOLS"
 
 	if [ -f "$PIBRICK_LIB/battery/pibrick-battery-soc-persist.service" ]; then
-		install -m 644 "$PIBRICK_LIB/battery/pibrick-battery-soc-persist.service" \
-			/etc/systemd/system/
-		systemctl daemon-reload
+		install_service "$PIBRICK_LIB/battery/pibrick-battery-soc-persist.service"
 		systemctl enable pibrick-battery-soc-persist.service
 		success "SOC persistence service enabled"
 	fi
@@ -661,8 +785,8 @@ install_battery_original() {
 	# Build and install module (INA228 is runtime-detected)
 	cd "$PIBRICK_LIB/battery"
 	make clean
-	make
-	make install
+	PIBRICK_USER_HOME="$PIBRICK_TOOLS_DIR" make
+	PIBRICK_USER_HOME="$PIBRICK_TOOLS_DIR" make install
 
 	# Config
 	if [ -f "$PIBRICK_LIB/battery/pibrick-battery.conf" ]; then
@@ -675,9 +799,7 @@ install_battery_original() {
 	mkdir -p "$PIBRICK_TOOLS"
 
 	if [ -f "$PIBRICK_LIB/battery/pibrick-battery-soc-persist.service" ]; then
-		install -m 644 "$PIBRICK_LIB/battery/pibrick-battery-soc-persist.service" \
-			/etc/systemd/system/
-		systemctl daemon-reload
+		install_service "$PIBRICK_LIB/battery/pibrick-battery-soc-persist.service"
 		systemctl enable pibrick-battery-soc-persist.service
 		success "SOC persistence service enabled"
 	fi
@@ -717,14 +839,19 @@ install_calibration() {
 		success "Installed: battery-auto-calibrator.py"
 	fi
 
+	# Service and log dir installation requires root
+	if [ "$(id -u)" != "0" ]; then
+		warn "Not running as root — skipping systemd service install."
+		warn "To enable the calibration logger service, re-run as root."
+		return 0
+	fi
+
 	# Create log directory
 	mkdir -p /var/log/bq25890_battery
 
 	# Install service
 	if [ -f battery/pibrick-battery-calibration.service ]; then
-		install -m 644 battery/pibrick-battery-calibration.service \
-			/etc/systemd/system/
-		systemctl daemon-reload
+		install_service "$PWD/battery/pibrick-battery-calibration.service"
 		success "Calibration logger service installed"
 	fi
 

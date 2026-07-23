@@ -11,7 +11,8 @@ After=basic.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/python3 /home/congn/battery-tools/battery-soc-persist.py
+# Path substituted at install time by install.sh.
+ExecStart=/usr/bin/python3 __PIBRICK_TOOLS__/battery-soc-persist.py
 StandardOutput=journal
 StandardError=journal
 

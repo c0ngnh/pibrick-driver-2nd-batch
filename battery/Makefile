@@ -1,7 +1,14 @@
 obj-m += bq25890_battery.o
 MODULE_NAME := bq25890_battery.ko
 MODULE_INSTALL_DIR := /lib/modules/$(shell uname -r)/kernel/drivers/power/supply
-PIBRICK_TOOLS := /home/congn/battery-tools
+
+# Resolve install location for Python tools.
+# Order of preference:
+#   1. PIBRICK_USER_HOME env var (set by install.sh)
+#   2. $HOME/battery-tools (per-user install)
+#   3. /usr/lib/pibrick/battery-tools (system-wide install)
+PIBRICK_USER_HOME ?= $(HOME)/battery-tools
+PIBRICK_TOOLS ?= $(if $(wildcard $(PIBRICK_USER_HOME)/battery_set.py),$(PIBRICK_USER_HOME),/usr/lib/pibrick/battery-tools)
 
 .PHONY: modules clean install remove install-tools install-calibration install-service
 
@@ -37,7 +44,10 @@ install-calibration:
 	@install -m 755 battery-calibration-logger.py $(PIBRICK_TOOLS)/ 2>/dev/null || true
 	@install -m 755 battery-auto-calibrator.py $(PIBRICK_TOOLS)/ 2>/dev/null || true
 	@mkdir -p /var/log/bq25890_battery
-	@install -m 644 pibrick-battery-calibration.service /etc/systemd/system/ 2>/dev/null || true
+	@sed 's|__PIBRICK_TOOLS__|$(PIBRICK_TOOLS)|g' \
+		pibrick-battery-calibration.service \
+		> /etc/systemd/system/pibrick-battery-calibration.service
+	@chmod 644 /etc/systemd/system/pibrick-battery-calibration.service
 	@systemctl daemon-reload 2>/dev/null || true
 	@echo "Calibration tools installed"
 

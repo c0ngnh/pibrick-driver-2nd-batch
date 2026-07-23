@@ -4,7 +4,9 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/python3 /home/congn/battery-tools/battery-calibration-logger.py --interval 10
+# Path substituted at install time by install.sh.
+# Default install location: $PIBRICK_USER_HOME/battery-tools/
+ExecStart=/usr/bin/python3 __PIBRICK_TOOLS__/battery-calibration-logger.py --interval 10
 Restart=on-failure
 RestartSec=30
 StandardOutput=journal

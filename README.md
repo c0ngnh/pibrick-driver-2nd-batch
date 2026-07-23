@@ -20,6 +20,11 @@ This repository bundles the display, touch, battery, button, and desktop pieces 
 sudo bash ./install.sh
 ```
 
+The installer works **for any user, on any clone of this repo**. It auto-detects
+where to put Python helper scripts based on whether you're running as root from
+`/usr/lib/pibrick/` (system install) or from a fresh clone (per-user install).
+See [Install Layout](#install-layout-user-agnostic-paths) for details.
+
 `install.sh` provides an **interactive menu** for component selection:
 
 ### Interactive Selection
@@ -87,6 +92,50 @@ sudo PANEL=5inch bash ./install.sh   # 5 inch 1080×1240 @ 90/60 Hz
 
 The default refresh rate is **90 Hz** for the 9203 panel (saved to `/etc/pibrick.display-refresh` and applied on login). Use `pibrick-display-settings --refresh 60` for lower power.
 
+### Install Layout (User-Agnostic Paths)
+
+The installer auto-detects where to put Python helper scripts (`battery_set.py`,
+`battery-auto-calibrator.py`, etc.). It works for **any** user, on **any** clone
+of the repo:
+
+| Mode | Tools path | When it applies |
+|------|-----------|-----------------|
+| **System-wide** | `/usr/lib/pibrick/battery-tools/` | Running `install.sh` from `/usr/lib/pibrick/` (typical after first install) |
+| **Per-user** | `$HOME/battery-tools/` (e.g. `/home/alice/battery-tools/`) | First-time install from a clone of this repo as non-root |
+| **Custom** | any path | Set `PIBRICK_USER_HOME=/path` env var before invoking |
+
+**Always works** (no path needed):
+
+```bash
+sudo /usr/lib/pibrick/install.sh --battery-status
+sudo /usr/lib/pibrick/install.sh --status-calibration
+sudo /usr/lib/pibrick/install.sh --apply-calibration
+```
+
+**Force a specific mode:**
+
+```bash
+# Force system-wide install
+sudo PIBRICK_SYSTEM=1 bash ./install.sh
+
+# Force per-user install under $HOME/battery-tools
+PIBRICK_USER=1 bash ./install.sh
+
+# Install to a custom path
+PIBRICK_USER_HOME=/opt/pibrick bash ./install.sh
+```
+
+**Persistent override** (system-wide): Create `/etc/pibrick.conf` with:
+
+```bash
+# /etc/pibrick.conf
+PIBRICK_USER_HOME=/home/alice/battery-tools
+```
+
+When `sudo` runs `install.sh`, `$HOME` becomes `/root`. The installer detects
+this via `$SUDO_USER` and uses the **original user's home** so per-user installs
+still work as expected.
+
 ### Battery Driver Selection
 
 The battery driver **automatically detects** the INA228 hardware at runtime. There is no separate "original" build:
@@ -145,20 +194,27 @@ sudo /usr/lib/pibrick/install.sh --apply-calibration
 
 #### Manual Calibration Tools
 
-You can also use the Python tools directly:
+You can also use the Python tools directly. The install path depends on whether
+you installed system-wide or per-user (see [Install Layout](#install-layout)):
 
 ```bash
-# Check calibration status and confidence
-sudo python3 /home/congn/battery-tools/battery-auto-calibrator.py --status
+# System-wide install (default when run via /usr/lib/pibrick/install.sh)
+sudo python3 /usr/lib/pibrick/battery-tools/battery-auto-calibrator.py --status
+
+# Per-user install (default when run as non-root from a clone)
+python3 $HOME/battery-tools/battery-auto-calibrator.py --status
+
+# Or always via install.sh wrapper (no path needed):
+sudo /usr/lib/pibrick/install.sh --status-calibration
 
 # Generate OCV table from existing data (dry run - shows what would be applied)
-sudo python3 /home/congn/battery-tools/battery-auto-calibrator.py --generate
+sudo python3 /usr/lib/pibrick/battery-tools/battery-auto-calibrator.py --generate
 
 # Apply the OCV table to the driver (works with both INA228 and non-INA228 builds)
-sudo python3 /home/congn/battery-tools/battery-auto-calibrator.py --apply
+sudo python3 /usr/lib/pibrick/battery-tools/battery-auto-calibrator.py --apply
 
 # Force rebuild and reload driver with current OCV table
-sudo python3 /home/congn/battery-tools/battery-auto-calibrator.py --build-driver
+sudo python3 /usr/lib/pibrick/battery-tools/battery-auto-calibrator.py --build-driver
 ```
 
 **Note**: The `--apply-calibration` step works correctly **regardless of whether INA228 is present**. The OCV table affects the driver's voltage-to-SOC lookup, which is independent of the INA228 current sensor. The calibration data uses BQ25895's `voltage_now` (always available) — INA228 is only used for more accurate current measurements during data collection.
@@ -376,13 +432,16 @@ SOC levels: [1, 2, 3, 4, 5, ... 92, 93, 94]
 
 ```bash
 # Check calibration status
-sudo python3 /home/congn/battery-tools/battery-auto-calibrator.py --status
+sudo python3 /usr/lib/pibrick/battery-tools/battery-auto-calibrator.py --status
+
+# Or via install.sh wrapper:
+sudo /usr/lib/pibrick/install.sh --status-calibration
 
 # Analyze existing data
-sudo python3 /home/congn/battery-tools/battery-auto-calibrator.py --check
+sudo python3 /usr/lib/pibrick/battery-tools/battery-auto-calibrator.py --check
 
 # Generate OCV table from data
-sudo python3 /home/congn/battery-tools/battery-calibration-logger.py --generate-ocv-table
+sudo python3 /usr/lib/pibrick/battery-tools/battery-calibration-logger.py --generate-ocv-table
 
 # Apply the calibrated OCV table
 sudo /usr/lib/pibrick/install.sh --apply-calibration

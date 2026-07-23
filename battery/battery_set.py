@@ -429,20 +429,30 @@ def save_soc_persist():
     """
     import subprocess
 
-    # Try the Python script first
-    script_path = "/home/congn/battery-tools/battery-soc-persist.py"
-    if os.path.exists(script_path):
-        try:
-            result = subprocess.run(
-                ["python3", script_path],
-                capture_output=True,
-                text=True,
-                timeout=10
-            )
-            if result.returncode == 0:
-                return True
-        except Exception:
-            pass
+    # Try the Python script first. Look in any of the candidate install
+    # locations (per-user or system-wide) so the user does not need to
+    # reconfigure after running install.sh.
+    candidates = []
+    if os.environ.get("PIBRICK_USER_HOME"):
+        candidates.append(os.environ["PIBRICK_USER_HOME"])
+    if os.environ.get("HOME"):
+        candidates.append(os.path.join(os.environ["HOME"], "battery-tools"))
+    candidates.append("/usr/lib/pibrick/battery-tools")
+
+    for tools_dir in candidates:
+        script_path = os.path.join(tools_dir, "battery-soc-persist.py")
+        if os.path.exists(script_path):
+            try:
+                result = subprocess.run(
+                    ["python3", script_path],
+                    capture_output=True,
+                    text=True,
+                    timeout=10
+                )
+                if result.returncode == 0:
+                    return True
+            except Exception:
+                pass
 
     # Fallback: directly write to the persistence file
     persist_file = "/var/lib/bq25890_battery/soc_persist"
