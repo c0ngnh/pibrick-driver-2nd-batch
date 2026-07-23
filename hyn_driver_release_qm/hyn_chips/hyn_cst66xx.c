@@ -293,9 +293,9 @@ static void cst66xx_rst(void)
     if(hyn_66xxdata->work_mode==ENTER_BOOT_MODE){
         hyn_set_i2c_addr(hyn_66xxdata,MAIN_I2C_ADDR);
     }
-    gpiod_set_value_cansleep(hyn_66xxdata->plat_data.reset_gpio,0);
+    gpio_set_value(hyn_66xxdata->plat_data.reset_gpio,0);
     msleep(8);
-    gpiod_set_value_cansleep(hyn_66xxdata->plat_data.reset_gpio,1);
+    gpio_set_value(hyn_66xxdata->plat_data.reset_gpio,1);
 }
 
 static int cst66xx_wait_ready(u16 times,u8 ms,u16 reg,u16 check_vlue)

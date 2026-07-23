@@ -25,6 +25,7 @@
 #include <linux/proc_fs.h>
 #include <linux/uaccess.h>
 #include <linux/of.h>
+#include <linux/of_gpio.h>
 #include <linux/gpio/consumer.h>
 #include <linux/delay.h>
 #include <linux/regulator/consumer.h>
@@ -183,8 +184,8 @@ struct hyn_plat_data {
     struct regulator *vdd_ana;
     struct regulator *vdd_i2c;
 
-    struct gpio_desc *reset_gpio;
-    int irq_gpio; /* fallback only when DT lacks the `interrupts` property */
+    int reset_gpio;
+    int irq_gpio;
     u32 irq_gpio_flags;
 
     struct pinctrl *pinctl;

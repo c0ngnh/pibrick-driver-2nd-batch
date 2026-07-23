@@ -60,12 +60,16 @@ static int hyn_parse_dt(struct hyn_ts_data *ts_data)
             HYN_INFO("vdd_i2c not config");
         }
 
-//gpio info (descriptor API; IRQ is consumed via `client->irq` set up by I2C core
-//from the DT `interrupts` property)
-        dt->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_LOW);
-        if(IS_ERR(dt->reset_gpio)){
-            HYN_ERROR("get reset-gpios failed");
-            return PTR_ERR(dt->reset_gpio);
+//gpio info
+        dt->reset_gpio = of_get_named_gpio(np, "reset-gpio", 0);
+        dt->irq_gpio = of_get_named_gpio(np, "irq-gpio", 0);
+
+        if(dt->reset_gpio < 0 || dt->irq_gpio < 0){
+            HYN_ERROR("dts get gpio failed");
+            return -ENODEV;
+        }
+        else{
+            HYN_INFO("reset_gpio:%d irq_gpio:%d",dt->reset_gpio,dt->irq_gpio);
         }
 
 //pin_ctl
@@ -110,11 +114,26 @@ return 0;
 
 static int hyn_poweron(struct hyn_ts_data *ts_data)
 {
+    int ret = 0;
     struct hyn_plat_data* dt = &ts_data->plat_data;
     if(!IS_ERR_OR_NULL(hyn_data->plat_data.pinctl)){
         if(pinctrl_select_state(dt->pinctl, dt->pin_active)){
             HYN_ERROR("pin active set failed");
         }
+    }
+
+    ret = gpio_request(dt->irq_gpio, "hyn_irq_gpio");
+    ret |= gpio_request(dt->reset_gpio, "hyn_reset_gpio");
+    if(ret < 0){
+        HYN_ERROR("gpio_request failed");
+        goto GPIO_SET_FAILE;
+    }
+
+    ret = gpio_direction_input(dt->irq_gpio);
+    ret |= gpio_direction_output(dt->reset_gpio, 0);
+    if(ret < 0){
+        HYN_ERROR("set gpio_direction failed");
+        goto GPIO_SET_FAILE;
     }
 
     if(!IS_ERR_OR_NULL(dt->vdd_ana)){
@@ -136,8 +155,10 @@ static int hyn_poweron(struct hyn_ts_data *ts_data)
         HYN_ERROR("enable power failed");
     }
     mdelay(5);
-    gpiod_set_value_cansleep(dt->reset_gpio, 1);
+    gpio_set_value(dt->reset_gpio, 1);
     return 0;
+GPIO_SET_FAILE:
+    return ret;
 }
 
 static int hyn_input_dev_init(struct hyn_ts_data *ts_data)
