@@ -96,18 +96,38 @@ apply_calibration() {
 	python3 "$PIBRICK_TOOLS_DIR/battery-auto-calibrator.py" --apply
 }
 
+# ── Find a battery Python helper ───────────────────────────────────────────────
+# Resolves the path to battery_set.py / battery-check.py / etc. We try
+# $PIBRICK_TOOLS_DIR first, then fall back to the source tree under
+# $PIBRICK_LIB/battery/ (in case the user upgraded from a previous per-user
+# install or never ran --install battery). If nothing is found, prints
+# the install hint and exits with an error.
+find_battery_tool() {
+	local script="$1"
+	for candidate in \
+		"$PIBRICK_TOOLS_DIR/$script" \
+		"$PIBRICK_LIB/battery/$script"; do
+		if [ -f "$candidate" ]; then
+			echo "$candidate"
+			return 0
+		fi
+	done
+	error "$script not installed. Run: $0 --install battery"
+	return 1
+}
+
 # ── Battery status (shows current params + persisted config) ──────────────────
 battery_status() {
 	info "Battery status & custom values"
 
-	if [ ! -f "$PIBRICK_TOOLS_DIR/battery_set.py" ]; then
-		error "battery_set.py not installed. Run: $0 --install battery"
+	local battery_set
+	if ! battery_set=$(find_battery_tool "battery_set.py"); then
 		return 1
 	fi
 
 	echo
 	echo -e "${BOLD}=== Current Driver Values (live) ===${RESET}"
-	python3 "$PIBRICK_TOOLS_DIR/battery_set.py" --show
+	python3 "$battery_set" --show
 
 	echo
 	echo -e "${BOLD}=== Persisted Config (/etc/modprobe.d/pibrick-battery.conf) ===${RESET}"
@@ -119,7 +139,7 @@ battery_status() {
 
 	echo
 	echo -e "${BOLD}=== Driver Defaults (compile-time) ===${RESET}"
-	python3 "$PIBRICK_TOOLS_DIR/battery_set.py" --list 2>&1 | \
+	python3 "$battery_set" --list 2>&1 | \
 		grep -E "Driver Default" || true
 
 	echo
@@ -159,8 +179,8 @@ battery_config() {
 		shift
 	done
 
-	if [ ! -f "$PIBRICK_TOOLS_DIR/battery_set.py" ]; then
-		error "battery_set.py not installed. Run: $0 --install battery"
+	local battery_set
+	if ! battery_set=$(find_battery_tool "battery_set.py"); then
 		return 1
 	fi
 
@@ -168,12 +188,12 @@ battery_config() {
 	if [ ${#extra_args[@]} -eq 0 ]; then
 		info "Launching interactive battery configuration..."
 		# Need to be a TTY for interactive; just exec directly
-		python3 "$PIBRICK_TOOLS_DIR/battery_set.py"
+		python3 "$battery_set"
 		return $?
 	fi
 
 	# Non-interactive path: build command using string concat (preserves args with spaces)
-	local cmd="python3 $PIBRICK_TOOLS_DIR/battery_set.py"
+	local cmd="python3 $battery_set"
 	for a in "${extra_args[@]}"; do
 		cmd="$cmd \"$a\""
 	done
@@ -850,17 +870,10 @@ install_battery_original() {
 install_calibration() {
 	info "Installing Calibration Tools..."
 
-	mkdir -p "$PIBRICK_TOOLS"
-
-	# Copy calibration scripts. Resolve against $PIBRICK_LIB so the
-	# installer works from any cwd.
-	for script in battery-calibration-logger.py battery-auto-calibrator.py; do
-		if [ -f "$PIBRICK_LIB/battery/$script" ]; then
-			cp "$PIBRICK_LIB/battery/$script" "$PIBRICK_TOOLS/"
-			chmod +x "$PIBRICK_TOOLS/$script"
-			success "Installed: $script"
-		fi
-	done
+	# Calibration mode requires battery_set.py / battery-check.py for the
+	# user to inspect driver state alongside the logger. Copy the full
+	# battery tools bundle (idempotent — safe to call repeatedly).
+	install_tools
 
 	# Service and log dir installation requires root
 	if [ "$(id -u)" != "0" ]; then
