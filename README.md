@@ -4,9 +4,9 @@ Kernel modules and user-space helpers for the piBrick CM5 handheld (Raspberry Pi
 
 | Component | Path | Hardware |
 |-----------|------|----------|
-| Display | `panel-pibrick.9203.c`, `panel-pibrick.9202.c`, `panel-pibrick.548.c`, `panel-pibrick.5inch.c`, `dts/` | Visionox AMOLED on DSI1 — 9203 default (1080×1240 @ 90/60 Hz) |
+| Display | `panel-pibrick.9203.c`, `panel-pibrick.9202.c`, `panel-pibrick.548.c`, `panel-pibrick.5inch.c`, `dts/` | Visionox AMOLED on DSI1 — 9203 default (1080×1240 @ 90/60 Hz), each with its corresponding touch driver |
 | Touch | `hyn_driver_release_qm/` | Hynitron CST66xx (`compatible = "hyn,66xx"` in DTS) |
-| Battery | `battery/bq25890_battery.c` | TI BQ25895 PMIC + **TI INA228** high-precision current sensor |
+| Battery | `battery/bq25890_battery.c` | TI BQ25895 PMIC; optional **TI INA228** high-precision current sensor (compile-time toggle) |
 | Buttons | `button-service/` | GPIO daemon for power + user buttons |
 | Desktop | `desktop/` | GTK taskbar battery indicator, `pibrick-display-settings` |
 | Tools | `tools/` | Display settings menu, GNOME refresh helper, touch reset, OCV calibration |
@@ -20,21 +20,35 @@ This repository bundles the display, touch, battery, button, and desktop pieces 
 sudo bash ./install.sh
 ```
 
-`install.sh` provides an **interactive menu** that lets you select which components to install:
+`install.sh` provides an **interactive menu** for component selection:
+
+### Interactive Selection
 
 ```
 === piBrick Driver Installer ===
-Display Driver Options:
-  1) Display + Touch (NEW) - With INA228 integration (recommended)
-  2) Display + Touch (OLD) - Original Hyn driver only
-  3) Skip display installation
+
+=== Display Panel Selection ===
+Select your panel type:
+  1) 9203 - Visionox 1080x1240 @ 90/60 Hz (PocketCM5 default) [Hynitron touch]
+  2) 9202 - Visionox 1080x1240 @ 60 Hz (legacy) [Hynitron touch]
+  3) 548 - 5.48 inch 1080x1920 @ 60 Hz [FocalTech touch]
+  4) 5inch - 5 inch 1080x1240 @ 90/60 Hz [Hynitron touch]
+  5) Skip display installation
 Choose [1]: 
 
-Install Battery Driver (bq25895 + INA228)? [Y/n]: 
-Install Calibration Tools (logger + auto-calibrator)? [Y/n]: 
-Apply UPower KDE Fix (show Charging state)? [Y/n]: 
-Install Button Service (pibrickbtn)? [Y/n]: 
+=== Battery Driver Selection ===
+  1) Battery + INA228 (recommended) - High-precision current sensor
+  2) Battery only (original) - If no INA228 hardware installed
+Choose [1]: 
+
+Install Calibration Tools (logger + auto-calibrator) [Y/n]: 
+Apply UPower KDE Fix (show Charging state) [Y/n]: 
+Install Button Service (pibrickbtn) [Y/n]: 
 ```
+
+Each panel has its **matching touch driver**:
+- **9203 / 9202 / 5inch** → Hynitron CST66xx (`hyn,66xx`)
+- **548** (5.48 inch) → FocalTech (`edt-ft5406`)
 
 ### Non-Interactive Installation
 
@@ -44,20 +58,20 @@ Install specific components using `--install`:
 # Install everything
 sudo bash ./install.sh --install all
 
-# Install only battery with calibration tools
-sudo bash ./install.sh --install battery,calibration
+# Install display with interactive panel selection
+sudo bash ./install.sh --install display
 
-# Install display with new INA228 driver
-sudo bash ./install.sh --install display-new
+# Install battery with INA228 support
+sudo bash ./install.sh --install battery-new
 
-# Install display with old driver (no INA228)
-sudo bash ./install.sh --install display-old
+# Install original battery (bq25895 only, no INA228)
+sudo bash ./install.sh --install battery
 
-# Install individual components
-sudo bash ./install.sh --install battery      # Battery driver only
-sudo bash ./install.sh --install calibration   # Calibration tools only
-sudo bash ./install.sh --install upower       # UPower KDE fix only
-sudo bash ./install.sh --install button      # Button service only
+# Install battery + calibration tools
+sudo bash ./install.sh --install battery-new,calibration
+
+# Install UPower fix and button service
+sudo bash ./install.sh --install upower,button
 ```
 
 ### Panel Selection
@@ -67,11 +81,28 @@ sudo bash ./install.sh --install button      # Button service only
 ```bash
 sudo PANEL=9203  bash ./install.sh   # SD5302H (90/60 Hz, 90 Hz default)
 sudo PANEL=9202  bash ./install.sh   # legacy 1080×1240 @ 60 Hz
-sudo PANEL=548   bash ./install.sh   # 5.48 inch 1080×1920 @ 60 Hz
+sudo PANEL=548   bash ./install.sh   # 5.48 inch 1080×1920 @ 60 Hz (FocalTech)
 sudo PANEL=5inch bash ./install.sh   # 5 inch 1080×1240 @ 90/60 Hz
 ```
 
 The default refresh rate is **90 Hz** for the 9203 panel (saved to `/etc/pibrick.display-refresh` and applied on login). Use `pibrick-display-settings --refresh 60` for lower power.
+
+### Battery Driver Selection
+
+The battery driver **automatically detects** the INA228 hardware at runtime. There is no separate "original" build:
+
+| Option | Description |
+|--------|-------------|
+| `battery-new` (default) | Battery driver — INA228 auto-detected at runtime |
+| `battery` | Same as `battery-new` (alias for compatibility) |
+
+**How it works:**
+- The driver probes for INA228 at I2C address `0x40` during init
+- If INA228 is found → high-precision current/power measurements enabled
+- If INA228 is not found (no hardware) → driver uses BQ25895 internal current sense + load-aware estimator (no errors)
+- Either way, the same `.ko` is loaded — no need to rebuild
+
+This means **you can install `battery-new` even without INA228 hardware**; the driver gracefully falls back. The `battery` option is kept as an alias for compatibility.
 
 ### Calibration Service Management
 
@@ -123,12 +154,14 @@ sudo python3 /home/congn/battery-tools/battery-auto-calibrator.py --status
 # Generate OCV table from existing data (dry run - shows what would be applied)
 sudo python3 /home/congn/battery-tools/battery-auto-calibrator.py --generate
 
-# Apply the OCV table to the driver
+# Apply the OCV table to the driver (works with both INA228 and non-INA228 builds)
 sudo python3 /home/congn/battery-tools/battery-auto-calibrator.py --apply
 
 # Force rebuild and reload driver with current OCV table
 sudo python3 /home/congn/battery-tools/battery-auto-calibrator.py --build-driver
 ```
+
+**Note**: The `--apply-calibration` step works correctly **regardless of whether INA228 is present**. The OCV table affects the driver's voltage-to-SOC lookup, which is independent of the INA228 current sensor. The calibration data uses BQ25895's `voltage_now` (always available) — INA228 is only used for more accurate current measurements during data collection.
 
 #### Calibration Log Files
 

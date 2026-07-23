@@ -31,9 +31,8 @@ PIBRICK_LIB=/usr/lib/pibrick
 
 # ── Component flags ─────────────────────────────────────────────────────────────
 INSTALL_DISPLAY=
-INSTALL_DISPLAY_OLD=          # Hyn driver without INA228
-INSTALL_DISPLAY_NEW=          # Hyn driver with INA228 integration
-INSTALL_BATTERY=
+INSTALL_BATTERY_NEW=           # Battery driver with INA228 auto-detection at runtime
+INSTALL_BATTERY_ORIGINAL=     # Alias for INSTALL_BATTERY_NEW (kept for compat)
 INSTALL_CALIBRATION=
 INSTALL_UPower=
 INSTALL_BUTTON=
@@ -70,15 +69,21 @@ ${BOLD}Usage:${RESET}
   $0              # Interactive mode
   $0 --install x  # Non-interactive
 
-${BOLD}Components:${RESET}
-  all                Install everything
-  none               Nothing (dry-run sanity check)
-  display-new        Display driver with INA228 integration (recommended)
-  display-old        Original Hyn display driver (no INA228)
-  battery            Battery driver (bq25895 fuel gauge + INA228)
-  calibration        Calibration logger + auto-calibrator
-  upower            UPower KDE fix (show Charging state)
-  button            Button service (pibrickbtn over libgpiod)
+${BOLD}Display Components (panel selection):${RESET}
+  display          Display + Touch (select 9203/9202/548/5inch interactively)
+  display-hyn     Display + Hyn touch driver only
+
+${BOLD}Battery Components:${RESET}
+  battery          Battery driver (bq25895, INA228 auto-detected at runtime)
+  battery-new      Battery driver (bq25895 + INA228) [recommended]
+  calibration      Calibration logger + auto-calibrator
+
+${BOLD}Other Components:${RESET}
+  upower           UPower KDE fix (show Charging state)
+  button           Button service (pibrickbtn over libgpiod)
+
+${BOLD}All Components:${RESET}
+  all              Install display + battery-new + calibration + upower + button
 
 ${BOLD}Options:${RESET}
   --apply-calibration   Apply calibrated OCV table to installed driver
@@ -89,8 +94,9 @@ ${BOLD}Options:${RESET}
 
 ${BOLD}Examples:${RESET}
   $0 --install all              # Install everything
-  $0 --install display-new      # Display with INA228 only
-  $0 --install battery,calibration  # Battery with calibration tools
+  $0 --install display          # Display with interactive panel selection
+  $0 --install battery-new      # Battery with INA228
+  $0 --install battery         # Original battery (no INA228)
   $0 --apply-calibration       # Apply calibrated OCV table
   $0 --status-calibration      # Check calibration status
   $0 --enable-calibration      # Start calibration logging
@@ -111,8 +117,7 @@ while [ $# -gt 0 ]; do
 			case "$comp" in
 			all)
 				INSTALL_DISPLAY=1
-				INSTALL_DISPLAY_NEW=1
-				INSTALL_BATTERY=1
+				INSTALL_BATTERY_NEW=1
 				INSTALL_CALIBRATION=1
 				INSTALL_UPower=1
 				INSTALL_BUTTON=1
@@ -121,18 +126,21 @@ while [ $# -gt 0 ]; do
 			none)
 				INSTALL_EXPLICIT=1
 				;;
-			display-old)
+			display)
 				INSTALL_DISPLAY=1
-				INSTALL_DISPLAY_OLD=1
 				INSTALL_EXPLICIT=1
 				;;
-			display-new|display)
+			display-hyn)
 				INSTALL_DISPLAY=1
-				INSTALL_DISPLAY_NEW=1
+				INSTALL_BATTERY_ORIGINAL=1
+				INSTALL_EXPLICIT=1
+				;;
+			battery-new)
+				INSTALL_BATTERY_NEW=1
 				INSTALL_EXPLICIT=1
 				;;
 			battery)
-				INSTALL_BATTERY=1
+				INSTALL_BATTERY_ORIGINAL=1
 				INSTALL_EXPLICIT=1
 				;;
 			calibration)
@@ -222,28 +230,38 @@ choose_components() {
 		esac
 	}
 
-	# Display driver type
+	# Display - Panel selection
 	echo
-	echo -e "${BOLD}Display Driver Options:${RESET}"
-	echo "  1) Display + Touch (NEW) - With INA228 integration (recommended)"
-	echo "  2) Display + Touch (OLD) - Original Hyn driver only"
-	echo "  3) Skip display installation"
+	echo -e "${BOLD}=== Display Panel Selection ===${RESET}"
+	echo "Select your panel type:"
+	echo "  1) 9203 - Visionox 1080x1240 @ 90/60 Hz (PocketCM5 default)"
+	echo "  2) 9202 - Visionox 1080x1240 @ 60 Hz (legacy)"
+	echo "  3) 548 - 5.48 inch 1080x1920 @ 60 Hz (FocalTech touch)"
+	echo "  4) 5inch - 5 inch 1080x1240 @ 90/60 Hz"
+	echo "  5) Skip display installation"
 	echo -n "Choose [1]: " >&2
-	read -r disp_choice || disp_choice=1
-	case "${disp_choice:-1}" in
-	1)
-		INSTALL_DISPLAY=1
-		INSTALL_DISPLAY_NEW=1
-		;;
-	2)
-		INSTALL_DISPLAY=1
-		INSTALL_DISPLAY_OLD=1
-		;;
-	*)
-		;;
+	read -r panel_choice || panel_choice=1
+	case "${panel_choice:-1}" in
+	1) INSTALL_DISPLAY=1; PANEL=9203 ;;
+	2) INSTALL_DISPLAY=1; PANEL=9202 ;;
+	3) INSTALL_DISPLAY=1; PANEL=548 ;;
+	4) INSTALL_DISPLAY=1; PANEL=5inch ;;
+	5) ;; # Skip
+	*) INSTALL_DISPLAY=1; PANEL=9203 ;;
 	esac
 
-	prompt_yesno "Install Battery Driver (bq25895 + INA228)" INSTALL_BATTERY
+	# Battery driver type
+	echo
+	echo -e "${BOLD}=== Battery Driver Selection ===${RESET}"
+	echo "  1) Battery + INA228 (recommended) - High-precision current sensor"
+	echo "  2) Battery only (original) - If no INA228 hardware installed"
+	echo -n "Choose [1]: " >&2
+	read -r batt_choice || batt_choice=1
+	case "${batt_choice:-1}" in
+	2) INSTALL_BATTERY_ORIGINAL=1 ;;
+	*) INSTALL_BATTERY_NEW=1 ;;
+	esac
+
 	prompt_yesno "Install Calibration Tools (logger + auto-calibrator)" INSTALL_CALIBRATION
 	prompt_yesno "Apply UPower KDE Fix (show Charging state)" INSTALL_UPower
 	prompt_yesno "Install Button Service (pibrickbtn)" INSTALL_BUTTON
@@ -477,14 +495,62 @@ install_tools() {
 	fi
 }
 
-# ── Install battery driver ──────────────────────────────────────────────────────
+# ── Install battery driver (with INA228) ───────────────────────────────────────
 install_battery() {
 	info "Installing Battery Driver (bq25895 + INA228)..."
 
 	# Copy tools
 	install_tools
 
-	# Build and install module
+	# Build and install module with INA228 support
+	cd "$PIBRICK_LIB/battery"
+	make clean
+	# INA228 support is enabled by default in Makefile
+	make
+	make install
+
+	# Config
+	if [ -f "$PIBRICK_LIB/battery/pibrick-battery.conf" ]; then
+		install -m 644 "$PIBRICK_LIB/battery/pibrick-battery.conf" \
+			/etc/modprobe.d/pibrick-battery.conf
+	fi
+
+	# SOC persistence
+	mkdir -p /var/lib/bq25890_battery
+	mkdir -p "$PIBRICK_TOOLS"
+
+	if [ -f "$PIBRICK_LIB/battery/pibrick-battery-soc-persist.service" ]; then
+		install -m 644 "$PIBRICK_LIB/battery/pibrick-battery-soc-persist.service" \
+			/etc/systemd/system/
+		systemctl daemon-reload
+		systemctl enable pibrick-battery-soc-persist.service
+		success "SOC persistence service enabled"
+	fi
+
+	# Cron
+	CRON_FILE="/etc/cron.d/pibrick-battery-soc"
+	if [ ! -f "$CRON_FILE" ]; then
+		echo "*/5 * * * * root /usr/bin/python3 $PIBRICK_TOOLS/battery-soc-persist.py --quiet" \
+			> "$CRON_FILE"
+		chmod 644 "$CRON_FILE"
+		success "Cron job installed for SOC persistence"
+	fi
+
+	# Initial SOC save
+	python3 "$PIBRICK_TOOLS/battery-soc-persist.py" --quiet 2>/dev/null || true
+
+	success "Battery driver installed (INA228 will be auto-detected at runtime)"
+	cd "$PIBRICK_LIB"
+}
+
+# ── Install original battery driver (bq25895 only, runtime INA228 probe) ─────
+install_battery_original() {
+	info "Installing Battery Driver (bq25895 with optional INA228 probe)..."
+
+	# Copy tools
+	install_tools
+
+	# Build and install module (INA228 is runtime-detected)
 	cd "$PIBRICK_LIB/battery"
 	make clean
 	make
@@ -520,7 +586,7 @@ install_battery() {
 	# Initial SOC save
 	python3 "$PIBRICK_TOOLS/battery-soc-persist.py" --quiet 2>/dev/null || true
 
-	success "Battery driver installed"
+	success "Battery driver (bq25895) installed (INA228 auto-detected at runtime)"
 	cd "$PIBRICK_LIB"
 }
 
@@ -618,12 +684,12 @@ main() {
 	choose_components
 
 	# Copy source tree for all installs
-	if [ -n "$INSTALL_DISPLAY$INSTALL_BATTERY$INSTALL_CALIBRATION$INSTALL_BUTTON" ]; then
+	if [ -n "$INSTALL_DISPLAY$INSTALL_BATTERY_NEW$INSTALL_BATTERY_ORIGINAL$INSTALL_CALIBRATION$INSTALL_BUTTON" ]; then
 		copy_sources
 	fi
 
 	# Panel selection
-	local selected_panel
+	local selected_panel="${PANEL:-9203}"
 	if [ -n "$INSTALL_DISPLAY" ]; then
 		selected_panel=$(choose_panel)
 		info "Selected panel: $(panel_label "$selected_panel")"
@@ -633,8 +699,9 @@ main() {
 	echo
 	echo -e "${BOLD}=== Installing Components ===${RESET}"
 
-	[ -n "$INSTALL_DISPLAY_NEW" ] && install_display "$selected_panel"
-	[ -n "$INSTALL_BATTERY" ] && install_battery
+	[ -n "$INSTALL_DISPLAY" ] && install_display "$selected_panel"
+	[ -n "$INSTALL_BATTERY_NEW" ] && install_battery
+	[ -n "$INSTALL_BATTERY_ORIGINAL" ] && install_battery_original
 	[ -n "$INSTALL_CALIBRATION" ] && install_calibration
 	[ -n "$INSTALL_UPower" ] && fix_upower
 	[ -n "$INSTALL_BUTTON" ] && install_button
@@ -647,7 +714,8 @@ main() {
 	echo -e "${BOLD}=== Installation Complete ===${RESET}"
 	echo "Installed components:"
 	[ -n "$INSTALL_DISPLAY" ] && echo "  - Display driver: $(panel_label "$selected_panel")"
-	[ -n "$INSTALL_BATTERY" ] && echo "  - Battery driver (bq25895 + INA228)"
+	[ -n "$INSTALL_BATTERY_NEW" ] && echo "  - Battery driver (bq25895 + INA228 auto-detect)"
+	[ -n "$INSTALL_BATTERY_ORIGINAL" ] && echo "  - Battery driver (bq25895 + INA228 auto-detect)"
 	[ -n "$INSTALL_CALIBRATION" ] && echo "  - Calibration tools (logger + auto-calibrator)"
 	[ -n "$INSTALL_UPower" ] && echo "  - UPower KDE fix"
 	[ -n "$INSTALL_BUTTON" ] && echo "  - Button service"
