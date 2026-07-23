@@ -5,8 +5,8 @@ After=local-fs.target sysinit.target
 DefaultDependencies=no
 
 [Service]
-ExecStart=/usr/lib/pibrick/build.sh
-WorkingDirectory=/usr/lib/pibrick
+ExecStart=__PIBRICK_LIB__/build.sh
+WorkingDirectory=__PIBRICK_LIB__
 Restart=on-failure
 User=root
 Group=root

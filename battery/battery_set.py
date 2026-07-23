@@ -168,14 +168,16 @@ PARAMS = {
         "desc": "Battery design capacity",
         "detail": (
             "The total capacity of the battery as designed (in microamp-hours). "
-            "This value is used as the reference '100%%' for state-of-charge calculations. "
-            "Set this to match your battery's actual rated capacity. "
-            "For a 5000mAh battery, enter 5000000 uAh."
+            "This value is used as the reference '100%%' for state-of-charge "
+            "calculations. Set this to match your battery's actual rated "
+            "capacity. The PocketCM5 ships with a 3800 mAh pack, so the "
+            "compile-time default is 3800000 uAh. For a 5000 mAh battery, "
+            "enter 5000000 uAh."
         ),
         "unit": "mAh",
         "unit_hint": "mAh",
         "kind": "module",
-        "default": 5000000,
+        "default": 3800000,
     },
     "ina228_shunt_uohm": {
         "desc": "INA228 shunt resistance",
@@ -265,12 +267,13 @@ PARAMS = {
             "The maximum discharge current value (in microamps) that the "
             "state-of-charge integrator will use as a proxy. This prevents "
             "unrealistic SOC calculations during very high current draws. "
-            "Value in microamps (e.g., 1500000 = 1.5A)."
+            "Value in microamps (e.g., 2200000 = 2.2A). The PocketCM5 "
+            "default is 2.2 A."
         ),
         "unit": "mA",
         "unit_hint": "mA",
         "kind": "module",
-        "default": 1500000,
+        "default": 2200000,
     },
     "rest_min_sec": {
         "desc": "Seconds of quiet required to enter DISCHARGING_RESTING",
@@ -279,12 +282,12 @@ PARAMS = {
             "battery driver considers the system to be in a 'resting' state. "
             "During rest, more accurate open-circuit voltage measurements can "
             "be taken. Longer times provide better accuracy but delay the "
-            "transition to resting state. Default: 1800 (30 minutes)."
+            "transition to resting state. PocketCM5 default: 300 (5 minutes)."
         ),
         "unit": "s",
         "unit_hint": "s",
         "kind": "module",
-        "default": 1800,
+        "default": 300,
     },
     "low_v_persistent_count": {
         "desc": "Consecutive low-voltage samples before SOC drops to critical",
@@ -399,26 +402,76 @@ def persist_available():
 
 
 def persist_to_modprobe_d(name, value):
-    """Append 'options bq25890_battery <name>=<value>' to MODPROBE_CONF."""
-    line = f"options bq25890_battery {name}={value}\n"
-    existing = ""
+    """Update the value of `name` in MODPROBE_CONF.
+
+    Reads the file, removes any prior `options bq25890_battery <name>=<value>`
+    pair (whether on its own line or co-located with other pairs), then
+    appends a fresh single-pair line with the new value. Comments, blank
+    lines, and unrelated `options` lines are preserved. The output is one
+    `options bq25890_battery <name>=<value>` line per persisted parameter,
+    so each parameter can be removed or updated independently.
+    """
+    new_line = f"options bq25890_battery {name}={value}"
+
     if os.path.exists(MODPROBE_CONF):
         with open(MODPROBE_CONF) as f:
             existing = f.read()
-    # Drop any prior line for the same param so the file doesn't accumulate.
+        trailing_nl = existing.endswith("\n")
+    else:
+        existing = ""
+        trailing_nl = True
+
+    # Split on newlines, drop the trailing empty element if present so
+    # we can process line-by-line.
+    lines = existing.split("\n")
+    if trailing_nl and lines and lines[-1] == "":
+        lines.pop()
+
     kept = []
-    for ln in existing.splitlines():
-        if ln.strip().startswith("options bq25890_battery") and f" {name}=" in ln:
+    for ln in lines:
+        stripped = ln.strip()
+        if not stripped:
+            kept.append(ln)
             continue
-        kept.append(ln)
-    kept.append(line.rstrip("\n"))
+
+        # Only modify the bq25890_battery options lines. Leave everything
+        # else (other modules' options, comments, blank lines) alone.
+        if not (stripped.startswith("options bq25890_battery") or
+                stripped.startswith("# options bq25890_battery")):
+            kept.append(ln)
+            continue
+
+        # Strip any " name=value" pair that matches our parameter from the
+        # tokens after `options <module>`.
+        tokens = stripped.split()
+        # tokens[0] is "options", tokens[1] is the module name
+        if len(tokens) < 2 or tokens[0] != "options":
+            kept.append(ln)
+            continue
+        is_commented = ln.lstrip().startswith("#")
+        prefix = "# " if is_commented else ""
+        head = tokens[:2]  # ['options', 'bq25890_battery']
+        body = []
+        for tok in tokens[2:]:
+            if "=" in tok:
+                tok_name = tok.split("=", 1)[0]
+                if tok_name == name:
+                    continue  # drop this pair
+            body.append(tok)
+        # Reassemble: only keep the line if it still has at least one pair
+        # (otherwise we'd produce `options bq25890_battery` with no body).
+        if body:
+            kept.append(f"{prefix}{head[0]} {head[1]} " + " ".join(body))
+        # else: drop the line entirely
+
+    kept.append(new_line)
     body = "\n".join(kept) + "\n"
     tmp = MODPROBE_CONF + ".tmp"
     with open(tmp, "w") as f:
         f.write(body)
     os.replace(tmp, MODPROBE_CONF)
     print(f"  -> Persisted to {MODPROBE_CONF}:")
-    print(f"       options bq25890_battery {name}={value}")
+    print(f"       {new_line}")
 
 
 def save_soc_persist():
@@ -603,7 +656,12 @@ COULOMB_SAFETY_FLOOR_PCT = 10
 
 
 def check_coulomb_safety(value, force=False):
-    """Return (ok, message). ok=False means we should refuse the write."""
+    """Return (ok, message). ok=False means we should refuse the write.
+
+    Below COULOMB_SAFETY_FLOOR_PCT, a write to coulomb_uah forces
+    capacity_level=CRITICAL and UPower / KDE may shut the device down
+    within seconds. Refuse such writes unless --force is given.
+    """
     full_raw = read_param("charge_full_uah")
     if full_raw is None:
         return True, None  # can't verify, don't block
@@ -615,7 +673,10 @@ def check_coulomb_safety(value, force=False):
         return True, None
     pct = 100.0 * value / full_uah
     if pct >= COULOMB_SAFETY_FLOOR_PCT:
+        # Value is safely above the critical floor; proceed.
         return True, None
+
+    # Value is BELOW the safety floor: refuse unless force.
     msg = (
         f"Refusing to set coulomb_uah to {int(round(value))} uAh "
         f"({pct:.1f}% of charge_full_uah={full_uah}).\n"
@@ -627,7 +688,7 @@ def check_coulomb_safety(value, force=False):
         f"charge_full_uah\n"
         f"  right after a confirmed full charge."
     )
-    return (True, msg) if force else (False, msg)
+    return (False, msg) if not force else (True, msg)
 
 
 def parse_value(value_str, unit_hint):
