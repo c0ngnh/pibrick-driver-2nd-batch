@@ -1,0 +1,40 @@
+# piBrick Battery SOC Boot Loader
+#
+# Seeds the running kernel driver with the SOC value persisted by
+# pibrick-battery-soc-persist.service at shutdown (or by cron). This
+# service uses the writable `coulomb_uah` sysfs attribute on the i2c
+# client device, so it has no timing dependency on whether the driver
+# is already loaded — the script waits for the sysfs node to appear
+# before writing (with a 15 s cap). There is intentionally no module
+# reload step: rewriting modprobe.d and modprobe -r/-ing the driver
+# is racy with udev-trigger and was the root cause of the 0%-display-
+# after-boot failure mode reported on PocketCM5.
+#
+# Ordering: DefaultDependencies=no lets us run before display-manager
+# so that KDE/UPower see a correct SOC when their first sample lands.
+# We do NOT depend on systemd-modules-load.service because on Pi OS
+# the bq25890_battery module is loaded by udev-trigger, which can run
+# before, after, or parallel to modules-load depending on the boot.
+
+[Unit]
+Description=piBrick Battery SOC Boot Loader
+DefaultDependencies=no
+Before=display-manager.service
+# Don't try to run before systemd has a writable /var/log.
+After=local-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# Path substituted at install time by install.sh. The script is
+# installed under $PIBRICK_TOOLS_DIR (next to battery-soc-persist.py
+# and battery_set.py); $PIBRICK_LIB is the source-tree path and may
+# not be present on a system-wide install.
+ExecStart=__PIBRICK_TOOLS__/pibrick-battery-load-soc.sh
+# Allow the script time to find the sysfs node on slow boots.
+TimeoutStartSec=20
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -651,11 +651,13 @@ copy_sources() {
 		--exclude='*.o'
 		--exclude='*.ko'
 		--exclude='*.mod'
-		--exclude='.module-common.o.cmd'
-		--exclude='.panel-pibrick.ko.cmd'
-		--exclude='.bq25890_battery.ko.cmd'
+		--exclude='*.cmd'
+		--exclude='*.dtbo'
+		--exclude='.git/'
+		--exclude='__pycache__/'
 		--exclude='.trellis/'
 		--exclude='.cursor/'
+		--exclude='AGENTS.md'
 	)
 	if [ "$(pwd -P)" != "$PIBRICK_LIB" ]; then
 		rsync "${rsync_opts[@]}" . "$PIBRICK_LIB/"
@@ -666,42 +668,21 @@ copy_sources() {
 install_tools() {
 	mkdir -p "$PIBRICK_TOOLS"
 
-	# Battery tools
-	if [ -f battery/battery_set.py ]; then
-		cp battery/battery_set.py "$PIBRICK_TOOLS/"
-		chmod +x "$PIBRICK_TOOLS/battery_set.py"
-		success "Installed: battery_set.py"
-	fi
-
-	if [ -f battery/battery-check.py ]; then
-		cp battery/battery-check.py "$PIBRICK_TOOLS/"
-		chmod +x "$PIBRICK_TOOLS/battery-check.py"
-		success "Installed: battery-check.py"
-	fi
-
-	# Calibration tools
-	if [ -f battery/battery-soc-persist.py ]; then
-		cp battery/battery-soc-persist.py "$PIBRICK_TOOLS/"
-		chmod +x "$PIBRICK_TOOLS/battery-soc-persist.py"
-		success "Installed: battery-soc-persist.py"
-	fi
-
-	if [ -f battery/battery-calibration-logger.py ]; then
-		cp battery/battery-calibration-logger.py "$PIBRICK_TOOLS/"
-		chmod +x "$PIBRICK_TOOLS/battery-calibration-logger.py"
-		success "Installed: battery-calibration-logger.py"
-	fi
-
-	if [ -f battery/battery-auto-calibrator.py ]; then
-		cp battery/battery-auto-calibrator.py "$PIBRICK_TOOLS/"
-		chmod +x "$PIBRICK_TOOLS/battery-auto-calibrator.py"
-		success "Installed: battery-auto-calibrator.py"
-	fi
+	# Battery tools. Resolve against $PIBRICK_LIB so the installer works
+	# from any cwd (e.g. when re-run after a previous system-wide install).
+	for script in battery_set.py battery-check.py battery-soc-persist.py \
+	              battery-calibration-logger.py battery-auto-calibrator.py; do
+		if [ -f "$PIBRICK_LIB/battery/$script" ]; then
+			cp "$PIBRICK_LIB/battery/$script" "$PIBRICK_TOOLS/"
+			chmod +x "$PIBRICK_TOOLS/$script"
+			success "Installed: $script"
+		fi
+	done
 }
 
 # ── Service install helper ─────────────────────────────────────────────────────
-# Substitutes __PIBRICK_TOOLS__ placeholder with the actual install path
-# and installs to /etc/systemd/system/.
+# Substitutes __PIBRICK_TOOLS__ and __PIBRICK_LIB__ placeholders with the
+# resolved install paths and writes the result to /etc/systemd/system/.
 install_service() {
 	local src="$1"
 	local dst="/etc/systemd/system/$(basename "$src")"
@@ -710,8 +691,12 @@ install_service() {
 		return 1
 	fi
 
-	# Substitute __PIBRICK_TOOLS__ with the resolved install path
-	sed "s|__PIBRICK_TOOLS__|$PIBRICK_TOOLS_DIR|g" "$src" > "$dst"
+	# Substitute both placeholders with the resolved install paths. Use a
+	# unique delimiter for sed to avoid clobbering any literal slashes in
+	# the resolved paths.
+	sed -e "s|__PIBRICK_TOOLS__|$PIBRICK_TOOLS_DIR|g" \
+	    -e "s|__PIBRICK_LIB__|$PIBRICK_LIB|g" \
+	    "$src" > "$dst"
 	chmod 644 "$dst"
 
 	systemctl daemon-reload
@@ -745,13 +730,52 @@ install_battery() {
 
 	# Config
 	if [ -f "$PIBRICK_LIB/battery/pibrick-battery.conf" ]; then
+		# Strip any legacy persist_soc=N from a previously-installed
+		# config — it races with udev-trigger and was the root cause of
+		# the 0%-display-after-boot failure mode. Modern install uses
+		# the writable `coulomb_uah` sysfs attribute instead, seeded at
+		# boot by pibrick-battery-load-soc.service.
+		if [ -f /etc/modprobe.d/pibrick-battery.conf ]; then
+			if grep -qE '(^|[[:space:]])persist_soc=' /etc/modprobe.d/pibrick-battery.conf; then
+				warn "Stripping stale 'persist_soc=' from /etc/modprobe.d/pibrick-battery.conf"
+				sed -i -E 's/(^|[[:space:]])persist_soc=[0-9]+//g; s/[[:space:]]+$//' \
+					/etc/modprobe.d/pibrick-battery.conf
+			fi
+		fi
 		install -m 644 "$PIBRICK_LIB/battery/pibrick-battery.conf" \
 			/etc/modprobe.d/pibrick-battery.conf
 	fi
 
 	# SOC persistence
 	mkdir -p /var/lib/bq25890_battery
-	mkdir -p "$PIBRICK_TOOLS"
+	mkdir -p "$PIBRICK_TOOLS_DIR"
+
+	# Clear any stale SOC=0% from a previous session — it would cause
+	# the boot loader to seed 0% on first boot and recreate the
+	# feedback loop the user just hit. The new persist script refuses
+	# to write 0% on its own (and the boot loader verifies against
+	# current voltage), but a leftover 0% from an old install still
+	# needs cleaning up.
+	if [ -f /var/lib/bq25890_battery/soc_persist ] && \
+	   grep -q '^soc=0$' /var/lib/bq25890_battery/soc_persist; then
+		warn "Removing stale /var/lib/bq25890_battery/soc_persist (was soc=0)"
+		rm -f /var/lib/bq25890_battery/soc_persist
+	fi
+
+	# Install SOC load-soc helper script (runs at boot to seed coulomb_uah).
+	# It lives under $PIBRICK_TOOLS_DIR so the service file (which has the
+	# path baked in at install time) can find it. The file in $PIBRICK_LIB
+	# is the source-of-truth copy that is pushed via git.
+	if [ -f "$PIBRICK_LIB/battery/pibrick-battery-load-soc.sh" ]; then
+		install -m 755 "$PIBRICK_LIB/battery/pibrick-battery-load-soc.sh" \
+			"$PIBRICK_TOOLS_DIR/pibrick-battery-load-soc.sh"
+	fi
+
+	if [ -f "$PIBRICK_LIB/battery/pibrick-battery-load-soc.service" ]; then
+		install_service "$PIBRICK_LIB/battery/pibrick-battery-load-soc.service"
+		systemctl enable pibrick-battery-load-soc.service
+		success "SOC load-on-boot service enabled"
+	fi
 
 	if [ -f "$PIBRICK_LIB/battery/pibrick-battery-soc-persist.service" ]; then
 		install_service "$PIBRICK_LIB/battery/pibrick-battery-soc-persist.service"
@@ -790,13 +814,52 @@ install_battery_original() {
 
 	# Config
 	if [ -f "$PIBRICK_LIB/battery/pibrick-battery.conf" ]; then
+		# Strip any legacy persist_soc=N from a previously-installed
+		# config — it races with udev-trigger and was the root cause of
+		# the 0%-display-after-boot failure mode. Modern install uses
+		# the writable `coulomb_uah` sysfs attribute instead, seeded at
+		# boot by pibrick-battery-load-soc.service.
+		if [ -f /etc/modprobe.d/pibrick-battery.conf ]; then
+			if grep -qE '(^|[[:space:]])persist_soc=' /etc/modprobe.d/pibrick-battery.conf; then
+				warn "Stripping stale 'persist_soc=' from /etc/modprobe.d/pibrick-battery.conf"
+				sed -i -E 's/(^|[[:space:]])persist_soc=[0-9]+//g; s/[[:space:]]+$//' \
+					/etc/modprobe.d/pibrick-battery.conf
+			fi
+		fi
 		install -m 644 "$PIBRICK_LIB/battery/pibrick-battery.conf" \
 			/etc/modprobe.d/pibrick-battery.conf
 	fi
 
 	# SOC persistence
 	mkdir -p /var/lib/bq25890_battery
-	mkdir -p "$PIBRICK_TOOLS"
+	mkdir -p "$PIBRICK_TOOLS_DIR"
+
+	# Clear any stale SOC=0% from a previous session — it would cause
+	# the boot loader to seed 0% on first boot and recreate the
+	# feedback loop the user just hit. The new persist script refuses
+	# to write 0% on its own (and the boot loader verifies against
+	# current voltage), but a leftover 0% from an old install still
+	# needs cleaning up.
+	if [ -f /var/lib/bq25890_battery/soc_persist ] && \
+	   grep -q '^soc=0$' /var/lib/bq25890_battery/soc_persist; then
+		warn "Removing stale /var/lib/bq25890_battery/soc_persist (was soc=0)"
+		rm -f /var/lib/bq25890_battery/soc_persist
+	fi
+
+	# Install SOC load-soc helper script (runs at boot to seed coulomb_uah).
+	# It lives under $PIBRICK_TOOLS_DIR so the service file (which has the
+	# path baked in at install time) can find it. The file in $PIBRICK_LIB
+	# is the source-of-truth copy that is pushed via git.
+	if [ -f "$PIBRICK_LIB/battery/pibrick-battery-load-soc.sh" ]; then
+		install -m 755 "$PIBRICK_LIB/battery/pibrick-battery-load-soc.sh" \
+			"$PIBRICK_TOOLS_DIR/pibrick-battery-load-soc.sh"
+	fi
+
+	if [ -f "$PIBRICK_LIB/battery/pibrick-battery-load-soc.service" ]; then
+		install_service "$PIBRICK_LIB/battery/pibrick-battery-load-soc.service"
+		systemctl enable pibrick-battery-load-soc.service
+		success "SOC load-on-boot service enabled"
+	fi
 
 	if [ -f "$PIBRICK_LIB/battery/pibrick-battery-soc-persist.service" ]; then
 		install_service "$PIBRICK_LIB/battery/pibrick-battery-soc-persist.service"
@@ -826,18 +889,15 @@ install_calibration() {
 
 	mkdir -p "$PIBRICK_TOOLS"
 
-	# Copy calibration scripts
-	if [ -f battery/battery-calibration-logger.py ]; then
-		cp battery/battery-calibration-logger.py "$PIBRICK_TOOLS/"
-		chmod +x "$PIBRICK_TOOLS/battery-calibration-logger.py"
-		success "Installed: battery-calibration-logger.py"
-	fi
-
-	if [ -f battery/battery-auto-calibrator.py ]; then
-		cp battery/battery-auto-calibrator.py "$PIBRICK_TOOLS/"
-		chmod +x "$PIBRICK_TOOLS/battery-auto-calibrator.py"
-		success "Installed: battery-auto-calibrator.py"
-	fi
+	# Copy calibration scripts. Resolve against $PIBRICK_LIB so the
+	# installer works from any cwd.
+	for script in battery-calibration-logger.py battery-auto-calibrator.py; do
+		if [ -f "$PIBRICK_LIB/battery/$script" ]; then
+			cp "$PIBRICK_LIB/battery/$script" "$PIBRICK_TOOLS/"
+			chmod +x "$PIBRICK_TOOLS/$script"
+			success "Installed: $script"
+		fi
+	done
 
 	# Service and log dir installation requires root
 	if [ "$(id -u)" != "0" ]; then
@@ -849,9 +909,11 @@ install_calibration() {
 	# Create log directory
 	mkdir -p /var/log/bq25890_battery
 
-	# Install service
-	if [ -f battery/pibrick-battery-calibration.service ]; then
-		install_service "$PWD/battery/pibrick-battery-calibration.service"
+	# Install service. Source the .service file from PIBRICK_LIB so it
+	# works whether install.sh was run from the source tree (PWD=.) or
+	# already from /usr/lib/pibrick.
+	if [ -f "$PIBRICK_LIB/battery/pibrick-battery-calibration.service" ]; then
+		install_service "$PIBRICK_LIB/battery/pibrick-battery-calibration.service"
 		success "Calibration logger service installed"
 	fi
 
@@ -872,11 +934,15 @@ install_display() {
 		esac
 	fi
 
-	# Copy and install
-	install -m 644 "$PIBRICK_LIB/pibrick.service" /etc/systemd/system/
-	chmod +x "$PIBRICK_LIB/build.sh"
-	systemctl daemon-reload
-	systemctl enable pibrick.service
+	# Copy and install. Use install_service so __PIBRICK_LIB__ /
+	# __PIBRICK_TOOLS__ placeholders are resolved for both per-user and
+	# system-wide layouts.
+	if install_service "$PIBRICK_LIB/pibrick.service"; then
+		chmod +x "$PIBRICK_LIB/build.sh"
+		systemctl enable pibrick.service
+	else
+		warn "Failed to install pibrick.service"
+	fi
 
 	# Build
 	cd "$PIBRICK_LIB"

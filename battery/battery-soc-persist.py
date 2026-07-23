@@ -22,14 +22,37 @@ import argparse
 
 SOC_PERSIST_FILE = "/var/lib/bq25890_battery/soc_persist"
 SYSFS_CAPACITY = "/sys/class/power_supply/battery/capacity"
+SYSFS_VOLTAGE = "/sys/class/power_supply/battery/voltage_now"
+# Refuse to persist values that obviously don't match the battery.
+# Below this voltage (uV) the cell is critically discharged and writing
+# any value to the file risks the "0% boot loop" — the driver will
+# happily report 0% while charging is happening (it integrates from
+# OCV) and cron will dutifully persist that 0% forever.
+MIN_SAVE_VOLTAGE_UV = 3_300_000   # ~3.30 V (LiPo ~10% SOC)
+# Also refuse to write 0% explicitly — even at higher voltages, a
+# 0% report usually means the coulomb counter has desynced, not that
+# the cell is truly empty. The user should explicitly clear or
+# re-seed via `battery_set.py coulomb_uah <value>` if they really
+# want to mark it empty.
+REFUSE_PCT = 0
+
+
+def read_sysfs(path):
+    try:
+        with open(path, "r") as f:
+            return f.read().strip()
+    except (FileNotFoundError, PermissionError, IOError):
+        return None
 
 
 def read_capacity():
     """Read current SOC from the driver."""
+    raw = read_sysfs(SYSFS_CAPACITY)
+    if raw is None:
+        return None
     try:
-        with open(SYSFS_CAPACITY, "r") as f:
-            return int(f.read().strip())
-    except (FileNotFoundError, ValueError, PermissionError):
+        return int(raw)
+    except ValueError:
         return None
 
 
@@ -74,6 +97,10 @@ def main():
                        help="Reset (clear) persisted SOC")
     parser.add_argument("--quiet", "-q", action="store_true",
                        help="Suppress output")
+    parser.add_argument("--force", action="store_true",
+                       help="Bypass the 0%%/low-voltage safety checks and "
+                            "persist the driver's current reading anyway. "
+                            "Use only when you're sure the cell really is at 0%%.")
     args = parser.parse_args()
 
     if args.load:
@@ -104,6 +131,34 @@ def main():
         if not args.quiet:
             print("Error: Cannot read current SOC", file=sys.stderr)
         sys.exit(1)
+
+    # Refuse to write 0% — that's almost always a stale coulomb-counter
+    # reading, not a real "the cell is empty" reading. Persisting 0%
+    # causes a feedback loop where the next boot shows 0%, which gets
+    # persisted again, forever.
+    if capacity == REFUSE_PCT and not args.force:
+        if not args.quiet:
+            print(f"Refusing to persist SOC=0% (looks like stale coulomb reading). "
+                  f"Use --force to override.", file=sys.stderr)
+        sys.exit(2)
+
+    # Refuse to persist when voltage is critically low. At < 3.3 V the
+    # driver may legitimately report 0% while charging is already
+    # happening; saving that value prevents the next boot from picking
+    # up the higher SOC after a partial charge cycle.
+    if not args.force:
+        voltage = read_sysfs(SYSFS_VOLTAGE)
+        if voltage is not None:
+            try:
+                uv = int(voltage)
+            except ValueError:
+                uv = 0
+            if uv < MIN_SAVE_VOLTAGE_UV and capacity < 10:
+                if not args.quiet:
+                    print(f"Refusing to persist SOC={capacity}% at voltage "
+                          f"{uv} uV (cell near-empty; driver reading is unreliable). "
+                          f"Use --force to override.", file=sys.stderr)
+                sys.exit(2)
 
     if save_persisted_soc(capacity):
         if not args.quiet:
