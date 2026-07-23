@@ -179,6 +179,16 @@ struct bq25890_device {
 	unsigned long fg_rest_jiffies;	/* last quiet sample */
 	int fg_low_v_count;		/* persistent-low counter */
 	int fg_glitch_count;		/* legacy ADC-floor hit counter */
+	/*
+	 * Set when a userspace writer (the load-soc service) seeds
+	 * coulomb_uah from /var/lib/bq25890_battery/soc_persist.  The boot
+	 * calibrate work checks this and skips its OCV-based reseed when a
+	 * user seed is present, so the persisted SOC survives the 30 s post-
+	 * probe reset that would otherwise wipe it back to voltage-derived
+	 * OCV (often wildly different from the persisted value, especially
+	 * on a partially-charged pack).
+	 */
+	bool fg_user_seeded;
 	struct mutex lock; /* protect state data */
 
 	/* --- INA228 high-side current monitor (optional) --- */
@@ -1872,8 +1882,37 @@ static void bq25890_capacity_calibrate_work(struct work_struct *work)
 	bq->fg_glitch_count = 0;
 	bq->fg_load_jiffies = 0;
 	bq->fg_rest_jiffies = 0;
-	bq->fg_disch_remain_uah = -1;
-	bq->fg_disch_jiffies = 0;
+	/*
+	 * Reset the discharge integrator so the next sample can reseed
+	 * cleanly.  Two cases:
+	 *
+	 *  (a) A userspace writer (typically the load-soc service) has
+	 *      already injected a persisted SOC into coulomb_uah.  Honour
+	 *      it — the persisted value is the user's stated last-known
+	 *      SOC and overwriting it with a voltage-derived value at
+	 *      boot + 30 s caused the "shows 58% then drops to 0%"
+	 *      deadlock.
+	 *
+	 *  (b) No userspace seed.  Reseed the integrator directly from
+	 *      the current terminal voltage via the OCV curve.  Setting
+	 *      it to -1 (the old behaviour) was unsafe because the
+	 *      integrate functions run BEFORE the !capacity_valid reseed
+	 *      branch on the very next sample and would clamp -1 to 0,
+	 *      stranding SOC at 0% until the next unplug.
+	 */
+	if (!bq->fg_user_seeded) {
+		long batv_uv = bq25890_get_batv_uv(bq);
+
+		if (batv_uv > 0) {
+			int ocv_pct = bq25890_calc_lipo_percentage(batv_uv);
+
+			bq->fg_disch_remain_uah =
+				(long)clamp(ocv_pct, 0, 100) * charge_full_uah / 100;
+		} else {
+			bq->fg_disch_remain_uah = -1;
+		}
+		bq->fg_disch_jiffies = jiffies;
+	}
 	bq->fg_proxy_ua = 0;
 	bq->ina228_current_ua = 0;
 	if (bq->ina228) {
@@ -2943,6 +2982,21 @@ static ssize_t bq25890_fg_store_coulomb_uah(struct device *dev,
 	 */
 	mutex_lock(&bq->lock);
 	bq->fg_disch_remain_uah = clamp(v, 0L, (long)charge_full_uah);
+	/*
+	 * Mark the integrator as user-seeded so the post-probe calibrate
+	 * work does not overwrite this value with an OCV-based reseed.
+	 * Also pin capacity_cache to the same percentage so the
+	 * discharging branch in bq25890_sample_and_update_fg() (which
+	 * gates its OCV reseed on !capacity_valid) keeps using our value
+	 * instead of falling back to a fresh OCV lookup.
+	 */
+	if (charge_full_uah > 0) {
+		bq->capacity_cache =
+			clamp((int)(bq->fg_disch_remain_uah * 100L / charge_full_uah),
+			      0, 100);
+		bq->capacity_valid = true;
+	}
+	bq->fg_user_seeded = true;
 	mutex_unlock(&bq->lock);
 
 	return count;
