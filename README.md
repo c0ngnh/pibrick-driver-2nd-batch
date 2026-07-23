@@ -29,6 +29,17 @@ sudo bash ./install.sh
 The interactive menu lets you pick which components to install. The default
 selects everything (display, battery, calibration, UPower fix, button service).
 
+**Only one display panel is installed at a time.** When you opt into the
+display category, the installer prompts for a single panel variant
+(`9203`, `9202`, `548`, or `5inch`) and the Makefile builds + installs
+exactly one `panel-pibrick.ko` plus one overlay (`vc4-kms-dsi-pibrick`,
+`vc-548inch`, or `vc4-5inch`). The `install` target's `remove` step
+scrubs all known overlays from `/boot/firmware/overlays` and strips any
+stale `dtoverlay=…` lines from `config.txt` before writing the new
+overlay, so switching panels between installs is safe. The chosen
+panel is persisted in `/etc/pibrick.panel` so subsequent `pibrick-tools`
+operations (rebuilds, calibration rebuilds) reuse it.
+
 After install finishes, a global `pibrick-tools` command is available in
 `/usr/local/bin/`. From now on, you manage everything with that one command —
 no need to remember paths under `/usr/lib/pibrick/`:
