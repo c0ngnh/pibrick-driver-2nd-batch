@@ -157,7 +157,7 @@ sudo pibrick-tools --apply-calibration
 | `--enable-calibration` | **Starts logging service** - only collects data, does NOT modify driver |
 | `--disable-calibration` | **Stops logging service** - data is preserved |
 | `--status-calibration` | Shows data stats, confidence level, sample count |
-| `--apply-calibration` | **Applies calibrated OCV table** - rebuilds driver |
+| `--apply-calibration` | **Applies calibrated OCV table** - rebuilds driver. Accepts `--yes`, `--no-rebuild`, `--no-ina228` (see [Calibration section](#automatic-battery-calibration)). |
 
 **Important**: `--enable-calibration` only starts the data collection service. It does NOT automatically apply anything to the driver. You must manually run `--apply-calibration` when you have enough data.
 
@@ -446,7 +446,7 @@ The calibration system automatically builds an accurate voltage-to-SOC mapping:
    - Generates confidence score
    - Creates calibrated OCV table
 
-4. **Application**: The calibrated OCV table is applied to the driver for accurate SOC estimation.
+4. **Application**: The calibrated OCV table is applied to the driver for accurate SOC estimation. Run `sudo pibrick-tools --apply-calibration --yes` once the confidence threshold is met — the wrapper takes a confirmation (`y` or `yes`), patches the driver source with the new ascending-order table, rebuilds the module, and reloads it. See [`pibrick-tools --apply-calibration` flags](#pibrick-tools---apply-calibration-flags) for the supported flags.
 
 #### Calibration Status
 
@@ -483,6 +483,38 @@ sudo python3 /usr/lib/pibrick/battery-tools/battery-calibration-logger.py --gene
 # Apply the calibrated OCV table (rebuilds + reloads driver)
 sudo pibrick-tools --apply-calibration
 ```
+
+#### `pibrick-tools --apply-calibration` flags
+
+The wrapper passes these flags through to `battery-auto-calibrator.py`:
+
+| Flag | Effect |
+|------|--------|
+| `--yes`, `-y` | Skip the `Continue? (yes/no):` confirmation prompt. Implied automatically when no TTY is attached (e.g. running from a script or CI). When the prompt is shown it accepts `y`, `Y`, `yes`, or `YES`. |
+| `--no-rebuild` | Patch the driver source but skip the `make` + `modprobe` step. Useful as a dry-run to preview the new table without rebooting or disrupting the live module. |
+| `--no-ina228` | Tighten the sample filter (restricts `fg_mode` to resting, `|current_now| ≤ 10 mA`, lowers the min samples per bucket). Use this on boards without the TI INA228 current sensor — the raw logger dump tends to be noisier and the tighter filter prevents spurious low-SOC samples from polluting the OCV curve. |
+
+Examples:
+
+```bash
+# Non-interactive apply (e.g. from a script or CI)
+sudo pibrick-tools --apply-calibration --yes
+
+# Preview the new table without rebuilding/reloading
+sudo pibrick-tools --apply-calibration --no-rebuild --yes
+
+# No INA228 board
+sudo pibrick-tools --apply-calibration --yes --no-ina228
+```
+
+> **Note on table ordering.** The driver's `bq25890_calc_lipo_percentage()`
+> walks the OCV table with `v[i] ≤ voltage < v[i+1]` and assumes `v[0]`
+> is the lowest voltage (= 0 %) and `v[last]` is the highest (= 100 %).
+> `update-ocv-table.py` always emits the table in this **ascending** order.
+> If you ever hand-edit `voltage_to_percent_table` in `bq25890_battery.c`,
+> keep it strictly ascending — a descending table will silently force
+> SOC = 0 % for almost every voltage (this was the root cause of an
+> earlier "always shows 0 %" regression).
 
 #### Calibration Log Files
 
