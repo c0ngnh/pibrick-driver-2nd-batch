@@ -790,7 +790,7 @@ choose_components() {
 	prompt_yesno "Apply UPower KDE Fix (show Charging state)" INSTALL_UPower
 	prompt_yesno "Install Button Service (pibrickbtn)" INSTALL_BUTTON
 
-	if [ -z "$INSTALL_DISPLAY$INSTALL_BATTERY$INSTALL_CALIBRATION$INSTALL_UPower$INSTALL_BUTTON" ]; then
+	if [ -z "${INSTALL_DISPLAY:-}${INSTALL_BATTERY_NEW:-}${INSTALL_BATTERY_ORIGINAL:-}${INSTALL_CALIBRATION:-}${INSTALL_UPower:-}${INSTALL_BUTTON:-}" ]; then
 		error "Nothing selected. Exiting."
 		exit 0
 	fi
@@ -813,6 +813,20 @@ choose_panel() {
 		9203|9202|548|5inch) echo "$PANEL"; return 0 ;;
 		*) error "Invalid PANEL=$PANEL (use 9203, 9202, 548, or 5inch)"; exit 1 ;;
 		esac
+	fi
+
+	# Non-interactive: --install <component> was passed, or no TTY attached.
+	# Don't prompt — fall back to the saved panel config, then 9203.
+	if [ -n "${INSTALL_EXPLICIT:-}" ] || [ ! -t 0 ]; then
+		if [ -f "$PANEL_CONFIG" ]; then
+			local saved
+			saved=$(tr -d '[:space:]' < "$PANEL_CONFIG")
+			case "$saved" in
+			9203|9202|548|5inch) echo "$saved"; return 0 ;;
+			esac
+		fi
+		echo 9203
+		return 0
 	fi
 
 	if [ -f "$PANEL_CONFIG" ]; then
@@ -841,6 +855,9 @@ choose_panel() {
 }
 
 # ── UPower fix ─────────────────────────────────────────────────────────────────
+# /usr/libexec/upowerd is mapped as a text segment while the daemon is running,
+# so any `cp` over it returns ETXTBSY. The whole patch must run with the daemon
+# stopped; `restart_upower()` re-launches it at the end.
 fix_upower() {
 	info "Applying UPower KDE fix..."
 
@@ -855,6 +872,8 @@ fix_upower() {
 		restart_upower
 		return 0
 	fi
+
+	stop_upower
 
 	info "Patching UPower (rebuild from source)..."
 	local UPVER
@@ -915,36 +934,41 @@ else:
 			> /tmp/meson-pibrick.log 2>&1 || {
 		error "meson setup failed. See /tmp/meson-pibrick.log"
 		cp "$BAK" "$UPowerD"
+		cd /
 		return 1
 	}
 
 	ninja -C build > /tmp/ninja-pibrick.log 2>&1 || {
 		error "ninja build failed. See /tmp/ninja-pibrick.log"
 		cp "$BAK" "$UPowerD"
+		cd /
 		return 1
 	}
 
 	if [ ! -f build/src/upowerd ]; then
 		error "Build succeeded but upowerd not found."
 		cp "$BAK" "$UPowerD"
+		cd /
 		return 1
 	fi
 
-	cp "$BAK" "$UPowerD" 2>/dev/null || cp "$BAK" "$UPowerD"
-	cp build/src/upowerd "$UPowerD"
-	chmod +x "$UPowerD"
+	install -m 0755 build/src/upowerd "$UPowerD"
 	cd /
 
 	success "UPower rebuilt successfully."
 	restart_upower
 }
 
-restart_upower() {
-	info "Restarting UPower daemon..."
+stop_upower() {
 	systemctl --user stop upower 2>/dev/null || \
 		sudo systemctl stop upower 2>/dev/null || \
 		killall -9 upowerd 2>/dev/null || true
 	sleep 2
+}
+
+restart_upower() {
+	info "Restarting UPower daemon..."
+	stop_upower
 	/usr/libexec/upowerd &
 	sleep 4
 
@@ -994,6 +1018,7 @@ copy_sources() {
 	# build.sh are executable when copied to PIBRICK_LIB.
 	chmod +x "$PIBRICK_LIB/install.sh" 2>/dev/null || true
 	chmod +x "$PIBRICK_LIB/build.sh" 2>/dev/null || true
+	chmod +x "$PIBRICK_LIB/button-service/install.sh" 2>/dev/null || true
 }
 
 # ── Install tools ───────────────────────────────────────────────────────────────
@@ -1279,10 +1304,11 @@ install_display() {
 # ── Install button service ─────────────────────────────────────────────────────
 install_button() {
 	info "Installing Button Service..."
-	if [ -f button-service/install.sh ]; then
-		bash "$PIBRICK_LIB/button-service/install.sh"
+	local BUTTON_INSTALL="$PIBRICK_LIB/button-service/install.sh"
+	if [ -f "$BUTTON_INSTALL" ]; then
+		bash "$BUTTON_INSTALL"
 	else
-		error "Button service install script not found"
+		error "Button service install script not found (expected at $BUTTON_INSTALL)"
 		return 1
 	fi
 }
