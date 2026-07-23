@@ -126,6 +126,64 @@ apply_calibration() {
 	python3 "$calibrator" --apply "${extra[@]}"
 }
 
+# ── Reset (truncate) calibration data ──────────────────────────────────────────
+# Stops the logger service, deletes the per-session log files
+# (calibration.log + calibration_data.csv), and restarts the service so the
+# next row written is a fresh CSV header. Preserves calibration_status.json,
+# calibration_metadata.json, and suggested_ocv_table.h — those are
+# generated work-products, not raw input data, and disposing of them on
+# every reset would be surprising.
+#
+# Idempotent: works whether the service is currently running or stopped.
+# Refuses to do anything if the calibration component is not installed.
+reset_calibration() {
+	local log_dir=/var/log/bq25890_battery
+	local log_file="$log_dir/calibration.log"
+	local csv_file="$log_dir/calibration_data.csv"
+
+	if [ ! -d "$log_dir" ] && [ ! -f /etc/systemd/system/pibrick-battery-calibration.service ]; then
+		error "Calibration tooling not installed. Run: $0 --install calibration"
+		return 1
+	fi
+
+	# Stop the logger so file handles are released and the truncated CSV
+	# gets a fresh header on the first row.
+	if systemctl is-active --quiet pibrick-battery-calibration.service 2>/dev/null; then
+		info "Stopping calibration logger..."
+		systemctl stop pibrick-battery-calibration.service || true
+	fi
+
+	mkdir -p "$log_dir"
+	# Tighten the dir mode: install_calibration creates it via the bare
+	# `mkdir -p` inherited from earlier versions, which leaves it 0777 and
+	# lets any local user tamper with calibration data. 0755 + root-only
+	# files stops that.
+	chmod 0755 "$log_dir"
+
+	local deleted=()
+	for f in "$log_file" "$csv_file"; do
+		if [ -f "$f" ]; then
+			local before
+			before=$(wc -c < "$f")
+			rm -f "$f"
+			deleted+=("$(basename "$f") (${before} bytes)")
+		fi
+	done
+
+	if [ ${#deleted[@]} -gt 0 ]; then
+		info "Deleted: ${deleted[*]}"
+	else
+		info "No prior calibration data found — nothing to delete"
+	fi
+
+	# Re-enable + start so the next row gets written under the new run.
+	info "Starting calibration logger..."
+	systemctl enable pibrick-battery-calibration.service 2>/dev/null || true
+	systemctl start pibrick-battery-calibration.service 2>/dev/null || true
+
+	success "Calibration data reset. New rows will be appended to a fresh CSV."
+}
+
 # ── Find a battery Python helper ───────────────────────────────────────────────
 # Resolves the path to a Python helper under the battery tools dir, falling
 # back to $PIBRICK_LIB/battery/ (the source tree) if the tools-dir copy
@@ -272,6 +330,7 @@ ${BOLD}Options:${RESET}
   --status-calibration      Show calibration status
   --enable-calibration      Enable calibration logging service
   --disable-calibration     Disable calibration logging service
+  --reset-calibration       Stop logger, delete old CSV/log, restart fresh
   --battery-status          Show current battery params + persisted config
   --battery-config [args]   Configure battery driver params (interactive)
                               Args forwarded to battery_set.py:
@@ -294,6 +353,7 @@ ${BOLD}Examples:${RESET}
   $0 --status-calibration      # Check calibration status
   $0 --enable-calibration      # Start calibration logging
   $0 --disable-calibration     # Stop calibration logging
+  $0 --reset-calibration       # Discard old calibration data and start fresh
   $0 --battery-status          # Show all battery parameters + persisted config
   $0 --battery-config          # Interactive battery parameter setter
   $0 --battery-config charge_full_uah 3800 mAh --persist
@@ -588,6 +648,38 @@ panel_artifact() {
 
 
 # ── Parse arguments ─────────────────────────────────────────────────────────────
+# Subcommands that modify the system (--install/--uninstall/--*-calibration/
+# --battery-config/--battery-status) require root. Read-only subcommands
+# (--status-calibration/--help/--version) are allowed without sudo.
+#
+# This guard runs before the parser so it covers all of the early-exit
+# subcommands (--enable-calibration, --disable-calibration,
+# --reset-calibration, --apply-calibration, --battery-status,
+# --battery-config) that bypass main()'s internal check.
+if [ "$(id -u)" != "0" ]; then
+    read_only=0
+    for arg in "$@"; do
+        case "$arg" in
+            --status-calibration|--battery-status|--version|-h|--help|help)
+                read_only=1 ;;
+            --install|--uninstall|--enable-calibration|--disable-calibration|\
+--reset-calibration|--apply-calibration|--battery-config|--battery-check|\
+--enable-upower|--disable-upower)
+                read_only=0; break ;;
+            *)
+                # Unknown / non-system-modifying arg — fall through to default
+                # root-required. Strict but predictable.
+                ;;
+        esac
+    done
+    if [ "$read_only" != "1" ]; then
+        echo "pibrick install.sh: this command modifies the system." >&2
+        echo "Please re-run with sudo:" >&2
+        echo "  sudo $0 $*" >&2
+        exit 1
+    fi
+fi
+
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--install)
@@ -693,6 +785,10 @@ while [ $# -gt 0 ]; do
 		systemctl disable pibrick-battery-calibration.service 2>/dev/null || true
 		success "Calibration service disabled and stopped"
 		exit 0
+		;;
+	--reset-calibration)
+		reset_calibration
+		exit $?
 		;;
 	--battery-status)
 		battery_status
@@ -1256,8 +1352,10 @@ install_calibration() {
 		return 0
 	fi
 
-	# Create log directory
+	# Create log directory. Pin the perms to 0755 so a non-root local user
+	# can't tamper with calibration data the logger is writing.
 	mkdir -p /var/log/bq25890_battery
+	chmod 0755 /var/log/bq25890_battery
 
 	# Install service. Source the .service file from PIBRICK_LIB so it
 	# works whether install.sh was run from the source tree (PWD=.) or
@@ -1372,7 +1470,7 @@ main() {
 		case "$arg" in
 			--status|--status-calibration|--battery-status|--version|-h|--help|help)
 				needs_root=0 ;;
-			--install|--uninstall|--enable-calibration|--disable-calibration|--apply-calibration|--battery-config|--battery-check|--enable-upower|--disable-upower)
+			--install|--uninstall|--enable-calibration|--disable-calibration|--reset-calibration|--apply-calibration|--battery-config|--battery-check|--enable-upower|--disable-upower)
 				needs_root=1; break ;;
 		esac
 	done

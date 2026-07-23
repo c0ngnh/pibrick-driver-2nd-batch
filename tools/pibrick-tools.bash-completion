@@ -13,6 +13,7 @@ _pibrick_tools() {
 		"--help" "--version"
 		"--install" "--uninstall"
 		"--enable-calibration" "--disable-calibration"
+		"--reset-calibration"
 		"--status-calibration" "--apply-calibration"
 		"--battery-status" "--battery-config"
 		"--enable-upower" "--disable-upower"

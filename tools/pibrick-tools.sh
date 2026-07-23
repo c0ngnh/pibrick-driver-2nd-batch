@@ -27,14 +27,15 @@ if [ ! -f "$INSTALL_SH" ]; then
 	exit 1
 fi
 
-# Read-only subcommands that do not require root. Anything else
-# (--install, --apply-calibration, --enable-calibration, --battery-config)
-# does need root because it touches /etc/modprobe.d/, /sys, or the kernel.
+# ── Subcommand privilege check ─────────────────────────────────────────────────
+# Read-only subcommands (status / help / version) are allowed without sudo.
+# Everything else (--install, --uninstall, --*-calibration, --battery-*,
+# --*-upower) modifies /etc, /sys, /var/log, or the kernel and requires root.
 needs_root() {
 	local arg
 	for arg in "$@"; do
 		case "$arg" in
-			--status-calibration|--battery-status|--version|-h|--help|help)
+			--status|--status-calibration|--battery-status|--version|-h|--help|help)
 				return 1 ;;
 		esac
 	done
