@@ -51,13 +51,102 @@ status_calibration() {
 
 apply_calibration() {
 	info "Checking calibration status..."
-	
+
 	if [ ! -f /home/congn/battery-tools/battery-auto-calibrator.py ]; then
 		error "Auto-calibrator not installed. Run: $0 --install calibration"
 		return 1
 	fi
-	
+
 	python3 /home/congn/battery-tools/battery-auto-calibrator.py --apply
+}
+
+# ── Battery status (shows current params + persisted config) ──────────────────
+battery_status() {
+	info "Battery status & custom values"
+
+	if [ ! -f "$PIBRICK_TOOLS/battery_set.py" ]; then
+		error "battery_set.py not installed. Run: $0 --install battery"
+		return 1
+	fi
+
+	echo
+	echo -e "${BOLD}=== Current Driver Values (live) ===${RESET}"
+	python3 "$PIBRICK_TOOLS/battery_set.py" --show
+
+	echo
+	echo -e "${BOLD}=== Persisted Config (/etc/modprobe.d/pibrick-battery.conf) ===${RESET}"
+	if [ -f /etc/modprobe.d/pibrick-battery.conf ]; then
+		cat /etc/modprobe.d/pibrick-battery.conf
+	else
+		echo "(none — no values persisted yet)"
+	fi
+
+	echo
+	echo -e "${BOLD}=== Driver Defaults (compile-time) ===${RESET}"
+	python3 "$PIBRICK_TOOLS/battery_set.py" --list 2>&1 | \
+		grep -E "Driver Default" || true
+
+	echo
+	echo -e "${BOLD}=== Quick SOC Readout ===${RESET}"
+	if [ -f /sys/class/power_supply/battery/capacity ]; then
+		SOC=$(cat /sys/class/power_supply/battery/capacity)
+		STATUS=$(cat /sys/class/power_supply/battery/status 2>/dev/null || echo "Unknown")
+		V=$(($(cat /sys/class/power_supply/battery/voltage_now 2>/dev/null || echo 0) / 1000))
+		I_UA=$(cat /sys/class/power_supply/battery/current_now 2>/dev/null || echo 0)
+		I_MA=$(awk "BEGIN {printf \"%.0f\", ${I_UA}/1000}")
+		echo "  SOC:        ${SOC}%"
+		echo "  Status:     ${STATUS}"
+		echo "  Voltage:    ${V} mV"
+		echo "  Current:    ${I_MA} mA"
+	else
+		echo "  (battery power_supply not found — is the driver loaded?)"
+	fi
+}
+
+# ── Battery configuration (interactive / non-interactive) ─────────────────────
+battery_config() {
+	local persist_flag=""
+	local force_flag=""
+	local extra_args=()
+
+	# Parse remaining args after --battery-config
+	shift 2>/dev/null || true
+	while [ $# -gt 0 ]; do
+		case "$1" in
+		--persist) persist_flag="1" ;;
+		--force)   force_flag="1" ;;
+		--list)    extra_args+=("--list") ;;
+		--list-verbose) extra_args+=("--list-verbose") ;;
+		--show)    extra_args+=("--show") ;;
+		*)         extra_args+=("$1") ;;
+		esac
+		shift
+	done
+
+	if [ ! -f "$PIBRICK_TOOLS/battery_set.py" ]; then
+		error "battery_set.py not installed. Run: $0 --install battery"
+		return 1
+	fi
+
+	# If no extra args, run interactive mode
+	if [ ${#extra_args[@]} -eq 0 ]; then
+		info "Launching interactive battery configuration..."
+		# Need to be a TTY for interactive; just exec directly
+		python3 "$PIBRICK_TOOLS/battery_set.py"
+		return $?
+	fi
+
+	# Non-interactive path: build command using string concat (preserves args with spaces)
+	local cmd="python3 $PIBRICK_TOOLS/battery_set.py"
+	for a in "${extra_args[@]}"; do
+		cmd="$cmd \"$a\""
+	done
+	[ -n "$persist_flag" ] && cmd="$cmd --persist"
+	[ -n "$force_flag" ] && cmd="$cmd --force"
+
+	info "Running: $cmd"
+	# shellcheck disable=SC2086
+	eval $cmd
 }
 
 # ── Usage ──────────────────────────────────────────────────────────────────────
@@ -86,21 +175,32 @@ ${BOLD}All Components:${RESET}
   all              Install display + battery-new + calibration + upower + button
 
 ${BOLD}Options:${RESET}
-  --apply-calibration   Apply calibrated OCV table to installed driver
-  --status-calibration  Show calibration status
-  --enable-calibration  Enable calibration logging service
-  --disable-calibration Disable calibration logging service
-  -h, --help            Show this help
+  --apply-calibration       Apply calibrated OCV table to installed driver
+  --status-calibration      Show calibration status
+  --enable-calibration      Enable calibration logging service
+  --disable-calibration     Disable calibration logging service
+  --battery-status          Show current battery params + persisted config
+  --battery-config [args]   Configure battery driver params (interactive)
+                              Args forwarded to battery_set.py:
+                                <param> <value>    Set value
+                                --persist          Save to modprobe.d + reload driver
+                                --force            Bypass safety checks (coulomb_uah)
+                                --show             Show all current values
+                                --list             List all parameters
+  -h, --help                Show this help
 
 ${BOLD}Examples:${RESET}
   $0 --install all              # Install everything
   $0 --install display          # Display with interactive panel selection
   $0 --install battery-new      # Battery with INA228
-  $0 --install battery         # Original battery (no INA228)
   $0 --apply-calibration       # Apply calibrated OCV table
   $0 --status-calibration      # Check calibration status
   $0 --enable-calibration      # Start calibration logging
   $0 --disable-calibration     # Stop calibration logging
+  $0 --battery-status          # Show all battery parameters + persisted config
+  $0 --battery-config          # Interactive battery parameter setter
+  $0 --battery-config charge_full_uah 3800 mAh --persist
+                                # Set 3800mAh battery capacity and persist it
 
 ${BOLD}Environment:${RESET}
   PANEL=9203  Select panel (9203, 9202, 548, 5inch)
@@ -183,6 +283,14 @@ while [ $# -gt 0 ]; do
 		systemctl disable pibrick-battery-calibration.service 2>/dev/null || true
 		success "Calibration service disabled and stopped"
 		exit 0
+		;;
+	--battery-status)
+		battery_status
+		exit $?
+		;;
+	--battery-config)
+		battery_config "$@"
+		exit $?
 		;;
 	-h|--help)
 		usage

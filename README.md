@@ -163,6 +163,86 @@ sudo python3 /home/congn/battery-tools/battery-auto-calibrator.py --build-driver
 
 **Note**: The `--apply-calibration` step works correctly **regardless of whether INA228 is present**. The OCV table affects the driver's voltage-to-SOC lookup, which is independent of the INA228 current sensor. The calibration data uses BQ25895's `voltage_now` (always available) — INA228 is only used for more accurate current measurements during data collection.
 
+### Battery Driver Customization
+
+The battery driver exposes 10+ module parameters (battery capacity, INA228 shunt, discharge profiles, etc.). You can read and modify these live via `install.sh` or directly via `battery_set.py`.
+
+#### Show Current Status & Persisted Config
+
+```bash
+sudo /usr/lib/pibrick/install.sh --battery-status
+```
+
+This shows:
+- Current driver values (live, from sysfs / module parameters)
+- Values persisted to `/etc/modprobe.d/pibrick-battery.conf` (survive reboot)
+- Driver compile-time defaults (for reference)
+- Quick SOC readout from power_supply
+
+#### Interactive Configuration (recommended for first-time setup)
+
+```bash
+sudo /usr/lib/pibrick/install.sh --battery-config
+```
+
+This launches the **interactive setter** which lets you:
+- Choose any of the 10 parameters to view/edit
+- See current value, driver default, units
+- Get warned about persistence behavior
+- Choose to persist (and reload driver) or just set live
+
+#### Non-Interactive Configuration
+
+Set a single value directly:
+
+```bash
+# Set battery capacity to 3800 mAh (non-persistent, until reboot)
+sudo /usr/lib/pibrick/install.sh --battery-config charge_full_uah 3800000
+
+# Set and persist (saves to /etc/modprobe.d/ + reloads driver)
+sudo /usr/lib/pibrick/install.sh --battery-config charge_full_uah 3800 mAh --persist
+
+# Set INA228 shunt for 15 mΩ resistor, persist it
+sudo /usr/lib/pibrick/install.sh --battery-config ina228_shunt_uohm 15 mΩ --persist
+
+# Set fuel-gauge discharge profile (700 mA idle, 40% under load, 2200 mA ceiling)
+sudo /usr/lib/pibrick/install.sh --battery-config discharge_avg_ua 700 mA --persist
+sudo /usr/lib/pibrick/install.sh --battery-config discharge_load_factor_pct 40 --persist
+sudo /usr/lib/pibrick/install.sh --battery-config discharge_max_ua 2200 mA --persist
+
+# Show all values
+sudo /usr/lib/pibrick/install.sh --battery-config --show
+
+# List all parameters
+sudo /usr/lib/pibrick/install.sh --battery-config --list
+```
+
+#### Available Battery Parameters
+
+| Parameter | Unit | Default | Purpose |
+|-----------|------|---------|---------|
+| `charge_full_uah` | mAh | 5000 | Battery design capacity (e.g. 3800 for 3800 mAh pack) |
+| `ina228_shunt_uohm` | mΩ | 15 | INA228 shunt resistor value (must match hardware) |
+| `ina228_max_current_ua` | mA | 6400 | INA228 max current range |
+| `discharge_current_ua` | mA | 900 | Assumed avg discharge (for time-to-empty) |
+| `batt_ir_mohm` | mΩ | 180 | Battery internal resistance (charge-time OCV estimate) |
+| `discharge_avg_ua` | mA | 700 | Nominal idle discharge (set 0 to disable) |
+| `discharge_load_factor_pct` | % | 40 | Extra % added under sustained load |
+| `discharge_max_ua` | mA | 1500 | Hard ceiling for SOC integrator proxy current |
+| `rest_min_sec` | s | 300 | Seconds of quiet required for DISCHARGING_RESTING |
+| `low_v_persistent_count` | samples | 5 | Consecutive low-V samples before SOC→critical |
+| `coulomb_uah` | mAh | — | **LIVE** — remaining capacity; fuel gauge overwrites |
+
+#### Persistence Behavior
+
+| Flag | What it does |
+|------|--------------|
+| *(none)* | Set value LIVE only. Resets on driver reload/reboot. |
+| `--persist` | Save to `/etc/modprobe.d/pibrick-battery.conf` **AND** automatically reload driver so value takes effect immediately. Survives reboot. |
+| `--force` | Bypass safety checks (for `coulomb_uah` writes below 10% capacity — DANGEROUS, can trigger UPower shutdown). |
+
+**Important**: `--persist` makes the change survive reboot. Without it, the change is "live" — visible immediately but lost on next driver reload or reboot. See [Persisting Settings Across Reboots](#persisting-settings-across-reboots).
+
 #### Calibration Log Files
 
 | File | Purpose |
