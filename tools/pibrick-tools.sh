@@ -6,6 +6,7 @@
 #   sudo pibrick-tools --battery-status
 #   sudo pibrick-tools --apply-calibration
 #   sudo pibrick-tools --install battery-new
+#   sudo pibrick-tools --uninstall all
 # without having to remember the install.sh path under /usr/lib/pibrick/.
 #
 # This is a thin wrapper: every argument is forwarded to

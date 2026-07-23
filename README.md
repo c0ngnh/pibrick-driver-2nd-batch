@@ -68,6 +68,60 @@ sudo pibrick-tools --install button             # GPIO button service
 sudo pibrick-tools --install battery-new,calibration   # Comma-separated, multiple at once
 ```
 
+### Uninstall
+
+To reverse an install, run the uninstaller with the same component name(s)
+you originally installed. It must be run as root (sudo). Before any action it
+prints a list of what will be removed and asks you to type `YES` exactly —
+this guard runs even in non-interactive mode, so an accidental
+`sudo pibrick-tools --uninstall all` from a misconfigured cron job is safe.
+
+```bash
+# Remove a single component
+sudo pibrick-tools --uninstall display
+sudo pibrick-tools --uninstall battery
+sudo pibrick-tools --uninstall calibration
+sudo pibrick-tools --uninstall upower
+sudo pibrick-tools --uninstall button
+sudo pibrick-tools --uninstall wrapper
+
+# Remove several components at once (comma-separated, same as --install)
+sudo pibrick-tools --uninstall display,battery,calibration
+
+# Remove everything that pibrick-tools has installed on this system
+sudo pibrick-tools --uninstall all
+```
+
+Components are removed in dependency order regardless of the order you
+type: `calibration` → `battery` → `display` → `upower` → `button` →
+`wrapper`. The UPower fix is restored from the most recent
+`/usr/libexec/upowerd.bak-pibrick-*` backup (created at install time), so
+the stock UPower from your distro comes back. If no backup exists the
+patched binary is left in place and you'll be told to run
+`sudo apt reinstall upower`.
+
+After uninstalling the display or battery driver, **reboot** for the
+kernel to forget the unloaded module (the uninstaller only stops services,
+unloads the module if it isn't busy, and removes the `.ko` file). A
+`success "Uninstall complete. A reboot is recommended."` message at the
+end of the run is your cue.
+
+**Files the uninstaller touches per component:**
+
+| Component | What it removes |
+|---|---|
+| `display` | `pibrick.service`, `/lib/modules/.../panel/panel-pibrick.ko`, all three known overlays, `dtoverlay=…` lines in `/boot/firmware/config.txt`, `/etc/pibrick.panel`, `/etc/pibrick.display-refresh`, `/etc/udev/rules.d/99-pibrick-display.rules` |
+| `battery` | `bq25890_battery.ko`, `/etc/modprobe.d/pibrick-battery.conf`, `/var/lib/bq25890_battery/soc_persist`, `/etc/cron.d/pibrick-battery-soc`, `pibrick-battery-{calibration,load-soc,soc-persist}.service` units, `$PIBRICK_TOOLS_DIR/pibrick-battery-load-soc.sh` |
+| `calibration` | `pibrick-battery-calibration.service`, the entire `/var/log/bq25890_battery/` directory (CSV, logs, `suggested_ocv_table.h`, `calibration_status.json`), `battery-calibration-logger.py`, `battery-auto-calibrator.py`. `battery_set.py` / `battery-soc-persist.py` are **kept** as they are useful diagnostics even with no driver loaded |
+| `upower` | Restores `/usr/libexec/upowerd` from the most recent `.bak-pibrick-*` backup |
+| `button` | `pibrickbtn.service`, `/usr/local/bin/pibrickbtn`, `/etc/pibrick/` |
+| `wrapper` | `/usr/local/bin/pibrick-tools`, bash completion files |
+
+> **Note.** The uninstaller does **not** touch `/usr/lib/pibrick/` itself
+> (the source tree copy). It's regenerated on every `--install` run, and
+> keeping it around lets you re-run the installer without first cloning
+> the repo. To nuke it too, run `sudo rm -rf /usr/lib/pibrick` manually.
+
 Each panel has its **matching touch driver**:
 - **9203 / 9202 / 5inch** → Hynitron CST66xx (`hyn,66xx`)
 - **548** (5.48 inch) → FocalTech (`edt-ft5406`)
@@ -385,6 +439,13 @@ The new **interactive installer** provides a user-friendly menu for selecting co
 | `--enable-calibration` | Start calibration logging |
 | `--disable-calibration` | Stop calibration logging |
 | `--apply-calibration` | Apply calibrated OCV table |
+| `--uninstall <component>` | Remove one component (`display`, `battery`, `calibration`, `upower`, `button`, `wrapper`) — requires typed `YES` |
+| `--uninstall all` | Remove everything `pibrick-tools` has installed — requires typed `YES` |
+
+> **Uninstall safety.** `--uninstall` requires root and always prompts
+> for a typed `YES` before doing anything, even in non-interactive mode.
+> See the [Uninstall](#uninstall) section above for what each component
+> removes and the dependency order it uses.
 
 ---
 

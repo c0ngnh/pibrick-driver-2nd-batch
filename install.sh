@@ -48,6 +48,11 @@ PIBRICK_WRAPPER="/usr/local/bin/pibrick-tools"
 #   sudo pibrick-tools --battery-config charge_full_uah 3800 mAh --persist
 #   sudo pibrick-tools --install calibration
 #   sudo pibrick-tools --apply-calibration
+#
+# To reverse an install:
+#   sudo pibrick-tools --uninstall all
+# (per-component removal is also supported; the command requires a
+# typed YES before any action).
 
 # Detect the source tree (the directory install.sh lives in). This is
 # what we copy FROM into /usr/lib/pibrick. Capture at startup so any
@@ -257,6 +262,11 @@ ${BOLD}Other Components:${RESET}
 ${BOLD}All Components:${RESET}
   all              Install display + battery-new + calibration + upower + button
 
+${BOLD}Uninstall (requires root, prompts for typed YES):${RESET}
+  $0 --uninstall <component[,component...]>    # Remove one or more components
+  $0 --uninstall all                            # Remove everything pibrick-tools installed
+  Components: display, battery, calibration, upower, button, wrapper
+
 ${BOLD}Options:${RESET}
   --apply-calibration       Apply calibrated OCV table to installed driver
   --status-calibration      Show calibration status
@@ -277,6 +287,9 @@ ${BOLD}Examples:${RESET}
   $0 --install all              # Install everything
   $0 --install display          # Display with interactive panel selection
   $0 --install battery-new      # Battery with INA228
+  $0 --uninstall display        # Remove display driver + overlay + udev rule
+  $0 --uninstall calibration    # Stop logger service + drop calibration logs
+  $0 --uninstall all            # Remove everything (typed YES to confirm)
   $0 --apply-calibration       # Apply calibrated OCV table
   $0 --status-calibration      # Check calibration status
   $0 --enable-calibration      # Start calibration logging
@@ -290,6 +303,289 @@ ${BOLD}Environment:${RESET}
   PANEL=9203  Select panel (9203, 9202, 548, 5inch)
 EOF
 }
+# ── Uninstall ───────────────────────────────────────────────────────────────────
+# Destructive companion to install.sh. Each uninstall_<component> helper
+# reverses the corresponding install_<component> helper. Components are
+# uninstalled in dependency order: calibration (depends on battery tools)
+# before battery, button before wrapper, etc.
+#
+# Safety: --uninstall <anything> requires a typed "YES" before any action,
+# even in non-interactive mode. This protects against accidental
+# `sudo pibrick-tools --uninstall all` from a misconfigured cron job.
+
+do_uninstall() {
+	local targets="$1"
+
+	if [ -z "$targets" ]; then
+		error "--uninstall requires at least one component"
+		usage
+		return 1
+	fi
+
+	# Must be root (we touch /etc, kernel modules, systemd units).
+	if [ "$(id -u)" != "0" ]; then
+		error "--uninstall must be run as root (sudo)"
+		return 1
+	fi
+
+	# Detection — warn if the component looks uninstalled.
+	local missing=""
+	for comp in $targets; do
+		case "$comp" in
+		display)    panel_artifact >/dev/null 2>&1 || { [ ! -f /etc/pibrick.panel ] && [ ! -f /etc/systemd/system/pibrick.service ] && missing="$missing display"; } ;;
+		battery)    { lsmod 2>/dev/null | grep -q bq25890_battery || [ ! -f /etc/modprobe.d/pibrick-battery.conf ]; } && missing="$missing battery" ;;
+		calibration) [ ! -f /etc/systemd/system/pibrick-battery-calibration.service ] && missing="$missing calibration" ;;
+		upower)     [ ! -f /usr/libexec/upowerd ] && missing="$missing upower" ;;
+		button)     { [ ! -f /usr/local/bin/pibrickbtn ] && [ ! -f /etc/systemd/system/pibrickbtn.service ]; } && missing="$missing button" ;;
+		wrapper)    [ ! -f /usr/local/bin/pibrick-tools ] && missing="$missing wrapper" ;;
+		esac
+	done
+	if [ -n "$missing" ]; then
+		warn "These components look uninstalled already:$missing"
+	fi
+
+	echo
+	echo -e "${BOLD}=== piBrick Uninstaller ===${RESET}"
+	echo "About to remove:"
+	for comp in $targets; do
+		echo "  - $comp"
+	done
+	echo
+	echo "This will:"
+	echo "  - unload kernel modules"
+	echo "  - remove installed kernel modules from /lib/modules/.../kernel/"
+	echo "  - remove /etc/systemd/system/pibrick*.service and disable them"
+	echo "  - remove /etc/modprobe.d/pibrick-battery.conf"
+	echo "  - remove /etc/pibrick.panel / /etc/pibrick.display-refresh"
+	echo "  - remove /etc/udev/rules.d/99-pibrick-display.rules"
+	echo "  - remove /etc/cron.d/pibrick-battery-soc"
+	echo "  - remove Python helpers from $PIBRICK_TOOLS_DIR"
+	echo "  - restore /usr/libexec/upowerd from .bak-pibrick-* (if present)"
+	echo "  - remove /usr/local/bin/pibrick-tools + bash completion"
+	echo
+	echo "Type exactly:  YES"
+	printf "> "
+	local reply
+	read -r reply || reply=""
+	if [ "$reply" != "YES" ]; then
+		echo "Aborted."
+		return 130
+	fi
+	echo
+
+	# Uninstall in dependency order regardless of the order the user typed.
+	local ordered="calibration battery display upower button wrapper"
+	for comp in $ordered; do
+		case " $targets " in
+		*" $comp "*)
+			echo
+			echo -e "${BOLD}--- Removing $comp ---${RESET}"
+			uninstall_"$comp" || warn "Failed to remove $comp (continuing)"
+			;;
+		esac
+	done
+
+	# Final depmod so the next modprobe doesn't see a phantom bq25890_battery.
+	if lsmod 2>/dev/null | grep -q bq25890_battery; then
+		modprobe -r bq25890_battery 2>/dev/null || true
+	fi
+	depmod -a 2>/dev/null || true
+
+	echo
+	success "Uninstall complete. A reboot is recommended."
+}
+
+# ── uninstall: display panel ────────────────────────────────────────────────────
+uninstall_display() {
+	info "Uninstalling display driver..."
+
+	# Stop + disable the service
+	if systemctl is-active --quiet pibrick.service 2>/dev/null; then
+		systemctl stop pibrick.service || true
+	fi
+	systemctl disable pibrick.service 2>/dev/null || true
+
+	# Use the Makefile's `remove` target to scrub all known overlays and
+	# config.txt entries — same logic as a panel switch. Building isn't
+	# required because `remove` only deletes.
+	if [ -f "$PIBRICK_LIB/Makefile" ]; then
+		(cd "$PIBRICK_LIB" && make remove 2>&1 | sed 's/^/    /')
+	fi
+
+	# Drop the panel-config + refresh config files we created.
+	rm -f /etc/pibrick.panel
+	rm -f /etc/pibrick.display-refresh
+
+	# Drop the udev rule that grants display-on/off to the user.
+	rm -f /etc/udev/rules.d/99-pibrick-display.rules
+
+	# Drop the systemd unit. `make remove` doesn't touch /etc/systemd/system.
+	rm -f /etc/systemd/system/pibrick.service
+	systemctl daemon-reload || true
+
+	success "Display driver uninstalled"
+}
+
+# ── uninstall: battery driver ───────────────────────────────────────────────────
+uninstall_battery() {
+	info "Uninstalling battery driver..."
+
+	# Stop services that depend on the driver / sysfs.
+	for svc in pibrick-battery-calibration.service \
+	           pibrick-battery-soc-persist.service \
+	           pibrick-battery-load-soc.service; do
+		systemctl stop "$svc" 2>/dev/null || true
+		systemctl disable "$svc" 2>/dev/null || true
+	done
+
+	# Unload module before removing .ko
+	if lsmod 2>/dev/null | grep -q bq25890_battery; then
+		modprobe -r bq25890_battery 2>/dev/null || \
+			warn "bq25890_battery still in use; module file removed but module is still loaded"
+	fi
+
+	# Remove the .ko file using the same Makefile target as install.
+	if [ -f "$PIBRICK_LIB/battery/Makefile" ]; then
+		(cd "$PIBRICK_LIB/battery" && make remove 2>&1 | sed 's/^/    /')
+	fi
+
+	# Drop modprobe config
+	rm -f /etc/modprobe.d/pibrick-battery.conf
+
+	# Drop SOC persistence state
+	rm -f /var/lib/bq25890_battery/soc_persist
+
+	# Drop the cron job
+	rm -f /etc/cron.d/pibrick-battery-soc
+
+	# Drop the SOC helper script + its services
+	rm -f "$PIBRICK_TOOLS_DIR/pibrick-battery-load-soc.sh"
+	rm -f /etc/systemd/system/pibrick-battery-load-soc.service
+	rm -f /etc/systemd/system/pibrick-battery-soc-persist.service
+
+	systemctl daemon-reload || true
+	depmod -a 2>/dev/null || true
+
+	success "Battery driver uninstalled"
+}
+
+# ── uninstall: calibration ──────────────────────────────────────────────────────
+# Stops the logger service and removes the calibrated OCV artifacts + scripts.
+# Kept separate from `battery` because users may want to disable logging
+# without rebuilding the kernel module.
+uninstall_calibration() {
+	info "Uninstalling calibration tooling..."
+
+	# Stop + disable the logger service.
+	if systemctl is-active --quiet pibrick-battery-calibration.service 2>/dev/null; then
+		systemctl stop pibrick-battery-calibration.service || true
+	fi
+	systemctl disable pibrick-battery-calibration.service 2>/dev/null || true
+	rm -f /etc/systemd/system/pibrick-battery-calibration.service
+	systemctl daemon-reload || true
+
+	# Drop the calibrated OCV artifacts and the entire log dir if user agrees
+	# implicitly (the YES prompt at the top of do_uninstall already covers it).
+	if [ -d /var/log/bq25890_battery ]; then
+		warn "Removing /var/log/bq25890_battery/ (calibration CSV + logs + status JSON)"
+		rm -rf /var/log/bq25890_battery
+	fi
+
+	# Drop the calibrator/logger scripts. battery_set.py / battery-soc-persist.py
+	# are kept because they are useful diagnostic tools even with no driver
+	# loaded (matches the policy of install_calibration).
+	rm -f "$PIBRICK_TOOLS_DIR/battery-calibration-logger.py"
+	rm -f "$PIBRICK_TOOLS_DIR/battery-auto-calibrator.py"
+
+	success "Calibration tooling uninstalled"
+}
+
+# ── uninstall: UPower KDE fix ───────────────────────────────────────────────────
+# Restores /usr/libexec/upowerd from the most recent .bak-pibrick-* backup
+# the install script created when it patched UPower.
+uninstall_upower() {
+	info "Uninstalling UPower KDE fix..."
+
+	local UPowerD=/usr/libexec/upowerd
+	if [ ! -f "$UPowerD" ]; then
+		warn "upowerd not found at $UPowerD — nothing to restore"
+		return 0
+	fi
+
+	# Sanity check: only restore if the current binary is patched.
+	if ! grep -q "piBrick:" "$UPowerD" 2>/dev/null; then
+		warn "upowerd does not look patched — leaving alone"
+		return 0
+	fi
+
+	# Pick the most recent backup.
+	local bak
+	bak=$(ls -t "$UPowerD".bak-pibrick-* 2>/dev/null | head -n 1)
+	if [ -z "$bak" ] || [ ! -f "$bak" ]; then
+		warn "No .bak-pibrick-* backup of upowerd found."
+		warn "The patched binary remains. To fully revert, install the"
+		warn "matching upower package from your distro (apt reinstall upower)."
+		return 0
+	fi
+
+	info "Restoring upowerd from $bak"
+	cp -f "$bak" "$UPowerD"
+	chmod +x "$UPowerD"
+	restart_upower
+
+	success "UPower restored from $bak"
+}
+
+# ── uninstall: button service ───────────────────────────────────────────────────
+# Removes the button service installed by button-service/install.sh.
+uninstall_button() {
+	info "Uninstalling button service..."
+
+	# Stop + disable
+	if systemctl is-active --quiet pibrickbtn.service 2>/dev/null; then
+		systemctl stop pibrickbtn.service || true
+	fi
+	systemctl disable pibrickbtn.service 2>/dev/null || true
+
+	# Remove unit + binary
+	rm -f /etc/systemd/system/pibrickbtn.service
+	rm -f /usr/local/bin/pibrickbtn
+
+	# Drop the config tree (only if it looks like ours)
+	if [ -d /etc/pibrick ]; then
+		rm -rf /etc/pibrick
+	fi
+
+	systemctl daemon-reload || true
+
+	success "Button service uninstalled"
+}
+
+# ── uninstall: pibrick-tools wrapper ────────────────────────────────────────────
+# Removes the /usr/local/bin/pibrick-tools shim and bash completion.
+uninstall_wrapper() {
+	info "Uninstalling pibrick-tools wrapper..."
+
+	rm -f /usr/local/bin/pibrick-tools
+	rm -f /etc/bash_completion.d/pibrick-tools
+	# Some systems use /usr/share/bash-completion/completions/
+	rm -f /usr/share/bash-completion/completions/pibrick-tools
+
+	success "pibrick-tools wrapper removed"
+}
+
+# Helper: return 0 if the display driver looks installed.
+panel_artifact() {
+	local p
+	for p in vc4-kms-dsi-pibrick vc-548inch vc4-5inch; do
+		if [ -f "/boot/firmware/overlays/$p.dtbo" ] || \
+		   [ -f "/lib/modules/$(uname -r)/kernel/drivers/gpu/drm/panel/panel-pibrick.ko" ]; then
+			return 0
+		fi
+	done
+	return 1
+}
+
 
 # ── Parse arguments ─────────────────────────────────────────────────────────────
 while [ $# -gt 0 ]; do
@@ -347,6 +643,33 @@ while [ $# -gt 0 ]; do
 			esac
 		done
 		shift
+		;;
+	--uninstall)
+		shift
+		[ $# -eq 0 ] && { error "--uninstall requires argument"; usage; exit 1; }
+		# Record which components to remove, then exit early via do_uninstall.
+		UNINSTALL_EXPLICIT=1
+		UNINSTALL_TARGETS=
+		for comp in $(echo "$1" | tr ',' ' '); do
+			case "$comp" in
+			all)
+				UNINSTALL_TARGETS="$UNINSTALL_TARGETS display battery calibration upower button wrapper"
+				;;
+			display|battery|calibration|upower|button|wrapper)
+				UNINSTALL_TARGETS="$UNINSTALL_TARGETS $comp"
+				;;
+			*)
+				error "Unknown --uninstall component: $comp"
+				usage
+				exit 1
+				;;
+			esac
+		done
+		# Trim leading/trailing whitespace
+		UNINSTALL_TARGETS=$(echo "$UNINSTALL_TARGETS" | xargs)
+		# Confirm before destructive operations
+		do_uninstall "$UNINSTALL_TARGETS"
+		exit $?
 		;;
 	--apply-calibration)
 		# Forward remaining args: e.g. `--yes`, `--no-ina228`,
@@ -1090,6 +1413,7 @@ main() {
 	echo "  sudo pibrick-tools --apply-calibration"
 	echo "  sudo pibrick-tools --battery-config charge_full_uah 3800 mAh --persist"
 	echo "  sudo pibrick-tools --install <component>"
+	echo "  sudo pibrick-tools --uninstall <component|all>   # reverse an install"
 	echo
 	echo "Run \`pibrick-tools --help\` for the full command list."
 	echo
