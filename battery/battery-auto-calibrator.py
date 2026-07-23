@@ -251,8 +251,14 @@ def generate_calibrated_table(stats):
     if len(points) < 3:
         return None
     
-    # Sort by voltage (descending - higher voltage = higher SOC)
-    points.sort(key=lambda x: x[0], reverse=True)
+    # Sort by voltage ASCENDING. The driver's bq25890_calc_lipo_percentage()
+    # walks voltage_to_percent_table and assumes v[0] is the LOWEST voltage
+    # (= 0%) and v[size-1] is the HIGHEST (= 100%). A descending table
+    # makes the first guard `voltage <= v[0]` match for almost every
+    # voltage and force SOC=0% forever. See the comment block above
+    # voltage_to_percent_table in bq25890_battery.c for the full
+    # rationale.
+    points.sort(key=lambda x: x[0])
     
     # Fill gaps and smooth
     calibrated_points = []

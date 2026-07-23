@@ -294,12 +294,13 @@ def generate_ocv_table(csv_file=None, output_file=None):
         voltage_cv = int(round(avg_v / 1e4))  # Convert to centivolts
         table_points.append({"soc": soc, "voltage_cv": voltage_cv, "samples": len(soc_data[soc])})
 
-    # IMPORTANT: sort the output table by voltage DESCENDING.
-    # The driver's bq25890_calc_lipo_percentage() walks voltage_to_percent_table
-    # and finds the largest voltage <= measured voltage, so the table must be
-    # sorted with the highest voltage first (e.g. 100% / 4.18V at index 0, 0%
-    # / 2.98V at the last index).
-    table_points.sort(key=lambda x: x["voltage_cv"], reverse=True)
+    # IMPORTANT: sort the output table by voltage ASCENDING. The driver's
+    # bq25890_calc_lipo_percentage() walks voltage_to_percent_table looking
+    # for `voltage >= v[i] && voltage < v[i+1]` and assumes v[0] is the
+    # LOWEST voltage (= 0%) and v[size-1] is the HIGHEST (= 100%). A
+    # descending table would make the first guard `voltage <= v[0]`
+    # match for almost every battery voltage and force SOC=0% forever.
+    table_points.sort(key=lambda x: x["voltage_cv"])
     
     # Generate C code for the driver
     output = []

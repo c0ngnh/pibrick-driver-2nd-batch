@@ -45,13 +45,22 @@ PIBRICK_CONF=/etc/pibrick.conf
 #   3. Custom path (set PIBRICK_USER=1 or PIBRICK_USER_HOME=/some/path)
 #      - Explicit override for unusual layouts
 #
-# Auto-detection rules (in order):
-#   1. If PIBRICK_USER_HOME is set, use it.
-#   2. If running as non-root AND not from system install dir, use $HOME/battery-tools.
-#   3. Otherwise, use system-wide /usr/lib/pibrick/battery-tools.
+# Auto-detection rules (in order, first match wins):
+#   1. If PIBRICK_USER_HOME is set in the env (or already sourced from
+#      /etc/pibrick.conf), use it.
+#   2. If /etc/pibrick.conf exists, source it and use the PIBRICK_USER_HOME
+#      value it defines. This lets the admin set the default tools path
+#      site-wide without each user needing to set the env var.
+#   3. Forced system-wide (PIBRICK_SYSTEM=1): use $PIBRICK_LIB/battery-tools.
+#   4. Forced per-user (PIBRICK_USER=1): use $HOME/battery-tools.
+#   5. Root running from the system install dir (/usr/lib/pibrick/*) AND
+#      not from a clone: use the system-wide location.
+#   6. Otherwise: per-user $HOME/battery-tools.
 #
 # Override with env vars:
 #   PIBRICK_USER_HOME=/path/to/tools
+#   PIBRICK_SYSTEM=1   (force system-wide)
+#   PIBRICK_USER=1     (force per-user)
 #   PIBRICK_SYSTEM=1   (force system-wide, even as non-root)
 #   PIBRICK_USER=1     (force per-user in $HOME/battery-tools)
 #   PIBRICK_USER_HOME=<path> (force per-user to specific path)
@@ -73,22 +82,55 @@ if [ -n "${SUDO_USER:-}" ] && [ "$(id -un)" = "root" ]; then
 fi
 HOME="${ORIG_HOME}"
 
+# Determine the source tree (the directory install.sh lives in). This is
+# what `copy_sources` will sync from. Capture it BEFORE any env var
+# reassignments later overwrite PIBRICK_USER_HOME with the tools dir.
+SCRIPT_REAL=$(readlink -f "${BASH_SOURCE[0]:-$0}" 2>/dev/null || echo "$0")
+PIBRICK_SRC="$SCRIPT_REAL"
+if [ -d "$PIBRICK_SRC" ]; then
+	PIBRICK_SRC="$(dirname "$PIBRICK_SRC")"
+fi
+# Snapshot PIBRICK_USER_HOME at startup. install.sh reassigns this later
+# to be the tools dir, but `copy_sources` needs to know the original
+# source tree location when the script is invoked from /usr/lib/pibrick
+# (where the source tree itself may be stale or missing).
+PIBRICK_USER_HOME_AT_STARTUP="${PIBRICK_USER_HOME:-}"
+
 # Are we running from a clone of this repo (not from /usr/lib/pibrick/)?
 # This distinguishes a fresh clone (per-user install) from a system
 # reinstall after /usr/lib/pibrick was already populated (system-wide).
-SCRIPT_REAL=$(readlink -f "${BASH_SOURCE[0]:-$0}" 2>/dev/null || echo "$0")
 RUNNING_FROM_CLONE=true
 if [[ "$SCRIPT_REAL" == /usr/lib/pibrick/* ]]; then
 	RUNNING_FROM_CLONE=false
 fi
 
 if [ -n "${PIBRICK_USER_HOME:-}" ]; then
-	# Explicit override wins
-	PIBRICK_TOOLS_DIR="$PIBRICK_USER_HOME"
+	# Explicit override wins. We accept two interpretations:
+	#   - PIBRICK_USER_HOME=/home/alice          -> tools at $PIBRICK_USER_HOME/battery-tools/
+	#   - PIBRICK_USER_HOME=/home/alice/battery-tools -> tools at $PIBRICK_USER_HOME
+	# Pick whichever exists; fall back to the conventional layout.
+	if [ -f "$PIBRICK_USER_HOME/battery-tools/battery-auto-calibrator.py" ]; then
+		PIBRICK_TOOLS_DIR="$PIBRICK_USER_HOME/battery-tools"
+	elif [ -f "$PIBRICK_USER_HOME/battery-auto-calibrator.py" ]; then
+		PIBRICK_TOOLS_DIR="$PIBRICK_USER_HOME"
+	else
+		# Doesn't exist yet — assume the conventional layout and let
+		# the caller fix it if they really meant something else.
+		PIBRICK_TOOLS_DIR="$PIBRICK_USER_HOME/battery-tools"
+	fi
 elif [ -f "$PIBRICK_CONF" ]; then
-	# Source user-provided default
-	. "$PIBRICK_CONF"
-	PIBRICK_TOOLS_DIR="${PIBRICK_USER_HOME:-$HOME/battery-tools}"
+	# Source user-provided default. We strip comments and only accept
+	# lines of the form PIBRICK_USER_HOME=... — `. /etc/pibrick.conf`
+	# would source any shell in that file, which is a needless attack
+	# surface given the file lives in /etc.
+	PIBRICK_USER_HOME=$(grep -E '^PIBRICK_USER_HOME=' "$PIBRICK_CONF" 2>/dev/null | tail -1 | cut -d= -f2-)
+	PIBRICK_USER_HOME="${PIBRICK_USER_HOME//\"/}"
+	PIBRICK_USER_HOME="${PIBRICK_USER_HOME//\'/}"
+	if [ -n "$PIBRICK_USER_HOME" ]; then
+		PIBRICK_TOOLS_DIR="$PIBRICK_USER_HOME/battery-tools"
+	else
+		PIBRICK_TOOLS_DIR="$HOME/battery-tools"
+	fi
 elif [ "${PIBRICK_SYSTEM:-0}" = "1" ]; then
 	# Forced system-wide
 	PIBRICK_TOOLS_DIR="$PIBRICK_LIB/battery-tools"
@@ -648,6 +690,10 @@ copy_sources() {
 	rsync_opts=(
 		--archive
 		--delete
+		--delete-excluded
+		# Exclude build artifacts from the copy so they don't accumulate
+		# stale entries in PIBRICK_LIB. The make-based build creates these
+		# in-place and they don't belong in a source-tree copy.
 		--exclude='*.o'
 		--exclude='*.ko'
 		--exclude='*.mod'
@@ -659,8 +705,22 @@ copy_sources() {
 		--exclude='.cursor/'
 		--exclude='AGENTS.md'
 	)
-	if [ "$(pwd -P)" != "$PIBRICK_LIB" ]; then
-		rsync "${rsync_opts[@]}" . "$PIBRICK_LIB/"
+	# Determine the source tree. Prefer the dir where install.sh itself
+	# lives (PIBRICK_SRC, captured at startup). Fall back to the user's
+	# clone (PIBRICK_USER_HOME at startup, before it gets overwritten
+	# with the tools dir). Fall back to the original SCRIPT_REAL. This
+	# is critical when install.sh is run as `sudo /usr/lib/pibrick/install.sh`
+	# because the user's cwd may not be the source tree.
+	local src_dir="${PIBRICK_SRC:-}"
+	if [ ! -d "$src_dir/battery" ] && [ -d "${PIBRICK_USER_HOME_AT_STARTUP:-}/battery" ]; then
+		src_dir="${PIBRICK_USER_HOME_AT_STARTUP:-}"
+	fi
+	if [ ! -d "$src_dir/battery" ]; then
+		warn "Source tree not found at $src_dir/battery; skipping source sync"
+		return 0
+	fi
+	if [ "$(cd "$src_dir" && pwd -P)" != "$PIBRICK_LIB" ]; then
+		(cd "$src_dir" && rsync "${rsync_opts[@]}" . "$PIBRICK_LIB/")
 	fi
 	# rsync preserves the source file's mode; ensure install.sh and
 	# build.sh are executable when copied to PIBRICK_LIB. Without this,

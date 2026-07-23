@@ -685,30 +685,38 @@ typedef struct {
  * Standard 1S LiPo rest OCV (4.20 V profile) scaled to 4.176 V full charge.
  * Matches typical fuel-gauge / ModelGauge baseline; centivolts (3.70 V -> 370).
  * Tune using tools/ocv-calibrate.py with idle (unplugged, rested) sysfs samples only.
+ *
+ * IMPORTANT: this table must be sorted ASCENDING by voltage. The driver
+ * walks it looking for `voltage >= v[i] && voltage < v[i+1]` and assumes
+ * `v[0]` is the lowest voltage (= 0%) and `v[size-1]` is the highest (= 100%).
+ * A descending table would make the first lookup `voltage <= v[0]` match
+ * for almost any voltage and force SOC=0% forever (this was the root
+ * cause of an earlier "always shows 0%" bug).
  */
 static VoltageMap voltage_to_percent_table[] = {
-	{ 394,  90 },
-	{ 391,  85 },
-	{ 386,  80 },
-	{ 383,  75 },
-	{ 379,  70 },
-	{ 375,  65 },
-	{ 373,  60 },
-	{ 369,  55 },
-	{ 364,  50 },
-	{ 358,  45 },
-	{ 350,  40 },
-	{ 348,  35 },
-	{ 343,  30 },
-	{ 340,  25 },
-	{ 340,  20 },
-	{ 333,  15 },
-	{ 332,  10 },
-	{ 332,   5 },
 	{ 330,   0 },
+	{ 332,   5 },
+	{ 332,  10 },
+	{ 333,  15 },
+	{ 338,  20 },
+	{ 341,  25 },
+	{ 343,  30 },
+	{ 348,  35 },
+	{ 350,  40 },
+	{ 358,  45 },
+	{ 364,  50 },
+	{ 369,  55 },
+	{ 373,  60 },
+	{ 375,  65 },
+	{ 379,  70 },
+	{ 383,  75 },
+	{ 386,  80 },
+	{ 390,  85 },
+	{ 394,  90 },
+	{ 397,  95 },
+	{ 410, 100 },
 };
 const int table_size = ARRAY_SIZE(voltage_to_percent_table);
-
 static int bq25890_calc_lipo_percentage(int voltage_uv)
 {
 	int voltage = voltage_uv / 10000;
