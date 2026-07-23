@@ -75,19 +75,69 @@ The default refresh rate is **90 Hz** for the 9203 panel (saved to `/etc/pibrick
 
 ### Calibration Service Management
 
-```bash
-# Check calibration status (97% confidence with 1000+ samples)
-sudo /usr/lib/pibrick/install.sh --status-calibration
+The calibration system has **two separate functions**:
 
-# Enable calibration logging service (collects voltage-SOC data)
+1. **Logging Service** - Collects battery data (voltage, SOC, current) for analysis
+2. **Apply OCV Table** - Actually installs the calibrated table to the driver
+
+#### Calibration Workflow
+
+```bash
+# Step 1: Enable logging (collects data continuously in background)
 sudo /usr/lib/pibrick/install.sh --enable-calibration
 
-# Disable calibration logging service
-sudo /usr/lib/pibrick/install.sh --disable-calibration
+# Step 2: Let it collect data (use your device normally for 1-2 days)
+# - Resting measurements are automatically selected
+# - At least 1000 samples recommended for accurate calibration
 
-# Apply calibrated OCV table to driver
+# Step 3: Check status and confidence level
+sudo /usr/lib/pibrick/install.sh --status-calibration
+# Look for "Confidence: 0.97 (97%)" - higher is better
+# Need at least 85% confidence to apply
+
+# Step 4: Apply the calibrated OCV table to driver (only when ready)
 sudo /usr/lib/pibrick/install.sh --apply-calibration
+
+# Step 5: Driver will be rebuilt and reloaded automatically
 ```
+
+#### Command Reference
+
+| Command | What it does |
+|---------|--------------|
+| `--enable-calibration` | **Starts logging service** - only collects data, does NOT modify driver |
+| `--disable-calibration` | **Stops logging service** - data is preserved |
+| `--status-calibration` | Shows data stats, confidence level, sample count |
+| `--apply-calibration` | **Applies calibrated OCV table** - rebuilds driver |
+
+**Important**: `--enable-calibration` only starts the data collection service. It does NOT automatically apply anything to the driver. You must manually run `--apply-calibration` when you have enough data.
+
+#### Manual Calibration Tools
+
+You can also use the Python tools directly:
+
+```bash
+# Check calibration status and confidence
+sudo python3 /home/congn/battery-tools/battery-auto-calibrator.py --status
+
+# Generate OCV table from existing data (dry run - shows what would be applied)
+sudo python3 /home/congn/battery-tools/battery-auto-calibrator.py --generate
+
+# Apply the OCV table to the driver
+sudo python3 /home/congn/battery-tools/battery-auto-calibrator.py --apply
+
+# Force rebuild and reload driver with current OCV table
+sudo python3 /home/congn/battery-tools/battery-auto-calibrator.py --build-driver
+```
+
+#### Calibration Log Files
+
+| File | Purpose |
+|------|---------|
+| `/var/log/bq25890_battery/calibration_data.csv` | Raw calibration measurements |
+| `/var/log/bq25890_battery/calibration.log` | Human-readable log |
+| `/var/log/bq25890_battery/calibration_status.json` | Analysis results |
+| `/var/log/bq25890_battery/suggested_ocv_table.h` | Generated C header for driver |
 
 ---
 
