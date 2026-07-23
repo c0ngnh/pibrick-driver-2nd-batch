@@ -184,10 +184,13 @@ def analyze_data(csv_file=None):
     print(f"Total records: {len(data)}")
     print()
     
-    # Collect resting measurements (most reliable for OCV calibration)
+    # Collect resting measurements (most reliable for OCV calibration).
+    # We exclude rows whose status string contains "Charging" to be tolerant
+    # of kernel-side variants like "Charging (maintenance)".
     resting_data = []
     for row in data:
-        if row.get("fg_mode") == "resting" and row.get("status") != "Charging":
+        status = row.get("status", "")
+        if row.get("fg_mode") == "resting" and "Charging" not in status:
             try:
                 resting_data.append({
                     "timestamp": row["timestamp"],
@@ -290,6 +293,13 @@ def generate_ocv_table(csv_file=None, output_file=None):
         avg_v = sum(soc_data[soc]) / len(soc_data[soc])
         voltage_cv = int(round(avg_v / 1e4))  # Convert to centivolts
         table_points.append({"soc": soc, "voltage_cv": voltage_cv, "samples": len(soc_data[soc])})
+
+    # IMPORTANT: sort the output table by voltage DESCENDING.
+    # The driver's bq25890_calc_lipo_percentage() walks voltage_to_percent_table
+    # and finds the largest voltage <= measured voltage, so the table must be
+    # sorted with the highest voltage first (e.g. 100% / 4.18V at index 0, 0%
+    # / 2.98V at the last index).
+    table_points.sort(key=lambda x: x["voltage_cv"], reverse=True)
     
     # Generate C code for the driver
     output = []

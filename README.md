@@ -192,6 +192,75 @@ sudo /usr/lib/pibrick/install.sh --apply-calibration
 
 **Important**: `--enable-calibration` only starts the data collection service. It does NOT automatically apply anything to the driver. You must manually run `--apply-calibration` when you have enough data.
 
+#### Calibrating Without INA228 Hardware
+
+If your PocketCM5 board does **not** have the TI INA228 high-precision current
+sensor installed, the driver falls back to a load-aware proxy integrator. The
+proxy reads the BQ25895's internal current sense, which is noisier than INA228.
+This affects calibration as follows:
+
+- The driver auto-detects the missing INA228 at probe time and **doubles the
+  OCV tracker time constant** from 60 s to 120 s (`fg_v_ocv_tau_sec`). A
+  slower tracker gives smoother `v_ocv_uv` readings, which the auto-calibrator
+  relies on for bucketing samples by SOC. You will see this in `dmesg`:
+  `No INA228 detected: OCV tracker tau bumped to 120 s`.
+- The auto-calibrator accepts a `--no-ina228` flag that lowers its internal
+  thresholds and applies stricter sample filtering (see below).
+- Because each resting-state sample is noisier, you typically need **2-3 full
+  charge cycles** to accumulate enough clean samples, versus **1 cycle** when
+  INA228 is present.
+
+```bash
+# 1. Enable logging as usual
+sudo /usr/lib/pibrick/install.sh --enable-calibration
+
+# 2. Use the device normally through 2-3 full charge cycles
+#    (one charge cycle = drain to ~10 % then full charge to 100 %).
+#    Each cycle adds a few hundred clean resting samples.
+
+# 3. Check status. With --no-ina228 the threshold drops to 70 % and
+#    min samples per bucket drops to 2.
+sudo /usr/lib/pibrick/install.sh --status-calibration
+#    Or directly:
+sudo python3 /usr/lib/pibrick/battery-tools/battery-auto-calibrator.py \
+     --status --no-ina228
+
+# 4. Apply the calibrated OCV table
+sudo python3 /usr/lib/pibrick/battery-tools/battery-auto-calibrator.py \
+     --apply --no-ina228 --yes
+```
+
+What `--no-ina228` changes internally:
+
+| Setting | With INA228 | Without INA228 (`--no-ina228`) |
+|---------|-------------|--------------------------------|
+| `MIN_SAMPLES_PER_BUCKET` | 3 | **2** |
+| `MIN_TOTAL_SAMPLES` | 15 | **30** |
+| `CONFIDENCE_THRESHOLD` | 0.85 | **0.70** |
+| Sample filter | `fg_mode == "resting"` and not charging | `fg_mode == "resting"` only (stricter) |
+| Current filter | none | **\|current_now\| ≤ 10 mA** |
+| Bucket std-dev filter | none (any spread) | **std-dev ≤ 30 mV** |
+| OCV tracker tau (`fg_v_ocv_tau_sec`) | 60 s (compile-time) | **120 s** (auto-detected at probe) |
+| Charge cycles needed | 1 | **2-3** |
+
+The current filter (`|current_now| ≤ 10 mA`) only matters at boot for
+admission, not for the final OCV value. A truly idle PocketCM5 with the
+screen off draws < 5 mA from the BQ25895, so the filter rejects samples
+captured during user activity (which are noisy and would skew the bucket).
+The std-dev filter on each bucket rejects samples where the OCV tracker
+was still settling after a load spike.
+
+If you want a different OCV tracker time constant than the auto-detected
+value (e.g. you have INA228 but want slower convergence), you can force it
+in `/etc/modprobe.d/pibrick-battery.conf`:
+
+```
+options bq25890_battery fg_v_ocv_tau_sec_override=90
+```
+
+The auto-detect only applies when `fg_v_ocv_tau_sec_override` is left at -1
+(the default).
+
 #### Manual Calibration Tools
 
 You can also use the Python tools directly. The install path depends on whether
@@ -280,6 +349,7 @@ sudo /usr/lib/pibrick/install.sh --battery-config --list
 | `charge_full_uah` | mAh | 5000 | Battery design capacity (e.g. 3800 for 3800 mAh pack) |
 | `ina228_shunt_uohm` | mΩ | 15 | INA228 shunt resistor value (must match hardware) |
 | `ina228_max_current_ua` | mA | 6400 | INA228 max current range |
+| `ina228_enabled` | bool | 1 | Use INA228 when present; set 0 to force proxy |
 | `discharge_current_ua` | mA | 900 | Assumed avg discharge (for time-to-empty) |
 | `batt_ir_mohm` | mΩ | 180 | Battery internal resistance (charge-time OCV estimate) |
 | `discharge_avg_ua` | mA | 700 | Nominal idle discharge (set 0 to disable) |
@@ -287,6 +357,7 @@ sudo /usr/lib/pibrick/install.sh --battery-config --list
 | `discharge_max_ua` | mA | 1500 | Hard ceiling for SOC integrator proxy current |
 | `rest_min_sec` | s | 300 | Seconds of quiet required for DISCHARGING_RESTING |
 | `low_v_persistent_count` | samples | 5 | Consecutive low-V samples before SOC→critical |
+| `fg_v_ocv_tau_sec_override` | s | -1 | OCV tracker time constant. -1 = auto (60 with INA228, 120 without). Use 60-180. |
 | `coulomb_uah` | mAh | — | **LIVE** — remaining capacity; fuel gauge overwrites |
 
 #### Persistence Behavior

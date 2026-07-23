@@ -184,6 +184,16 @@ struct bq25890_device {
 	/* --- INA228 high-side current monitor (optional) --- */
 	struct bq25890_ina228_data *ina228;
 	int ina228_current_ua;		/* last sampled, for property readers */
+
+	/*
+	 * Runtime override for BQ25890_FG_V_OCV_TAU_SEC. The constant
+	 * default (60 s) is tuned for INA228 hardware (clean live voltage).
+	 * When no INA228 is detected at probe time we bump this to 120 s
+	 * so the proxy-estimator OCV tracker is smoother and the
+	 * auto-calibrator's std-dev filter doesn't reject valid buckets.
+	 * A module parameter is also exposed so the user can tune it.
+	 */
+	int fg_v_ocv_tau_sec;
 };
 
 #define BQ25890_CHARGE_CURRENT_MIN_UA	100000
@@ -221,12 +231,18 @@ struct bq25890_device {
 #define BQ25890_BATV_ADC_FLOOR_MAX_UV		2344000
 #define BQ25890_BATV_REST_MIN_UV		3150000
 
+/*
+ * PocketCM5 tuned defaults (calibrated against the 3.8 Ah pack shipped with
+ * the device). Override per-device via /etc/modprobe.d/pibrick-battery.conf
+ * or `battery_set.py --persist`. See README.md § "Battery driver
+ * customization".
+ */
 static int discharge_current_ua = 900000;
 module_param(discharge_current_ua, int, 0644);
 MODULE_PARM_DESC(discharge_current_ua,
 		 "Assumed average discharge (uA) for time-to-empty only");
 
-static int charge_full_uah = 5000000;
+static int charge_full_uah = 3800000;
 module_param(charge_full_uah, int, 0644);
 MODULE_PARM_DESC(charge_full_uah, "Battery capacity (uAh)");
 
@@ -246,7 +262,7 @@ module_param(discharge_load_factor_pct, int, 0644);
 MODULE_PARM_DESC(discharge_load_factor_pct,
 		 "Extra %% added to discharge proxy while under sustained load");
 
-static int discharge_max_ua = 1500000;
+static int discharge_max_ua = 2200000;
 module_param(discharge_max_ua, int, 0644);
 MODULE_PARM_DESC(discharge_max_ua,
 		 "Hard ceiling (uA) for the SOC integrator proxy current");
@@ -337,6 +353,21 @@ static int ina228_enabled = 1;
 module_param(ina228_enabled, int, 0644);
 MODULE_PARM_DESC(ina228_enabled,
 		 "Set to 0 to fall back to the proxy integrator even when INA228 is present");
+
+/*
+ * Runtime OCV-tracker time constant in seconds. The compile-time default
+ * (BQ25890_FG_V_OCV_TAU_SEC, 60 s) is tuned for INA228 hardware. When
+ * no INA228 is detected at probe time the driver overrides this to
+ * 120 s automatically; this parameter lets the user fine-tune from
+ * /etc/modprobe.d/pibrick-battery.conf. Use 60 with INA228, 120-180
+ * without. Going too high makes the OCV tracker sluggish to react to
+ * a fresh plug event.
+ */
+static int fg_v_ocv_tau_sec_override = -1;
+module_param(fg_v_ocv_tau_sec_override, int, 0644);
+MODULE_PARM_DESC(fg_v_ocv_tau_sec_override,
+		 "OCV tracker time constant in seconds. -1 = use probe-time "
+		 "default (60 with INA228, 120 without).");
 
 /* --- end INA228 --- */
 
@@ -656,20 +687,25 @@ typedef struct {
  * Tune using tools/ocv-calibrate.py with idle (unplugged, rested) sysfs samples only.
  */
 static VoltageMap voltage_to_percent_table[] = {
-	{ 298, 0 },
-	{ 328, 5 },
-	{ 348, 10 },
-	{ 358, 20 },
-	{ 363, 30 },
-	{ 366, 40 },
-	{ 369, 50 },
-	{ 371, 55 },
-	{ 374, 60 },
-	{ 377, 70 },
-	{ 380, 80 },
-	{ 385, 90 },
-	{ 393, 95 },
-	{ 418, 100 },
+	{ 394,  90 },
+	{ 391,  85 },
+	{ 386,  80 },
+	{ 383,  75 },
+	{ 379,  70 },
+	{ 375,  65 },
+	{ 373,  60 },
+	{ 369,  55 },
+	{ 364,  50 },
+	{ 358,  45 },
+	{ 350,  40 },
+	{ 348,  35 },
+	{ 343,  30 },
+	{ 340,  25 },
+	{ 340,  20 },
+	{ 333,  15 },
+	{ 332,  10 },
+	{ 332,   5 },
+	{ 330,   0 },
 };
 const int table_size = ARRAY_SIZE(voltage_to_percent_table);
 
@@ -950,11 +986,11 @@ static void bq25890_update_v_ocv_locked(struct bq25890_device *bq, int v_term_uv
 	}
 
 	dt_sec = (long)(dt_jiffies / HZ);
-	if (dt_sec > BQ25890_FG_V_OCV_TAU_SEC)
-		dt_sec = BQ25890_FG_V_OCV_TAU_SEC;
+	if (dt_sec > bq->fg_v_ocv_tau_sec)
+		dt_sec = bq->fg_v_ocv_tau_sec;
 
 	bq->fg_v_ocv_uv += (v_term_uv - bq->fg_v_ocv_uv) * dt_sec /
-			   (BQ25890_FG_V_OCV_TAU_SEC + dt_sec);
+			   (bq->fg_v_ocv_tau_sec + dt_sec);
 }
 
 /*
@@ -3132,6 +3168,12 @@ static int bq25890_power_supply_init(struct bq25890_device *bq)
 	bq->fg_rest_jiffies = 0;
 	bq->fg_low_v_count = 0;
 	bq->fg_glitch_count = 0;
+	/*
+	 * Default OCV tracker time constant. The INA228-aware bump (see
+	 * probe) happens AFTER bq25890_ina228_probe() runs, so we start
+	 * with the conservative compile-time default here.
+	 */
+	bq->fg_v_ocv_tau_sec = BQ25890_FG_V_OCV_TAU_SEC;
 
 	/* Get ID for the device */
 	mutex_lock(&bq25890_id_mutex);
@@ -3677,6 +3719,30 @@ static int bq25890_probe(struct i2c_client *client)
 	ret = bq25890_ina228_probe(bq);
 	if (ret && ret != -ENODEV)
 		dev_warn(dev, "INA228 probe failed: %d\n", ret);
+
+	/*
+	 * Bump the OCV tracker time constant when no INA228 is present.
+	 * With the proxy estimator the per-sample voltage has more noise
+	 * (load transients get integrated into fg_v_ocv_uv), so a longer
+	 * time constant gives a smoother signal for the auto-calibrator's
+	 * std-dev filter and breaks the noisy-bucket rejection path. The
+	 * user can also set this via the fg_v_ocv_tau_sec_override module
+	 * parameter (e.g. in /etc/modprobe.d/pibrick-battery.conf) which
+	 * takes precedence over the auto-detected value.
+	 */
+	if (fg_v_ocv_tau_sec_override > 0) {
+		bq->fg_v_ocv_tau_sec = fg_v_ocv_tau_sec_override;
+		dev_info(dev, "OCV tracker tau: %d s (from module parameter)\n",
+			 bq->fg_v_ocv_tau_sec);
+	} else if (!bq->ina228 || !bq->ina228->present) {
+		bq->fg_v_ocv_tau_sec = 120;
+		dev_info(dev, "No INA228 detected: OCV tracker tau bumped to %d s "
+			 "(was %d s) for smoother proxy-estimator readings\n",
+			 bq->fg_v_ocv_tau_sec, BQ25890_FG_V_OCV_TAU_SEC);
+	} else {
+		dev_info(dev, "INA228 detected: OCV tracker tau = %d s\n",
+			 bq->fg_v_ocv_tau_sec);
+	}
 
 	schedule_delayed_work(&bq->capacity_calibrate_work,
 			      BQ25890_CAPACITY_BOOT_CALIB_DELAY);
