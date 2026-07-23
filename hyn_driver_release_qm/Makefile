@@ -8,7 +8,7 @@ MODEL_EXISTS := $(wildcard $(MODEL_FILE))
 MODULE_NAME := hyn_ts.ko
 MODULE_INSTALL_DIR := /lib/modules/$(shell uname -r)/kernel/drivers/input/touchscreen
 
-hyn_ts-objs += hyn_core.o hyn_lib/hyn_i2c.o hyn_lib/hyn_spi.o hyn_lib/hyn_ts_ext.o hyn_lib/hyn_fs_node.o
+hyn_ts-objs += hyn_core.o hyn_lib/hyn_i2c.o hyn_lib/hyn_ts_ext.o hyn_lib/hyn_fs_node.o
 hyn_ts-objs += hyn_lib/hyn_tool.o
 hyn_ts-objs += hyn_lib/hyn_gesture.o
 hyn_ts-objs += hyn_lib/hyn_prox.o

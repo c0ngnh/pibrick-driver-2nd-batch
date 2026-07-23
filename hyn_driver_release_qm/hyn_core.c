@@ -60,19 +60,12 @@ static int hyn_parse_dt(struct hyn_ts_data *ts_data)
             HYN_INFO("vdd_i2c not config");
         }
 
-//gpio info
-        // dt->reset_gpio = of_get_named_gpio_flags(np, "reset-gpio", 0, &dt->reset_gpio_flags);
-        // dt->irq_gpio = of_get_named_gpio_flags(np, "irq-gpio", 0, &dt->irq_gpio_flags);
-
-        dt->reset_gpio = of_get_named_gpio(np, "reset-gpio", 0);
-        dt->irq_gpio = of_get_named_gpio(np, "irq-gpio", 0);
-        
-        if(dt->reset_gpio < 0 || dt->irq_gpio < 0){
-            HYN_ERROR("dts get gpio failed");
-            return -ENODEV;
-        }
-        else{
-            HYN_INFO("reset_gpio:%d irq_gpio:%d",dt->reset_gpio,dt->irq_gpio);
+//gpio info (descriptor API; IRQ is consumed via `client->irq` set up by I2C core
+//from the DT `interrupts` property)
+        dt->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_LOW);
+        if(IS_ERR(dt->reset_gpio)){
+            HYN_ERROR("get reset-gpios failed");
+            return PTR_ERR(dt->reset_gpio);
         }
 
 //pin_ctl
@@ -107,22 +100,7 @@ static int hyn_parse_dt(struct hyn_ts_data *ts_data)
             return -EINVAL;
         }
 
-// key info
-        ret = of_property_read_u32(np, "key-number", &dt->key_num);
-        if(ret>=0 && dt->key_num && dt->key_num<=8){
-            ret |= of_property_read_u32(np, "key-y-coord", &dt->key_y_coords);
-            ret |= of_property_read_u32_array(np, "key-x-coords", dt->key_x_coords, dt->key_num);
-            ret |= of_property_read_u32_array(np, "keys", dt->key_code, dt->key_num);
-            if(ret < 0){
-                HYN_ERROR("dts get screen failed");
-                return -EINVAL;
-            }
-        }
-        else{
-            HYN_INFO("key not config");
-            dt->key_num = 0;
-        }
-        return 0;
+return 0;
     }
     else{
         HYN_ERROR("dts match failed");
@@ -132,26 +110,11 @@ static int hyn_parse_dt(struct hyn_ts_data *ts_data)
 
 static int hyn_poweron(struct hyn_ts_data *ts_data)
 {
-    int ret = 0;
     struct hyn_plat_data* dt = &ts_data->plat_data;
     if(!IS_ERR_OR_NULL(hyn_data->plat_data.pinctl)){
         if(pinctrl_select_state(dt->pinctl, dt->pin_active)){
             HYN_ERROR("pin active set failed");
         }
-    }
-
-    ret = gpio_request(dt->irq_gpio, "hyn_irq_gpio");
-    ret |= gpio_request(dt->reset_gpio, "hyn_reset_gpio");
-    if(ret < 0){
-        HYN_ERROR("gpio_request failed");
-        goto GPIO_SET_FAILE;
-    }
-    
-    ret = gpio_direction_input(dt->irq_gpio);
-    ret |= gpio_direction_output(dt->reset_gpio, 0);
-    if(ret < 0){
-        HYN_ERROR("set gpio_direction failed");
-        goto GPIO_SET_FAILE;
     }
 
     if(!IS_ERR_OR_NULL(dt->vdd_ana)){
@@ -173,19 +136,15 @@ static int hyn_poweron(struct hyn_ts_data *ts_data)
         HYN_ERROR("enable power failed");
     }
     mdelay(5);
-    gpio_set_value(dt->reset_gpio, 1);
+    gpiod_set_value_cansleep(dt->reset_gpio, 1);
     return 0;
-GPIO_SET_FAILE:
-    return ret;
 }
 
 static int hyn_input_dev_init(struct hyn_ts_data *ts_data)
 {
-    int key_num = 0;//,ret =0;
     struct hyn_plat_data *dt = &ts_data->plat_data;
     struct input_dev *input_dev;
 
-    HYN_ENTER(); 
     input_dev = input_allocate_device();
     if (!input_dev) {
         HYN_ERROR("Failed to allocate memory for input device");
@@ -198,24 +157,13 @@ static int hyn_input_dev_init(struct hyn_ts_data *ts_data)
 
     __set_bit(EV_SYN, input_dev->evbit);
     __set_bit(EV_ABS, input_dev->evbit);
-    __set_bit(EV_KEY, input_dev->evbit);
     __set_bit(BTN_TOUCH, input_dev->keybit);
     __set_bit(INPUT_PROP_DIRECT, input_dev->propbit);
 
-    // INPUT_PROP_POINTER
-    // __set_bit(INPUT_PROP_POINTER, input_dev->propbit);
-
-    for (key_num = 0; key_num < dt->key_num; key_num++)
-			input_set_capability(input_dev, EV_KEY, dt->key_code[key_num]);
-#if HYN_MT_PROTOCOL_B_EN
     set_bit(BTN_TOOL_FINGER,input_dev->keybit);
-    //input_mt_init_slots(input_dev, dt->max_touch_num+1);
     input_mt_init_slots(input_dev, dt->max_touch_num+1, INPUT_MT_DIRECT);
-#else
-    input_dev->keybit[BIT_WORD(BTN_TOUCH)] = BIT_MASK(BTN_TOUCH);
-#endif
 
-	input_set_abs_params(input_dev, ABS_MT_TRACKING_ID, 0,  dt->max_touch_num, 0, 0); 
+	input_set_abs_params(input_dev, ABS_MT_TRACKING_ID, 0,  dt->max_touch_num, 0, 0);
 	input_set_abs_params(input_dev, ABS_MT_POSITION_X, 0, dt->x_resolution,0, 0);
 	input_set_abs_params(input_dev, ABS_MT_POSITION_Y, 0, dt->y_resolution,0, 0);
 	input_set_abs_params(input_dev, ABS_MT_TOUCH_MAJOR, 0, 255, 0, 0);
@@ -229,23 +177,16 @@ static int hyn_input_dev_init(struct hyn_ts_data *ts_data)
 
 static void release_all_finger(struct hyn_ts_data *ts_data)
 {
-    HYN_ENTER();
     if(ts_data->report_id_flg){
-#if HYN_MT_PROTOCOL_B_EN
         u8 i;
         for(i=0; i< ts_data->plat_data.max_touch_num; i++) {
             if(ts_data->report_id_flg & (1UL<<i)){
-                // HYN_INFO("release %d",i);
                 input_mt_slot(ts_data->input_dev, i);
                 input_report_abs(ts_data->input_dev, ABS_MT_TRACKING_ID, -1);
                 input_mt_report_slot_state(ts_data->input_dev, MT_TOOL_FINGER, false);
-            }	
+            }
         }
         input_report_key(ts_data->input_dev, BTN_TOUCH, 0);
-#else
-        input_report_key(ts_data->input_dev, BTN_TOUCH, 0);
-        input_mt_sync(ts_data->input_dev);
-#endif
     }
     ts_data->report_id_flg = 0;
 }
@@ -265,7 +206,6 @@ static void touch_updata(u8 idx,u8 event)
     else{
         hyn_data->report_id_flg &= ~(1UL<< rep_frame->pos_info[idx].pos_id);
     }
-#if HYN_MT_PROTOCOL_B_EN
     if(event){
         input_report_key(dev, BTN_TOUCH, 1);
         input_mt_slot(dev, rep_frame->pos_info[idx].pos_id);
@@ -282,18 +222,6 @@ static void touch_updata(u8 idx,u8 event)
         input_report_abs(dev, ABS_MT_TRACKING_ID, -1);
         input_mt_report_slot_state(dev, MT_TOOL_FINGER, 0);
     }
-#else
-    if(event){
-        input_report_key(dev, BTN_TOUCH, 1);
-        input_report_abs(dev, ABS_MT_PRESSURE, zpress);
-        input_report_abs(dev, ABS_MT_TRACKING_ID, rep_frame->pos_info[idx].pos_id);
-        input_report_abs(dev, ABS_MT_TOUCH_MAJOR, zpress>>3);
-        // input_report_abs(dev, ABS_MT_WIDTH_MAJOR, zpress>>3);
-        input_report_abs(dev, ABS_MT_POSITION_X, rep_frame->pos_info[idx].pos_x);
-        input_report_abs(dev, ABS_MT_POSITION_Y, rep_frame->pos_info[idx].pos_y);
-        input_mt_sync(dev);
-    }
-#endif
 }
 
 static void hyn_irq_report_work(struct work_struct *work)
@@ -307,25 +235,10 @@ static void hyn_irq_report_work(struct work_struct *work)
     if(hyn_fun->tp_report()){
         HYN_INFO("Ignore illegal data");
         return;
-    } 
-    mutex_lock(&ts_data->mutex_report);
-    if(rep_frame->report_need & REPORT_KEY){ //key
-#if KEY_USED_POS_REPORT
-        rep_frame->pos_info[0].pos_id = 0;
-        rep_frame->pos_info[0].pos_x = dt->key_x_coords[rep_frame->key_id];
-        rep_frame->pos_info[0].pos_y = dt->key_y_coords;
-        rep_frame->pos_info[0].pres_z = 100;
-        touch_updata(0,rep_frame->key_state ? 1:0);
-#else
-        input_report_key(dev,dt->key_code[rep_frame->key_id],rep_frame->key_state ? 1:0); 
-#endif
-        if(rep_frame->key_state==0){
-            reprot_state_clr = 1;
-        } 
-        input_sync(dev);
-        HYN_INFO2("report keyid:%d keycode:%d",rep_frame->key_id,dt->key_code[rep_frame->key_id]);
     }
-
+    mutex_lock(&ts_data->mutex_report);
+    /* REPORT_KEY branch removed: 9203 panel has no virtual keys, and the
+     * key_code[] / key_num DT bindings are gone. */
     if(rep_frame->report_need & REPORT_POS){ //pos
         u8 i;
         if(rep_frame->rep_num == 0){
@@ -335,7 +248,6 @@ static void hyn_irq_report_work(struct work_struct *work)
         else{
             u8 touch_down = 0;
             for(i = 0; i < rep_frame->rep_num; i++){
-                HYN_INFO2("id,%d,xy,%d,%d",rep_frame->pos_info[i].pos_id,rep_frame->pos_info[i].pos_x,rep_frame->pos_info[i].pos_y);
                 if(dt->swap_xy){
                     xpos = rep_frame->pos_info[i].pos_y;
                     ypos = rep_frame->pos_info[i].pos_x;
@@ -364,9 +276,6 @@ static void hyn_irq_report_work(struct work_struct *work)
             if(touch_down==0){
                 reprot_state_clr = 1;
                 input_report_key(dev, BTN_TOUCH, 0);
-#if HYN_MT_PROTOCOL_B_EN==0
-                input_mt_sync(dev);
-#endif
             }
         }
         input_sync(dev);
@@ -375,103 +284,28 @@ static void hyn_irq_report_work(struct work_struct *work)
         hyn_proximity_report(ts_data->prox_state);
         reprot_state_clr = 1;
     }
-#if (HYN_GESTURE_EN)
-    if(rep_frame->report_need & REPORT_GES){
-        hyn_gesture_report(ts_data);
-        reprot_state_clr = 1;
-    }
-#endif 
     if(reprot_state_clr){
         rep_frame->report_need = REPORT_NONE;
     }
     mutex_unlock(&ts_data->mutex_report);
 }
 
-static int hyn_restore_scene(void)
-{
-    int ret = 0;
-    HYN_ENTER();
-    if(hyn_data->prox_is_enable){
-        ret |= hyn_fun->tp_prox_handle(1);
-    }
-    else if(hyn_data->gesture_is_enable && hyn_data->state_is_sunpend){
-        ret |= hyn_fun->tp_set_workmode(GESTURE_MODE,1);
-    }
-    if(hyn_data->charge_is_enable){
-        ret |= hyn_fun->tp_set_workmode(CHARGE_ENTER,1);
-    }
-    if(hyn_data->glove_is_enable){
-        ret |= hyn_fun->tp_set_workmode(GLOVE_ENTER,1);
-    }
-    return ret;
-}
-
-static void hyn_esdcheck_work(struct work_struct *work)
-{
-#if ESD_CHECK_EN
-    int ret;
-    HYN_ENTER(); 
-    if(hyn_data->esd_block_cnt==0){
-        ret = hyn_fun->tp_check_esd();
-        HYN_INFO("esd:%04x",ret);
-        if(hyn_data->esd_last_value != ret){
-            hyn_data->esd_fail_cnt = 0;
-            hyn_data->esd_last_value = ret;
-        }
-        else{
-            hyn_data->esd_fail_cnt++;
-            if(hyn_data->esd_fail_cnt > 2){
-                hyn_data->esd_fail_cnt = 0;
-                hyn_power_source_ctrl(hyn_data,0);
-                mdelay(1);
-                hyn_power_source_ctrl(hyn_data,1);
-                hyn_fun->tp_rest();
-                hyn_restore_scene();
-            }
-        }
-    }
-    else{
-        hyn_data->esd_block_cnt--;
-    }
-    queue_delayed_work(hyn_data->hyn_workqueue, &hyn_data->esdcheck_work,
-                           msecs_to_jiffies(1000));
-#endif
-}
-
 static void hyn_resum(struct device *dev)
 {
-    int ret = 0;
     struct ts_frame *rep_frame;
     struct hyn_plat_data *dt;
-    HYN_ENTER();
     if(IS_ERR_OR_NULL(hyn_data)){
         return;
     }
     hyn_data->state_is_sunpend = 0;
     rep_frame = &hyn_data->rp_buf;
     dt = &hyn_data->plat_data;
-#if (HYN_WAKE_LOCK_EN==1)
-    wake_unlock(&hyn_data->tp_wakelock);
-#endif
     if(!IS_ERR_OR_NULL(dt->pinctl)){
-      pinctrl_select_state(dt->pinctl, dt->pin_active);  
+        pinctrl_select_state(dt->pinctl, dt->pin_active);
     }
     hyn_power_source_ctrl(hyn_data, 1);
     hyn_fun->tp_resum();
-    //restore_scene
-    hyn_restore_scene();
-    if(hyn_data->gesture_is_enable && hyn_data->prox_is_enable==0){
-        hyn_irq_set(hyn_data,DISABLE);
-        ret = disable_irq_wake(hyn_data->client->irq);
-        ret |= irq_set_irq_type(hyn_data->client->irq,dt->irq_gpio_flags); 
-        if(ret < 0){
-            HYN_ERROR("gesture irq_set_irq failed");
-        }  
-    }
-    //compensate for lifting
-    if(rep_frame->report_need & REPORT_KEY){
-        input_report_key(hyn_data->input_dev,dt->key_code[rep_frame->key_id],0); 
-    }
+    //compensate for lifting (REPORT_KEY branch removed: panel has no virtual keys)
     if(rep_frame->report_need & REPORT_POS){
         release_all_finger(hyn_data);
         input_sync(hyn_data->input_dev);
@@ -482,36 +316,16 @@ static void hyn_resum(struct device *dev)
 
 static void hyn_suspend(struct device *dev)
 {
-    int ret = 0;
-    HYN_ENTER();
     if(IS_ERR_OR_NULL(hyn_data)){
         return;
     }
     hyn_data->state_is_sunpend = 1;
-#if (HYN_WAKE_LOCK_EN==1)
-    wake_lock(&hyn_data->tp_wakelock);
-#endif
-    if(hyn_data->prox_is_enable ==1){
+    hyn_irq_set(hyn_data,DISABLE);
+    hyn_fun->tp_supend();
+    if(!IS_ERR_OR_NULL(hyn_data->plat_data.pinctl)){
+        pinctrl_select_state(hyn_data->plat_data.pinctl, hyn_data->plat_data.pin_suspend);
     }
-    else if(hyn_data->gesture_is_enable){
-        hyn_irq_set(hyn_data,DISABLE);
-        ret = enable_irq_wake(hyn_data->client->irq);
-        ret |= irq_set_irq_type(hyn_data->client->irq,IRQF_TRIGGER_FALLING|IRQF_NO_SUSPEND|IRQF_ONESHOT); 
-        if(ret < 0){
-            HYN_ERROR("gesture irq_set_irq failed");
-        }  
-        hyn_fun->tp_set_workmode(GESTURE_MODE,1);
-        hyn_irq_set(hyn_data,ENABLE);
-        hyn_power_source_ctrl(hyn_data, 1);
-    }
-    else{
-        hyn_irq_set(hyn_data,DISABLE);
-        hyn_fun->tp_supend();
-        if(!IS_ERR_OR_NULL(hyn_data->plat_data.pinctl)){
-            pinctrl_select_state(hyn_data->plat_data.pinctl, hyn_data->plat_data.pin_suspend);
-        }
-        hyn_power_source_ctrl(hyn_data, 0);
-    }
+    hyn_power_source_ctrl(hyn_data, 0);
 }
 
 static void hyn_updata_fw_work(struct work_struct *work)
@@ -769,7 +583,6 @@ static int hyn_ts_probe(struct spi_device *client)
     INIT_WORK(&ts_data->work_report,hyn_irq_report_work);
     INIT_WORK(&ts_data->work_updata_fw,hyn_updata_fw_work);
     INIT_WORK(&ts_data->work_resume,hyn_resum_work);
-    INIT_DELAYED_WORK(&ts_data->esdcheck_work,hyn_esdcheck_work);
 
     ts_data->hyn_workqueue = create_singlethread_workqueue("hyn_wq");
     if (IS_ERR_OR_NULL(ts_data->hyn_workqueue)){
@@ -805,9 +618,8 @@ static int hyn_ts_probe(struct spi_device *client)
     }
 #endif
 
-    ts_data->gpio_irq =  gpio_to_irq(ts_data->plat_data.irq_gpio);
     hyn_data->plat_data.irq_gpio_flags = (IRQF_TRIGGER_FALLING | IRQF_ONESHOT);
-    ret = request_threaded_irq(ts_data->gpio_irq, NULL, hyn_irq_handler,
+    ret = request_threaded_irq(ts_data->client->irq, NULL, hyn_irq_handler,
                                 hyn_data->plat_data.irq_gpio_flags, HYN_DRIVER_NAME, ts_data);
     if(ret){
         HYN_ERROR("request_threaded_irq failed");
@@ -881,8 +693,7 @@ static int hyn_ts_remove(struct spi_device *client)
 #endif
         hyn_release_sysfs(ts_data);
         HYN_INFO("ts_remove2");
-        if(ts_data->gpio_irq != 0)
-            free_irq(ts_data->gpio_irq, ts_data);
+        free_irq(ts_data->client->irq, ts_data);
         HYN_INFO("ts_remove3");
         if(!IS_ERR_OR_NULL(ts_data->input_dev)){
             input_unregister_device(ts_data->input_dev);
@@ -896,10 +707,6 @@ static int hyn_ts_remove(struct spi_device *client)
 #elif defined(CONFIG_HAS_EARLYSUSPEND)
         unregister_early_suspend(&ts_data->early_suspend);
 #endif
-        if(gpio_is_valid(ts_data->plat_data.irq_gpio))
-            gpio_free(ts_data->plat_data.irq_gpio);
-        if(gpio_is_valid(ts_data->plat_data.reset_gpio))
-            gpio_free(ts_data->plat_data.reset_gpio);
         HYN_INFO("ts_remove5"); 
         hyn_power_source_ctrl(hyn_data, 0);
         if(!IS_ERR_OR_NULL(ts_data->plat_data.vdd_ana)){

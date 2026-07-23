@@ -261,6 +261,38 @@ module_param(low_v_persistent_count, int, 0644);
 MODULE_PARM_DESC(low_v_persistent_count,
 		 "Consecutive samples below low-V threshold before SOC drops to critical");
 
+/*
+ * Persistent SOC storage: saves/restores SOC across reboots for consistency.
+ * File: /var/lib/bq25890_battery/soc_persist
+ * Format: "soc=<value>\n" (SOC 0-100)
+ * This prevents the SOC from jumping around after each reboot.
+ *
+ * Persistence is handled by userspace (battery_set.py script) which writes
+ * the persisted value to the module parameter persist_soc on driver load.
+ */
+#define BQ25890_SOC_PERSIST_FILE  "/var/lib/bq25890_battery/soc_persist"
+
+static int persist_soc = -1;  /* -1 = not yet loaded from file, let userspace set this */
+module_param(persist_soc, int, 0644);
+MODULE_PARM_DESC(persist_soc, "Last known SOC (0-100) for consistency across reboots (set by userspace)");
+
+/*
+ * These functions are stubs that return the module parameter value.
+ * Userspace (battery_set.py) handles actual file I/O and sets persist_soc
+ * via modprobe options.
+ */
+static int bq25890_load_persisted_soc(void)
+{
+	return persist_soc;  /* Userspace sets this via modprobe option */
+}
+
+static int bq25890_save_persisted_soc(int soc)
+{
+	/* Userspace handles persistence; driver just logs for debugging */
+	pr_debug("bq25890: SOC persist request (userspace should handle file I/O)\n");
+	return 0;
+}
+
 /* --- INA228 high-side current monitor (PocketCM5, I2C 0x40) --- */
 #define INA228_REG_CONFIG		0x00
 #define INA228_REG_ADCCFG		0x01
@@ -1278,20 +1310,20 @@ static int bq25890_ina228_configure(struct bq25890_ina228_data *ina)
 	ret = bq25890_ina228_write_reg16(ina->client, INA228_REG_SHUNTCAL, cal);
 	if (ret < 0)
 		return ret;
-	dev_info(&ina->client->dev, "INA228 configure: SHUNT_CAL=0x%04x (%d), lsb_na=%u\n",
+	dev_dbg(&ina->client->dev, "INA228 configure: SHUNT_CAL=0x%04x (%d), lsb_na=%u\n",
 		 (u16)cal, cal, lsb_na);
 
 	/* Verify via matching i2c_master_recv read. */
 	{
 		u16 verify;
 		int vr = bq25890_ina228_read_reg16(ina->client, INA228_REG_SHUNTCAL, &verify);
-		dev_info(&ina->client->dev, "INA228 SHUNT_CAL verify: read=0x%04x wrote=0x%04x ret=%d\n",
+		dev_dbg(&ina->client->dev, "INA228 SHUNT_CAL verify: read=0x%04x wrote=0x%04x ret=%d\n",
 			 verify, (u16)cal, vr);
 		if (vr == 0 && verify != (u16)cal) {
 			dev_warn(&ina->client->dev, "INA228 SHUNT_CAL mismatch: retrying\n");
 			bq25890_ina228_write_reg16(ina->client, INA228_REG_SHUNTCAL, cal);
 			bq25890_ina228_read_reg16(ina->client, INA228_REG_SHUNTCAL, &verify);
-			dev_info(&ina->client->dev, "INA228 SHUNT_CAL 2nd verify: read=0x%04x\n", verify);
+			dev_dbg(&ina->client->dev, "INA228 SHUNT_CAL 2nd verify: read=0x%04x\n", verify);
 		}
 	}
 
@@ -1303,7 +1335,7 @@ static int bq25890_ina228_configure(struct bq25890_ina228_data *ina)
 		INA228_ADC_AVG_64);
 	if (ret < 0)
 		return ret;
-	dev_info(&ina->client->dev,
+	dev_dbg(&ina->client->dev,
 		 "INA228 ADCCFG written; RST should clear within 2 ms\n");
 	/*
 	 * Wait for the ADC to complete its first conversion after ADCCFG
@@ -1379,7 +1411,7 @@ static int bq25890_ina228_probe(struct bq25890_device *bq)
 	ina->present = true;
 	bq->ina228 = ina;
 
-	dev_info(bq->dev, "INA228 bound at 0x40 (dvc=0x%03x shunt=%duohm max=%uuA)\n",
+	dev_dbg(bq->dev, "INA228 bound at 0x40 (dvc=0x%03x shunt=%duohm max=%uuA)\n",
 		 dev_id, ina228_shunt_uohm, ina228_max_current_ua);
 
 	return 0;
@@ -1763,6 +1795,9 @@ static void bq25890_capacity_refresh_work(struct work_struct *work)
 	charging = bq->last_charging;
 	mutex_unlock(&bq->lock);
 
+	/* Periodically save SOC to persistent storage for reboot consistency */
+	bq25890_save_persisted_soc(soc);
+
 	bq25890_notify_if_changed(bq, &state, ext_pwr, charging);
 
 reschedule:
@@ -1774,12 +1809,18 @@ static void bq25890_capacity_calibrate_work(struct work_struct *work)
 {
 	struct bq25890_device *bq = container_of(work, struct bq25890_device,
 						 capacity_calibrate_work.work);
-	int soc;
+	int soc, saved_soc;
 
 	mutex_lock(&bq->lock);
+
+	/* Load persisted SOC from previous session for consistency */
+	saved_soc = bq25890_load_persisted_soc();
+	if (saved_soc >= 0) {
+		bq->capacity_valid = true;
+		bq->capacity_cache = saved_soc;
+	}
+
 	/* Always re-sync from rested OCV once after boot (UPower may read too early). */
-	bq->capacity_valid = false;
-	bq->capacity_cache = 0;
 	bq->batv_smoothed_uv = 0;
 	bq->batv_smoothed_jiffies = 0;
 	bq->batv_load_glitch_until = 0;
@@ -2833,24 +2874,17 @@ static int bq25890_fg_get_ina228_dietemp_mdeg_c(struct bq25890_device *bq, bool 
 	return v;
 }
 
-static int bq25890_fg_get_coulomb_uah(struct bq25890_device *bq, bool rd)
-{
-	long v;
-
-	mutex_lock(&bq->lock);
-	v = bq->fg_disch_remain_uah;
-	mutex_unlock(&bq->lock);
-	if (v < 0)
-		v = 0;
-	return (int)v;
-}
 
 static ssize_t bq25890_fg_store_coulomb_uah(struct device *dev,
 					     struct device_attribute *attr,
 					     const char *buf, size_t count)
 {
-	struct power_supply *psy = to_power_supply(dev);
-	struct bq25890_device *bq = power_supply_get_drvdata(psy);
+	/*
+	 * This store function is registered on the i2c_client device (bq->dev),
+	 * not the power_supply child.  struct bq25890_device is stashed in
+	 * dev_get_drvdata() by bq25890_probe().
+	 */
+	struct bq25890_device *bq = dev_get_drvdata(dev);
 	long v;
 	int err;
 
@@ -2858,11 +2892,38 @@ static ssize_t bq25890_fg_store_coulomb_uah(struct device *dev,
 	if (err < 0)
 		return err;
 
+	/*
+	 * Clamp against the design capacity (charge_full_uah).  Using
+	 * bq->chg_remain_uah as the upper bound is unsafe because it
+	 * starts at -1 and is only updated once the fuel gauge has
+	 * actually begun tracking a charging session; a user write
+	 * arriving before that would silently get clamped to 0.
+	 */
 	mutex_lock(&bq->lock);
-	bq->fg_disch_remain_uah = clamp(v, 0L, (long)bq->chg_remain_uah);
+	bq->fg_disch_remain_uah = clamp(v, 0L, (long)charge_full_uah);
 	mutex_unlock(&bq->lock);
 
 	return count;
+}
+
+static ssize_t bq25890_fg_show_coulomb_uah(struct device *dev,
+				       struct device_attribute *attr,
+				       char *buf)
+{
+	/*
+	 * This file is registered on the i2c_client device (bq->dev), not
+	 * the power_supply child — use dev_get_drvdata() instead of
+	 * to_power_supply() + power_supply_get_drvdata().
+	 */
+	struct bq25890_device *bq = dev_get_drvdata(dev);
+	long v;
+
+	mutex_lock(&bq->lock);
+	v = bq->fg_disch_remain_uah;
+	mutex_unlock(&bq->lock);
+	if (v < 0)
+		v = 0;
+	return sysfs_emit(buf, "%ld\n", v);
 }
 
 #define BQ25890_FG_INT_SHOW_FN(name)                                          \
@@ -2889,7 +2950,6 @@ BQ25890_FG_INT_SHOW_FN(ina228_bus_uv)
 BQ25890_FG_INT_SHOW_FN(ina228_shunt_uv)
 BQ25890_FG_INT_SHOW_FN(ina228_power_mw)
 BQ25890_FG_INT_SHOW_FN(ina228_dietemp_mdeg_c)
-BQ25890_FG_INT_SHOW_FN(coulomb_uah)
 BQ25890_FG_INT_SHOW_FN(ina228_raw)
 BQ25890_FG_INT_SHOW_FN(ina228_shuntcal)
 
@@ -2911,6 +2971,37 @@ static DEVICE_ATTR(ina228_dietemp_mdeg_c, 0444, bq25890_fg_show_ina228_dietemp_m
 static DEVICE_ATTR(coulomb_uah, 0644,
 		   bq25890_fg_show_coulomb_uah,
 		   bq25890_fg_store_coulomb_uah);
+
+/* Reset persisted SOC for fresh calibration */
+static ssize_t bq25890_fg_reset_soc_store(struct device *dev,
+					   struct device_attribute *attr,
+					   const char *buf, size_t count)
+{
+	struct bq25890_device *bq = dev_get_drvdata(dev);
+	long v;
+	int err;
+
+	err = kstrtol(buf, 10, &v);
+	if (err < 0)
+		return err;
+
+	/* Writing 1 resets persisted SOC and forces re-calibration */
+	if (v == 1) {
+		mutex_lock(&bq->lock);
+		bq->capacity_valid = false;
+		bq->capacity_cache = 0;
+		mutex_unlock(&bq->lock);
+
+		/* Reset the module parameter so userspace knows to clear the file */
+		persist_soc = -1;
+
+		dev_info(bq->dev, "SOC calibration reset - will recalibrate on next sample\n");
+		dev_info(bq->dev, "Userspace should delete /var/lib/bq25890_battery/soc_persist\n");
+	}
+	return count;
+}
+static DEVICE_ATTR(reset_soc, 0200, NULL, bq25890_fg_reset_soc_store);
+
 static ssize_t bq25890_fg_show_ina228_debug(struct device *dev,
 				       struct device_attribute *attr,
 				       char *buf)
@@ -2972,7 +3063,7 @@ static ssize_t bq25890_fg_store_ina228_debug(struct device *dev,
 	curr_raw = ((u32)cbuf[0] << 16) | ((u32)cbuf[1] << 8) | cbuf[2];
 	vshunt_raw = ((u32)vbuf[0] << 16) | ((u32)vbuf[1] << 8) | vbuf[2];
 
-	dev_info(bq->dev,
+	dev_dbg(bq->dev,
 		"INA228 DEBUG: CURR_bytes=%02x%02x%02x raw24=0x%06x lsb_na=%u SHUNT_CAL=0x%04x\n"
 		"INA228 DEBUG: VSHUNT_bytes=%02x%02x%02x raw24=0x%06x adc_range=%d\n",
 		cbuf[0], cbuf[1], cbuf[2], curr_raw,
@@ -3003,7 +3094,6 @@ static struct attribute *bq25890_fg_attrs[] = {
 	&dev_attr_ina228_shunt_uv.attr,
 	&dev_attr_ina228_power_mw.attr,
 	&dev_attr_ina228_dietemp_mdeg_c.attr,
-	&dev_attr_coulomb_uah.attr,
 	&dev_attr_ina228_raw.attr,
 	&dev_attr_ina228_shuntcal.attr,
 	&dev_attr_ina228_debug.attr,
@@ -3478,6 +3568,8 @@ static void bq25890_non_devm_cleanup(void *data)
 {
 	struct bq25890_device *bq = data;
 
+	device_remove_file(bq->dev, &dev_attr_coulomb_uah);
+
 	cancel_delayed_work_sync(&bq->pump_express_work);
 	cancel_delayed_work_sync(&bq->capacity_calibrate_work);
 	cancel_delayed_work_sync(&bq->capacity_refresh_work);
@@ -3564,6 +3656,21 @@ static int bq25890_probe(struct i2c_client *client)
 		return dev_err_probe(dev, ret, "registering power supply\n");
 
 	/*
+	 * Register coulomb_uah on the i2c_client device (bq->dev), not the
+	 * power_supply child.  The power_supply class permission override
+	 * (power_supply_property_is_writeable) would otherwise downgrade the
+	 * sysfs mode to 0444 and block all writes even from root.
+	 * bq25890_fg_store_coulomb_uah() accesses bq via dev_get_drvdata().
+	 */
+	ret = device_create_file(bq->dev, &dev_attr_coulomb_uah);
+	if (ret)
+		return dev_err_probe(dev, ret, "creating coulomb_uah sysfs file\n");
+
+	ret = device_create_file(bq->dev, &dev_attr_reset_soc);
+	if (ret)
+		dev_warn(dev, "failed to create reset_soc sysfs file: %d\n", ret);
+
+	/*
 	 * Optional INA228 high-side current monitor at 0x40. Probe failure
 	 * is non-fatal; we just run the load-aware estimator without it.
 	 */
@@ -3595,6 +3702,10 @@ static int bq25890_probe(struct i2c_client *client)
 static void bq25890_remove(struct i2c_client *client)
 {
 	struct bq25890_device *bq = i2c_get_clientdata(client);
+
+	/* Save SOC before removing driver for consistency after reboot */
+	if (bq->capacity_valid)
+		bq25890_save_persisted_soc(bq->capacity_cache);
 
 	if (!IS_ERR_OR_NULL(bq->usb_phy)) {
 		usb_unregister_notifier(bq->usb_phy, &bq->usb_nb);

@@ -3,10 +3,13 @@
 *.o
 *.mod
 *.mod.c
+*.cmd
 panel-pibrick.c
 Module.symvers
 modules.order
+Module.symvers.cmd
 .tmp_versions/
+*.dtbo
 
 # macOS metadata
 ._*
@@ -18,3 +21,7 @@ modules.order
 # Python
 __pycache__/
 *.pyc
+
+# Agent / project scaffolding
+.cursor/
+.trellis/

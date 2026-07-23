@@ -34,17 +34,15 @@ int hyn_power_source_ctrl(struct hyn_ts_data *ts_data, int enable)
 
 void hyn_irq_set(struct hyn_ts_data *ts_data, u8 value)
 {
-	// HYN_ENTER();
     if(atomic_read(&ts_data->irq_is_disable) != value){
         if(value ==0){
-			disable_irq(ts_data->gpio_irq);
+			disable_irq(ts_data->client->irq);
 			msleep(1); //wait switch
 		}
         else{
-			enable_irq(ts_data->gpio_irq);
+			enable_irq(ts_data->client->irq);
 		}
         atomic_set(&ts_data->irq_is_disable,value);
-		// HYN_INFO("IRQ %d",value);
     }
 }
 
@@ -71,17 +69,6 @@ u32 hyn_sum32(int val, u32* buf,u16 len)
 
 void hyn_esdcheck_switch(struct hyn_ts_data *ts_data, u8 enable)
 {
-#if ESD_CHECK_EN
-	if(IS_ERR_OR_NULL(ts_data->hyn_workqueue) || IS_ERR_OR_NULL(&ts_data->esdcheck_work)) return;
-	if(enable){
-		ts_data->esd_fail_cnt = 0;
-		queue_delayed_work(ts_data->hyn_workqueue, &ts_data->esdcheck_work,
-						msecs_to_jiffies(1000));
-	}
-	else{
-		cancel_delayed_work_sync(&ts_data->esdcheck_work);
-	}
-#endif
 }
 
 
@@ -271,7 +258,7 @@ int exchange_byte(uint8_t *src, uint16_t len)
 {
 	u16 i = 0;
     if (src == NULL || len == 0) {
-        return -1;  // 2?¨ºy?TD¡ì
+        return -1;  // 2?ï¿½ï¿½y?TDï¿½ï¿½
     }
     for (i = 0; i < len; i+=2) {
         u8 *p = src + i;  

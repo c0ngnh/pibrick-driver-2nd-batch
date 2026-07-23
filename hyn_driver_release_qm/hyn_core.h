@@ -25,7 +25,7 @@
 #include <linux/proc_fs.h>
 #include <linux/uaccess.h>
 #include <linux/of.h>
-#include <linux/of_gpio.h>
+#include <linux/gpio/consumer.h>
 #include <linux/delay.h>
 #include <linux/regulator/consumer.h>
 #include <linux/pinctrl/consumer.h>
@@ -87,7 +87,7 @@
 #define HYN_INFO3(fmt, args...)  if(hyn_data->log_level > 1)printk(KERN_INFO "[HYN]"fmt"\n", ##args)
 #define HYN_INFO4(fmt, args...)  if(hyn_data->log_level > 2)printk(KERN_INFO "[HYN]"fmt"\n", ##args)
 #define HYN_ERROR(fmt, args...)  printk(KERN_ERR "[HYN][Error]%s:"fmt"\n",__func__,##args)
-#define HYN_ENTER()              printk(KERN_ERR "[HYN][enter]%s\n",__func__)
+#define HYN_ENTER()              do {} while (0)
 
 // #if HYN_GKI_VER
 //     MODULE_IMPORT_NS(VFS_internal_I_am_really_a_filesystem_and_am_NOT_a_driver);
@@ -183,9 +183,8 @@ struct hyn_plat_data {
     struct regulator *vdd_ana;
     struct regulator *vdd_i2c;
 
-    int reset_gpio;
-    u32 reset_gpio_flags;
-    int irq_gpio;
+    struct gpio_desc *reset_gpio;
+    int irq_gpio; /* fallback only when DT lacks the `interrupts` property */
     u32 irq_gpio_flags;
 
     struct pinctrl *pinctl;
@@ -199,10 +198,6 @@ struct hyn_plat_data {
 	int reverse_y;
 
     int max_touch_num;
-    int key_num;
-	u32  key_x_coords[8]; // max support 8 keys
-	u32  key_y_coords;
-	u32  key_code[8];
 };
 
 struct hyn_chip_series{
@@ -253,7 +248,6 @@ struct hyn_ts_data {
     struct device *dev;
     struct input_dev  *input_dev;
     struct workqueue_struct *hyn_workqueue;
-    int gpio_irq;
     int esd_fail_cnt;
     u32 esd_last_value;
     int esd_block_cnt;
