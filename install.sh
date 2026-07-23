@@ -27,127 +27,42 @@ error()   { echo -e "${RED}[ERROR]${RESET} $*" >&2; }
 PANEL_CONFIG=/etc/pibrick.panel
 DISPLAY_REFRESH_CONFIG=/etc/pibrick.display-refresh
 PIBRICK_LIB=/usr/lib/pibrick
-PIBRICK_CONF=/etc/pibrick.conf
+PIBRICK_TOOLS_DIR="$PIBRICK_LIB/battery-tools"
+PIBRICK_TOOLS="$PIBRICK_TOOLS_DIR"
+PIBRICK_WRAPPER="/usr/local/bin/pibrick-tools"
 
-# ── Determine install layout ───────────────────────────────────────────────────
-# Three installation modes are supported:
+# ── Install layout ─────────────────────────────────────────────────────────────
+# install.sh only supports ONE install mode: system-wide.
 #
-#   1. System-wide install (default when run from /usr/lib/pibrick/install.sh)
-#      - Tools go to /usr/lib/pibrick/battery-tools/
-#      - User can symlink or call via /usr/lib/pibrick/install.sh --battery-config
-#      - Most distro-friendly: single shared location
+#   - Source tree is copied to /usr/lib/pibrick/ (builds + python tools)
+#   - /usr/local/bin/pibrick-tools is installed as a global wrapper so
+#     users can run `sudo pibrick-tools --battery-status` instead of
+#     having to remember the install.sh path.
 #
-#   2. Per-user install (default when run as non-root from a clone of this repo)
-#      - Tools go to $HOME/battery-tools/ (e.g. /home/alice/battery-tools/)
-#      - Each user gets their own copy
-#      - No sudo required to call tools after install
+# install.sh MUST be run as root (because it touches /usr/lib, /etc,
+# /sys, and the kernel module). Running as non-root prints a helpful
+# error and exits.
 #
-#   3. Custom path (set PIBRICK_USER=1 or PIBRICK_USER_HOME=/some/path)
-#      - Explicit override for unusual layouts
-#
-# Auto-detection rules (in order, first match wins):
-#   1. If PIBRICK_USER_HOME is set in the env (or already sourced from
-#      /etc/pibrick.conf), use it.
-#   2. If /etc/pibrick.conf exists, source it and use the PIBRICK_USER_HOME
-#      value it defines. This lets the admin set the default tools path
-#      site-wide without each user needing to set the env var.
-#   3. Forced system-wide (PIBRICK_SYSTEM=1): use $PIBRICK_LIB/battery-tools.
-#   4. Forced per-user (PIBRICK_USER=1): use $HOME/battery-tools.
-#   5. Root running from the system install dir (/usr/lib/pibrick/*) AND
-#      not from a clone: use the system-wide location.
-#   6. Otherwise: per-user $HOME/battery-tools.
-#
-# Override with env vars:
-#   PIBRICK_USER_HOME=/path/to/tools
-#   PIBRICK_SYSTEM=1   (force system-wide)
-#   PIBRICK_USER=1     (force per-user)
-#   PIBRICK_SYSTEM=1   (force system-wide, even as non-root)
-#   PIBRICK_USER=1     (force per-user in $HOME/battery-tools)
-#   PIBRICK_USER_HOME=<path> (force per-user to specific path)
-#
-# Tools installed to PIBRICK_TOOLS_DIR can be called directly:
-#   sudo /usr/lib/pibrick/install.sh --battery-config   # always works
-#   python3 $PIBRICK_TOOLS_DIR/battery_set.py --show    # direct
-#
-# If /etc/pibrick.conf exists, it may set PIBRICK_USER_HOME for the system default.
+# Standard usage after install:
+#   sudo pibrick-tools --battery-status
+#   sudo pibrick-tools --battery-config charge_full_uah 3800 mAh --persist
+#   sudo pibrick-tools --install calibration
+#   sudo pibrick-tools --apply-calibration
 
-# When sudo runs, $HOME gets reset to /root. Detect this by inspecting
-# $SUDO_USER and use the original user's home if available.
-# Also, detect that we're running from a clone of this repo (not /usr/lib/pibrick/)
-# so per-user install is the right default even when sudo is involved.
+# Detect the source tree (the directory install.sh lives in). This is
+# what we copy FROM into /usr/lib/pibrick. Capture at startup so any
+# later cwd changes don't affect it.
+SCRIPT_REAL=$(readlink -f "${BASH_SOURCE[0]:-$0}" 2>/dev/null || echo "$0")
+PIBRICK_SRC="$(dirname "$SCRIPT_REAL")"
+
+# When sudo runs, $HOME gets reset to /root. Restore the original user's
+# home so log messages and config paths make sense.
 ORIG_HOME="$HOME"
 if [ -n "${SUDO_USER:-}" ] && [ "$(id -un)" = "root" ]; then
 	ORIG_HOME=$(getent passwd "$SUDO_USER" | cut -d: -f6)
 	ORIG_HOME="${ORIG_HOME:-/root}"
 fi
 HOME="${ORIG_HOME}"
-
-# Determine the source tree (the directory install.sh lives in). This is
-# what `copy_sources` will sync from. Capture it BEFORE any env var
-# reassignments later overwrite PIBRICK_USER_HOME with the tools dir.
-SCRIPT_REAL=$(readlink -f "${BASH_SOURCE[0]:-$0}" 2>/dev/null || echo "$0")
-PIBRICK_SRC="$SCRIPT_REAL"
-if [ -d "$PIBRICK_SRC" ]; then
-	PIBRICK_SRC="$(dirname "$PIBRICK_SRC")"
-fi
-# Snapshot PIBRICK_USER_HOME at startup. install.sh reassigns this later
-# to be the tools dir, but `copy_sources` needs to know the original
-# source tree location when the script is invoked from /usr/lib/pibrick
-# (where the source tree itself may be stale or missing).
-PIBRICK_USER_HOME_AT_STARTUP="${PIBRICK_USER_HOME:-}"
-
-# Are we running from a clone of this repo (not from /usr/lib/pibrick/)?
-# This distinguishes a fresh clone (per-user install) from a system
-# reinstall after /usr/lib/pibrick was already populated (system-wide).
-RUNNING_FROM_CLONE=true
-if [[ "$SCRIPT_REAL" == /usr/lib/pibrick/* ]]; then
-	RUNNING_FROM_CLONE=false
-fi
-
-if [ -n "${PIBRICK_USER_HOME:-}" ]; then
-	# Explicit override wins. We accept two interpretations:
-	#   - PIBRICK_USER_HOME=/home/alice          -> tools at $PIBRICK_USER_HOME/battery-tools/
-	#   - PIBRICK_USER_HOME=/home/alice/battery-tools -> tools at $PIBRICK_USER_HOME
-	# Pick whichever exists; fall back to the conventional layout.
-	if [ -f "$PIBRICK_USER_HOME/battery-tools/battery-auto-calibrator.py" ]; then
-		PIBRICK_TOOLS_DIR="$PIBRICK_USER_HOME/battery-tools"
-	elif [ -f "$PIBRICK_USER_HOME/battery-auto-calibrator.py" ]; then
-		PIBRICK_TOOLS_DIR="$PIBRICK_USER_HOME"
-	else
-		# Doesn't exist yet — assume the conventional layout and let
-		# the caller fix it if they really meant something else.
-		PIBRICK_TOOLS_DIR="$PIBRICK_USER_HOME/battery-tools"
-	fi
-elif [ -f "$PIBRICK_CONF" ]; then
-	# Source user-provided default. We strip comments and only accept
-	# lines of the form PIBRICK_USER_HOME=... — `. /etc/pibrick.conf`
-	# would source any shell in that file, which is a needless attack
-	# surface given the file lives in /etc.
-	PIBRICK_USER_HOME=$(grep -E '^PIBRICK_USER_HOME=' "$PIBRICK_CONF" 2>/dev/null | tail -1 | cut -d= -f2-)
-	PIBRICK_USER_HOME="${PIBRICK_USER_HOME//\"/}"
-	PIBRICK_USER_HOME="${PIBRICK_USER_HOME//\'/}"
-	if [ -n "$PIBRICK_USER_HOME" ]; then
-		PIBRICK_TOOLS_DIR="$PIBRICK_USER_HOME/battery-tools"
-	else
-		PIBRICK_TOOLS_DIR="$HOME/battery-tools"
-	fi
-elif [ "${PIBRICK_SYSTEM:-0}" = "1" ]; then
-	# Forced system-wide
-	PIBRICK_TOOLS_DIR="$PIBRICK_LIB/battery-tools"
-elif [ "${PIBRICK_USER:-0}" = "1" ]; then
-	# Forced per-user
-	PIBRICK_TOOLS_DIR="$HOME/battery-tools"
-elif [ "$(id -u)" = "0" ] && [ -d "$PIBRICK_LIB" ] && [ "$RUNNING_FROM_CLONE" = "false" ]; then
-	# Root running from /usr/lib/pibrick → system-wide
-	PIBRICK_TOOLS_DIR="$PIBRICK_LIB/battery-tools"
-else
-	# Non-root OR running from a clone → per-user install
-	PIBRICK_TOOLS_DIR="$HOME/battery-tools"
-fi
-PIBRICK_TOOLS="$PIBRICK_TOOLS_DIR"
-
-# Backwards compat alias for old code (Python tools read this env var)
-export PIBRICK_USER_HOME="$PIBRICK_TOOLS_DIR"
 
 
 # ── Component flags ─────────────────────────────────────────────────────────────
@@ -275,6 +190,10 @@ usage() {
 	cat <<EOF
 ${BOLD}piBrick Driver Installer${RESET}
 
+After installation, every command below is also available via the global
+wrapper \`pibrick-tools\` (e.g. \`sudo pibrick-tools --battery-status\`)
+which \`$0\` installs at \`/usr/local/bin/pibrick-tools\`.
+
 ${BOLD}Usage:${RESET}
   $0              # Interactive mode
   $0 --install x  # Non-interactive
@@ -308,6 +227,7 @@ ${BOLD}Options:${RESET}
                                 --force            Bypass safety checks (coulomb_uah)
                                 --show             Show all current values
                                 --list             List all parameters
+  --version                 Print install paths
   -h, --help                Show this help
 
 ${BOLD}Examples:${RESET}
@@ -417,6 +337,13 @@ while [ $# -gt 0 ]; do
 		usage
 		exit 0
 		;;
+	--version)
+		echo "pibrick-driver installer"
+		echo "  source: $PIBRICK_SRC"
+		echo "  install path: $PIBRICK_LIB"
+		echo "  wrapper: $PIBRICK_WRAPPER"
+		exit 0
+		;;
 	*)
 		error "Unknown argument: $1"
 		usage
@@ -427,19 +354,8 @@ done
 
 # ── Interactive prompts ───────────────────────────────────────────────────────
 choose_components() {
-	# Non-interactive (no terminal): if user is non-root AND we are running
-	# from a clone of the repo (not /usr/lib/pibrick/), default to per-user
-	# install of just battery + calibration tools — the components that work
-	# without privileged writes. The user can always re-run with explicit
-	# --install <component> or as root.
+	# Non-interactive (no terminal): install all components.
 	if [ ! -t 0 ] && [ -z "$INSTALL_EXPLICIT" ]; then
-		if [ "$(id -u)" != "0" ]; then
-			info "No terminal detected; running as $USER with install path: $PIBRICK_TOOLS_DIR"
-			info "Defaulting to install battery + calibration tools (no privileged ops)."
-			INSTALL_BATTERY_NEW=1
-			INSTALL_CALIBRATION=1
-			return 0
-		fi
 		info "No terminal detected. Installing all components."
 		INSTALL_DISPLAY=1
 		INSTALL_BATTERY_NEW=1
@@ -678,13 +594,6 @@ restart_upower() {
 
 # ── Copy source tree ────────────────────────────────────────────────────────────
 copy_sources() {
-	# In per-user mode (no system write access), skip this — the repo IS
-	# the source tree, so there's nothing to copy.
-	if [ "$(id -u)" != "0" ]; then
-		info "Per-user mode (not root): skipping source copy (repo is the source tree)"
-		return 0
-	fi
-
 	info "Copying source files to $PIBRICK_LIB..."
 	mkdir -p "$PIBRICK_LIB"
 	rsync_opts=(
@@ -705,28 +614,15 @@ copy_sources() {
 		--exclude='.cursor/'
 		--exclude='AGENTS.md'
 	)
-	# Determine the source tree. Prefer the dir where install.sh itself
-	# lives (PIBRICK_SRC, captured at startup). Fall back to the user's
-	# clone (PIBRICK_USER_HOME at startup, before it gets overwritten
-	# with the tools dir). Fall back to the original SCRIPT_REAL. This
-	# is critical when install.sh is run as `sudo /usr/lib/pibrick/install.sh`
-	# because the user's cwd may not be the source tree.
-	local src_dir="${PIBRICK_SRC:-}"
-	if [ ! -d "$src_dir/battery" ] && [ -d "${PIBRICK_USER_HOME_AT_STARTUP:-}/battery" ]; then
-		src_dir="${PIBRICK_USER_HOME_AT_STARTUP:-}"
-	fi
-	if [ ! -d "$src_dir/battery" ]; then
-		warn "Source tree not found at $src_dir/battery; skipping source sync"
+	if [ ! -d "$PIBRICK_SRC" ]; then
+		warn "Source tree not found at $PIBRICK_SRC; skipping source sync"
 		return 0
 	fi
-	if [ "$(cd "$src_dir" && pwd -P)" != "$PIBRICK_LIB" ]; then
-		(cd "$src_dir" && rsync "${rsync_opts[@]}" . "$PIBRICK_LIB/")
+	if [ "$(cd "$PIBRICK_SRC" && pwd -P)" != "$PIBRICK_LIB" ]; then
+		(cd "$PIBRICK_SRC" && rsync "${rsync_opts[@]}" . "$PIBRICK_LIB/")
 	fi
 	# rsync preserves the source file's mode; ensure install.sh and
-	# build.sh are executable when copied to PIBRICK_LIB. Without this,
-	# a fresh clone whose install.sh is 0644 would copy a 0644 file to
-	# /usr/lib/pibrick/install.sh, and `sudo install.sh --foo` would
-	# fail with "command not found" even though the file is there.
+	# build.sh are executable when copied to PIBRICK_LIB.
 	chmod +x "$PIBRICK_LIB/install.sh" 2>/dev/null || true
 	chmod +x "$PIBRICK_LIB/build.sh" 2>/dev/null || true
 }
@@ -1047,9 +943,60 @@ reload_drivers() {
 	fi
 }
 
+# ── Install /usr/local/bin/pibrick-tools wrapper ───────────────────────────────
+install_pibrick_wrapper() {
+	if [ ! -f "$PIBRICK_SRC/tools/pibrick-tools.sh" ]; then
+		return 0
+	fi
+	info "Installing pibrick-tools wrapper at $PIBRICK_WRAPPER..."
+	install -m 0755 "$PIBRICK_SRC/tools/pibrick-tools.sh" "$PIBRICK_WRAPPER"
+	success "Wrapper installed: $PIBRICK_WRAPPER"
+}
+
+# ── Install bash completion for pibrick-tools ───────────────────────────────────
+install_bash_completion() {
+	local src_completion="$PIBRICK_SRC/tools/pibrick-tools.bash-completion"
+	if [ ! -f "$src_completion" ]; then
+		return 0
+	fi
+	local dest_dir=""
+	# Prefer /usr/share/bash-completion/completions on Debian/Ubuntu
+	if [ -d /usr/share/bash-completion/completions ]; then
+		dest_dir=/usr/share/bash-completion/completions
+	elif [ -d /etc/bash_completion.d ]; then
+		dest_dir=/etc/bash_completion.d
+	fi
+	if [ -z "$dest_dir" ]; then
+		warn "No bash-completion directory found; skipping"
+		return 0
+	fi
+	info "Installing bash completion to $dest_dir/pibrick-tools..."
+	install -m 0644 "$src_completion" "$dest_dir/pibrick-tools"
+	success "Bash completion installed (restart shell or 'source' it manually)"
+}
+
 # ── Main ───────────────────────────────────────────────────────────────────────
 main() {
-	choose_components
+	# Refuse to run as non-root for any subcommand that modifies the
+	# system. Read-only commands (status, help) are allowed without sudo.
+	local needs_root=1
+	for arg in "$@"; do
+		case "$arg" in
+			--status|--status-calibration|--battery-status|--version|-h|--help|help)
+				needs_root=0 ;;
+			--install|--uninstall|--enable-calibration|--disable-calibration|--apply-calibration|--battery-config|--battery-check|--enable-upower|--disable-upower)
+				needs_root=1; break ;;
+		esac
+	done
+
+	if [ "$needs_root" = "1" ] && [ "$(id -u)" != "0" ]; then
+		echo "pibrick install.sh: this command modifies the system." >&2
+		echo "Please re-run with sudo:" >&2
+		echo "  sudo $0 $*" >&2
+		exit 1
+	fi
+
+	choose_components "$@"
 
 	# Copy source tree for all installs
 	if [ -n "$INSTALL_DISPLAY$INSTALL_BATTERY_NEW$INSTALL_BATTERY_ORIGINAL$INSTALL_CALIBRATION$INSTALL_BUTTON" ]; then
@@ -1074,6 +1021,14 @@ main() {
 	[ -n "$INSTALL_UPower" ] && fix_upower
 	[ -n "$INSTALL_BUTTON" ] && install_button
 
+	# Install the global /usr/local/bin/pibrick-tools wrapper so users
+	# don't have to remember the install.sh path under /usr/lib/pibrick.
+	# Also install bash completion if a completion dir is available.
+	if [ -f "$PIBRICK_SRC/tools/pibrick-tools.sh" ]; then
+		install_pibrick_wrapper
+		install_bash_completion
+	fi
+
 	# Reload
 	reload_drivers
 
@@ -1088,19 +1043,18 @@ main() {
 	[ -n "$INSTALL_UPower" ] && echo "  - UPower KDE fix"
 	[ -n "$INSTALL_BUTTON" ] && echo "  - Button service"
 	echo
-	echo "Tools location: $PIBRICK_TOOLS/"
-	echo "  battery_set.py       - Battery parameter setter"
-	echo "  battery-check.py     - Battery diagnostics"
-	echo "  battery-calibration-logger.py - Calibration logger"
-	echo "  battery-auto-calibrator.py    - Auto-calibrator"
+	echo "Use \`pibrick-tools\` for everything from now on:"
+	echo "  sudo pibrick-tools --battery-status"
+	echo "  sudo pibrick-tools --status-calibration"
+	echo "  sudo pibrick-tools --enable-calibration"
+	echo "  sudo pibrick-tools --disable-calibration"
+	echo "  sudo pibrick-tools --apply-calibration"
+	echo "  sudo pibrick-tools --battery-config charge_full_uah 3800 mAh --persist"
+	echo "  sudo pibrick-tools --install <component>"
 	echo
-	echo "Calibration commands:"
-	echo "  $0 --status-calibration     # Check calibration status"
-	echo "  $0 --enable-calibration    # Start logging"
-	echo "  $0 --disable-calibration   # Stop logging"
-	echo "  $0 --apply-calibration     # Apply calibrated OCV"
+	echo "Run \`pibrick-tools --help\` for the full command list."
 	echo
 	[ -n "$INSTALL_DISPLAY" ] && echo "Reboot to apply display changes: sudo reboot"
 }
 
-main
+main "$@"
