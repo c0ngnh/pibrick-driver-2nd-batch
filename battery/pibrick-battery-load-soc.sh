@@ -101,14 +101,23 @@ else
     # Convert uV -> centivolts, then look up in the OCV table.
     CV=$((VOLTAGE_UV / 10000))
     IMPLIES_PCT=$(awk -v cv="$CV" 'BEGIN{
-        # Voltages in centivolts, sorted descending. Keep in sync
-        # with bq25890_battery.c voltage_to_percent_table.
-        split("418 393 385 380 377 374 371 369 366 363 358 348 328 298", v)
-        split("100  95  90  80  70  60  55  50  40  30  20  10   5   0", p)
+        # Voltages in centivolts, sorted ASCENDING. Keep in sync with
+        # bq25890_battery.c voltage_to_percent_table — the driver uses
+        # ascending voltage: low V = 0 %, high V = 100 %. Lookup returns
+        # the SOC for the largest entry with V <= cv (bsearch-left).
+        #
+        # AUTO-GENERATED MIRROR of the current driver table — keep in
+        # sync whenever voltage_to_percent_table is updated. The last
+        # "max V" entry (here 418) is treated as 100 % so any higher
+        # voltage is also reported as 100 %.
+        split("330 332 332 333 340 340 343 348 350 358 364 369 373 375 379 383 386 391 394 418", v)
+        split("  0   5  10  15  20  25  30  35  40  45  50  55  60  65  70  75  80  85  90 100", p)
+        IMPLIED=0
         for (i=1; i<=length(v); i++) {
-            if (cv >= v[i]) { print p[i]; exit }
+            if (v[i] <= cv) { IMPLIED = p[i] }
+            else             { print IMPLIED; exit }
         }
-        print 0
+        print IMPLIED
     }')
 fi
 

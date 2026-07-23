@@ -520,7 +520,8 @@ def apply_calibration(rebuild=True, yes=False):
 
     if not yes:
         response = input("Continue? (yes/no): ")
-        if response.lower() != "yes":
+        # Accept "y", "Y", "yes", "Yes", "YES"; anything else = cancel.
+        if response.lower() not in ("yes", "y"):
             print("Cancelled.")
             return False
 
@@ -636,7 +637,7 @@ def reset_calibration():
     print("This will reset all calibration data.")
     
     response = input("Continue? (yes/no): ")
-    if response.lower() != "yes":
+    if response.lower() not in ("yes", "y"):
         print("Cancelled.")
         return
     

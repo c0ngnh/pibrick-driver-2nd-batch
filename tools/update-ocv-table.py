@@ -40,43 +40,57 @@ def load_calibration(status_path: Path):
 def build_monotonic_table(soc_voltage):
     """Average voltages into 5 % SOC buckets, enforce monotonicity.
 
-    Returns list of (soc, voltage_cv) sorted by voltage DESCENDING (the
-    order the driver's bq25890_calc_lipo_percentage() expects). Within a
-    flat plateau the higher SOC comes first so that lookup walks from
-    'top charge' downward.
+    Returns list of (soc, voltage_cv) sorted by voltage ASCENDING (the
+    order the driver's bq25890_calc_lipo_percentage() expects). The
+    driver walks the table looking for
+        `v[i] <= voltage < v[i+1]`
+    and assumes `v[0]` is the lowest voltage (= 0 %) and `v[size-1]`
+    is the highest (= 100 %). A descending table forces SOC to 0 %
+    for almost all voltages because the
+        `voltage <= table[0].voltage`
+    short-circuit matches everything except the top charge region.
+
+    Two passes:
+
+    Pass 1: enforce monotone non-decreasing in SOC order. LiPo cells
+    are physically guaranteed monotone — lower SOC never has higher
+    voltage — so any local non-monotonicity is measurement noise.
+    Starting from SOC=0, snap any lower-SOC reading down to the
+    current monotonic envelope (or, equivalently, snap any subsequent
+    low reading up to the running envelope so voltage never drops as
+    SOC rises).
     """
     if not soc_voltage:
         raise SystemExit("Empty calibration data")
 
-    # Group into 5% buckets by averaging nearby samples.
+    # Group into 5 % buckets by averaging nearby samples.
     bucketed = {}
     for soc, v in soc_voltage:
         bucket = int(soc // 5) * 5
         bucketed.setdefault(bucket, []).append(v)
 
+    # Per-bucket average, sorted by SOC ascending.
     averaged = []
     for bucket in sorted(bucketed):
         avg = int(round(sum(bucketed[bucket]) / len(bucketed[bucket])))
         averaged.append((bucket, avg))
 
-    # Pass 1: enforce non-decreasing with aggressive smoothing. The raw
-    # calibration data is noisy at the low-SOC tail (the device rarely
-    # sees <20 % SOC on a daily charge cycle, so each sample is from a
-    # small set of cycles). Snap any drop up to the running max — LiPo
-    # cells are guaranteed monotone over the whole SOC range, so any
-    # non-monotonicity in the raw data is noise.
-    monotone = []
+    # Pass 1: enforce monotone non-decreasing voltage across SOC. As we
+    # walk SOC up, if the next bucket has a lower avg voltage than the
+    # running envelope, snap it up so voltage never drops with SOC.
+    monotone_in_soc = []
     prev_v = 0
     for soc, v in averaged:
         if v < prev_v:
             v = prev_v
-        monotone.append((soc, v))
+        monotone_in_soc.append((soc, v))
         prev_v = v
 
-    # Sort by voltage DESCENDING, then by SOC DESCENDING for tie-breaking
-    # so equal-voltage buckets land in 'higher SOC first' order.
-    monotone.sort(key=lambda x: (-x[1], -x[0]))
-    return monotone
+    # Sort by voltage ASCENDING (matches driver's lookup logic), then by
+    # SOC ASCENDING for tie-breaking so equal-voltage buckets land in
+    # 'lower SOC first' order.
+    monotone_in_soc.sort(key=lambda x: (x[1], x[0]))
+    return monotone_in_soc
 
 
 def render_table_c(monotone):

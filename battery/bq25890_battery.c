@@ -698,8 +698,8 @@ static VoltageMap voltage_to_percent_table[] = {
 	{ 332,   5 },
 	{ 332,  10 },
 	{ 333,  15 },
-	{ 338,  20 },
-	{ 341,  25 },
+	{ 340,  20 },
+	{ 340,  25 },
 	{ 343,  30 },
 	{ 348,  35 },
 	{ 350,  40 },
@@ -711,10 +711,8 @@ static VoltageMap voltage_to_percent_table[] = {
 	{ 379,  70 },
 	{ 383,  75 },
 	{ 386,  80 },
-	{ 390,  85 },
+	{ 391,  85 },
 	{ 394,  90 },
-	{ 397,  95 },
-	{ 410, 100 },
 };
 const int table_size = ARRAY_SIZE(voltage_to_percent_table);
 static int bq25890_calc_lipo_percentage(int voltage_uv)

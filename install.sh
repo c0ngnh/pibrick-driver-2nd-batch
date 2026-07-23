@@ -85,23 +85,46 @@ status_calibration() {
 		cat /var/log/bq25890_battery/calibration_status.json
 }
 
+# ── Apply the calibrated OCV table ─────────────────────────────────────────────
+# Forwards remaining arguments to battery-auto-calibrator.py so users can
+# do `sudo pibrick-tools --apply-calibration --yes --no-ina228` etc.
 apply_calibration() {
 	info "Checking calibration status..."
 
-	if [ ! -f "$PIBRICK_TOOLS_DIR/battery-auto-calibrator.py" ]; then
-		error "Auto-calibrator not installed. Run: $0 --install calibration"
+	local calibrator
+	if ! calibrator=$(find_battery_tool "battery-auto-calibrator.py"); then
 		return 1
 	fi
 
-	python3 "$PIBRICK_TOOLS_DIR/battery-auto-calibrator.py" --apply
+	# Strip the leading "--apply-calibration" so any args after it
+	# become the calibrator's flags (e.g. --yes, --no-ina228,
+	# --no-rebuild). Without TTY the "--yes" is implied.
+	local extra=()
+	for arg in "$@"; do
+		case "$arg" in
+			--apply-calibration) ;;
+			*) extra+=("$arg") ;;
+		esac
+	done
+
+	# If the user didn't pass --yes and there's no TTY (e.g. running
+	# from a script or background), imply --yes so the command doesn't
+	# hang forever waiting on stdin.
+	if [ ! -t 0 ]; then
+		local has_yes=0
+		for a in "${extra[@]}"; do
+			[ "$a" = "--yes" ] || [ "$a" = "-y" ] && has_yes=1
+		done
+		[ "$has_yes" = "0" ] && extra+=("--yes")
+	fi
+
+	python3 "$calibrator" --apply "${extra[@]}"
 }
 
 # ── Find a battery Python helper ───────────────────────────────────────────────
-# Resolves the path to battery_set.py / battery-check.py / etc. We try
-# $PIBRICK_TOOLS_DIR first, then fall back to the source tree under
-# $PIBRICK_LIB/battery/ (in case the user upgraded from a previous per-user
-# install or never ran --install battery). If nothing is found, prints
-# the install hint and exits with an error.
+# Resolves the path to a Python helper under the battery tools dir, falling
+# back to $PIBRICK_LIB/battery/ (the source tree) if the tools-dir copy
+# is missing. Used for battery_set.py / battery-check.py / etc.
 find_battery_tool() {
 	local script="$1"
 	for candidate in \
@@ -112,7 +135,7 @@ find_battery_tool() {
 			return 0
 		fi
 	done
-	error "$script not installed. Run: $0 --install battery"
+	error "$script not installed. Run: $0 --install calibration"
 	return 1
 }
 
@@ -326,7 +349,10 @@ while [ $# -gt 0 ]; do
 		shift
 		;;
 	--apply-calibration)
-		apply_calibration
+		# Forward remaining args: e.g. `--yes`, `--no-ina228`,
+		# `--no-rebuild` to battery-auto-calibrator.py.
+		shift 2>/dev/null || true
+		apply_calibration "$@"
 		exit $?
 		;;
 	--status-calibration)
