@@ -1,0 +1,19 @@
+# piBrick SOC Persistence Service
+#
+# Saves battery SOC to persistent storage for consistency across reboots.
+# Run on shutdown/reboot to capture the last known SOC.
+
+[Unit]
+Description=piBrick Battery SOC Persistence
+DefaultDependencies=no
+Before=shutdown.target reboot.target poweroff.target halt.target
+After=basic.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 /home/congn/battery-tools/battery-soc-persist.py
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=shutdown.target reboot.target poweroff.target halt.target

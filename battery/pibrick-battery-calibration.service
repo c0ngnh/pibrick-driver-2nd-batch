@@ -1,0 +1,18 @@
+[Unit]
+Description=piBrick Battery Calibration Logger
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/congn/battery-tools/battery-calibration-logger.py --interval 10
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+User=root
+
+# Logging to /var/log/bq25890_battery/calibration.log
+SyslogIdentifier=battery-calibration
+
+[Install]
+WantedBy=multi-user.target

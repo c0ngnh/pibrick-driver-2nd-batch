@@ -6,24 +6,61 @@ Kernel modules and user-space helpers for the piBrick CM5 handheld (Raspberry Pi
 |-----------|------|----------|
 | Display | `panel-pibrick.9203.c`, `panel-pibrick.9202.c`, `panel-pibrick.548.c`, `panel-pibrick.5inch.c`, `dts/` | Visionox AMOLED on DSI1 — 9203 default (1080×1240 @ 90/60 Hz) |
 | Touch | `hyn_driver_release_qm/` | Hynitron CST66xx (`compatible = "hyn,66xx"` in DTS) |
-| Battery | `battery/bq25890_battery.c` | TI BQ25895 PMIC (no separate fuel gauge) |
+| Battery | `battery/bq25890_battery.c` | TI BQ25895 PMIC + **TI INA228** high-precision current sensor |
 | Buttons | `button-service/` | GPIO daemon for power + user buttons |
 | Desktop | `desktop/` | GTK taskbar battery indicator, `pibrick-display-settings` |
 | Tools | `tools/` | Display settings menu, GNOME refresh helper, touch reset, OCV calibration |
+| Calibration | `battery/battery-calibration-logger.py`, `battery/battery-auto-calibrator.py` | Automatic battery OCV calibration service |
 
-This repository bundles the display, touch, battery, button, and desktop pieces into a single installable tree, targeting **Raspberry Pi OS on kernel 6.18** with **GNOME 48 (Wayland)**.
+This repository bundles the display, touch, battery, button, and desktop pieces into a single installable tree, targeting **Raspberry Pi OS on kernel 6.18** with **GNOME 48 (Wayland)** or **KDE Plasma Mobile**.
 
 ## Install
-
-See [INSTALL.md](INSTALL.md):
 
 ```bash
 sudo bash ./install.sh
 ```
 
-`install.sh` copies the tree to `/usr/lib/pibrick/`, builds kernel modules, sets up the desktop battery indicator, installs the button service, and enables `pibrick.service` (rebuild on kernel update).
+`install.sh` provides an **interactive menu** that lets you select which components to install:
 
-### Panel selection
+```
+=== piBrick Driver Installer ===
+Display Driver Options:
+  1) Display + Touch (NEW) - With INA228 integration (recommended)
+  2) Display + Touch (OLD) - Original Hyn driver only
+  3) Skip display installation
+Choose [1]: 
+
+Install Battery Driver (bq25895 + INA228)? [Y/n]: 
+Install Calibration Tools (logger + auto-calibrator)? [Y/n]: 
+Apply UPower KDE Fix (show Charging state)? [Y/n]: 
+Install Button Service (pibrickbtn)? [Y/n]: 
+```
+
+### Non-Interactive Installation
+
+Install specific components using `--install`:
+
+```bash
+# Install everything
+sudo bash ./install.sh --install all
+
+# Install only battery with calibration tools
+sudo bash ./install.sh --install battery,calibration
+
+# Install display with new INA228 driver
+sudo bash ./install.sh --install display-new
+
+# Install display with old driver (no INA228)
+sudo bash ./install.sh --install display-old
+
+# Install individual components
+sudo bash ./install.sh --install battery      # Battery driver only
+sudo bash ./install.sh --install calibration   # Calibration tools only
+sudo bash ./install.sh --install upower       # UPower KDE fix only
+sudo bash ./install.sh --install button      # Button service only
+```
+
+### Panel Selection
 
 `install.sh` prompts for the panel variant and saves the choice to `/etc/pibrick.panel`. You can also pick it non-interactively:
 
@@ -36,9 +73,168 @@ sudo PANEL=5inch bash ./install.sh   # 5 inch 1080×1240 @ 90/60 Hz
 
 The default refresh rate is **90 Hz** for the 9203 panel (saved to `/etc/pibrick.display-refresh` and applied on login). Use `pibrick-display-settings --refresh 60` for lower power.
 
+### Calibration Service Management
+
+```bash
+# Check calibration status (97% confidence with 1000+ samples)
+sudo /usr/lib/pibrick/install.sh --status-calibration
+
+# Enable calibration logging service (collects voltage-SOC data)
+sudo /usr/lib/pibrick/install.sh --enable-calibration
+
+# Disable calibration logging service
+sudo /usr/lib/pibrick/install.sh --disable-calibration
+
+# Apply calibrated OCV table to driver
+sudo /usr/lib/pibrick/install.sh --apply-calibration
+```
+
 ---
 
-## What's new
+## What's New
+
+### Interactive Installer (`install.sh`)
+
+The new **interactive installer** provides a user-friendly menu for selecting components:
+
+- **Display Driver Selection**: Choose between NEW (with INA228) or OLD (original Hyn)
+- **Battery Driver**: Full battery fuel gauge with INA228 integration
+- **Calibration Tools**: Automatic voltage-SOC data collection and OCV table generation
+- **UPower KDE Fix**: Correct charging state display in KDE Plasma Mobile
+- **Button Service**: GPIO-based power and user button handling
+
+#### Installation Options
+
+| Option | Description |
+|--------|-------------|
+| `--install all` | Install all components |
+| `--install display-new` | Display with INA228 integration |
+| `--install display-old` | Original Hyn display driver |
+| `--install battery` | Battery driver (bq25895 + INA228) |
+| `--install calibration` | Calibration logger + auto-calibrator |
+| `--install upower` | UPower KDE fix |
+| `--install button` | Button service |
+| `--status-calibration` | Show calibration status |
+| `--enable-calibration` | Start calibration logging |
+| `--disable-calibration` | Stop calibration logging |
+| `--apply-calibration` | Apply calibrated OCV table |
+
+---
+
+### Battery Driver with INA228 Integration
+
+The battery driver (`battery/bq25890_battery.c`) has been significantly enhanced with **TI INA228** support:
+
+#### Features
+
+| Feature | Description |
+|---------|-------------|
+| **INA228 High-Precision Sensor** | 20-bit ADC for accurate current/voltage/power measurement |
+| **Coulomb Counter Integration** | INA228 POWER register tracks energy with 1mW resolution |
+| **Real Current Sensing** | No more proxy/estimated current - actual measurements from INA228 |
+| **Power Calculation** | INA228 provides direct power measurement in mW |
+| **Temperature Monitoring** | INA228 die temperature in millidegrees Celsius |
+| **Bus Voltage Sensing** | INA228 bus voltage for accurate OCV readings |
+
+#### Sysfs Interface
+
+```
+/sys/class/power_supply/battery/
+├── capacity              # SOC percentage (0-100)
+├── voltage_now          # Battery voltage (microvolts)
+├── current_now          # Current from BQ25895 (microamps)
+├── ina228_current_ua    # Precise current from INA228 (microamps)
+├── ina228_bus_uv        # Bus voltage from INA228 (microvolts)
+├── ina228_power_mw      # Power from INA228 (milliwatts)
+├── ina228_dietemp_mdeg_c # INA228 die temperature
+├── ina228_present       # INA228 presence flag
+├── fg_mode              # Fuel gauge mode: charging, active, resting, full
+├── charge_now           # Remaining charge (microamp-hours)
+├── charge_full          # Full charge capacity (microamp-hours)
+├── charge_full_design   # Design capacity (microamp-hours)
+├── status              # Charging, Discharging, Full, Not Charging
+├── time_to_empty_avg   # Estimated time to empty (seconds)
+└── time_to_full_now   # Estimated time to full (seconds)
+```
+
+#### Battery Tools
+
+| Tool | Purpose |
+|------|---------|
+| `battery_set.py` | Interactive battery parameter setter (charge_full_uah, ina228_shunt_uohm, etc.) |
+| `battery-check.py` | Comprehensive battery diagnostics |
+| `battery-soc-persist.py` | SOC persistence across reboots |
+| `battery-calibration-logger.py` | Logs voltage-SOC data continuously |
+| `battery-auto-calibrator.py` | Analyzes data and generates OCV table |
+
+---
+
+### Automatic Battery Calibration
+
+The calibration system automatically builds an accurate voltage-to-SOC mapping:
+
+#### How It Works
+
+1. **Data Collection**: `battery-calibration-logger.py` continuously logs battery data:
+   - SOC percentage
+   - Voltage (from INA228)
+   - Current (from INA228)
+   - Fuel gauge mode (charging/active/resting)
+   - Timestamp
+
+2. **Resting State Detection**: Only resting measurements (low current, not charging) are used for OCV calibration - these give the most accurate voltage readings.
+
+3. **Analysis**: `battery-auto-calibrator.py` processes the data:
+   - Groups by SOC bucket (5% intervals)
+   - Calculates average voltage per bucket
+   - Generates confidence score
+   - Creates calibrated OCV table
+
+4. **Application**: The calibrated OCV table is applied to the driver for accurate SOC estimation.
+
+#### Calibration Status
+
+```
+============================================================
+Battery Calibration Status
+============================================================
+Last update: 2026-07-23T18:06:59
+Confidence: 0.97 (97.2%)
+
+Total records: 1497
+Resting records: 1086
+SOC coverage: 93.1%
+SOC levels: [1, 2, 3, 4, 5, ... 92, 93, 94]
+============================================================
+[READY] Calibration ready for application (confidence >= 85%)
+```
+
+#### Using Calibration Data
+
+```bash
+# Check calibration status
+sudo python3 /home/congn/battery-tools/battery-auto-calibrator.py --status
+
+# Analyze existing data
+sudo python3 /home/congn/battery-tools/battery-auto-calibrator.py --check
+
+# Generate OCV table from data
+sudo python3 /home/congn/battery-tools/battery-calibration-logger.py --generate-ocv-table
+
+# Apply the calibrated OCV table
+sudo /usr/lib/pibrick/install.sh --apply-calibration
+```
+
+#### Calibration Log Files
+
+| File | Purpose |
+|------|---------|
+| `/var/log/bq25890_battery/calibration_data.csv` | Raw calibration measurements |
+| `/var/log/bq25890_battery/calibration.log` | Human-readable log |
+| `/var/log/bq25890_battery/calibration_status.json` | Analysis results |
+| `/var/log/bq25890_battery/suggested_ocv_table.h` | Generated C header for driver |
+
+---
 
 ### Display
 
@@ -62,23 +258,44 @@ The default refresh rate is **90 Hz** for the 9203 panel (saved to `/etc/pibrick
 - `hyntpdbg` `rst` performs a full resume when the controller is suspended (not just a chip reset).
 - The button daemon does not reload the touch module; the display toggle sends a touch wake instead.
 
-### Battery (`battery/bq25890_battery.c`)
+### Build & Packaging
 
-- Software fuel gauge on top of the BQ25895 charger: OCV lookup table, charge IR compensation, capacity smoothing, and unplug relax handling.
-- Tunable constants (`BQ25890_BATT_IR_MOHM`, `BQ25890_CHARGE_FULL_UAH`, …) plus `tools/ocv-calibrate.py` for calibration.
-- Exposes a standard `/sys/class/power_supply/battery` interface consumed by the desktop indicator.
-
-### Build & packaging
-
-- `install.sh` — `set -euo pipefail`, interactive panel prompt, saves panel + default refresh, removes any stale `panel-pibrick.c`, runs the desktop and button-service installers, and regenerates the initramfs when `auto_initramfs=1`.
+- `install.sh` — interactive installer with component selection, `set -euo pipefail`, saves panel + default refresh, removes any stale `panel-pibrick.c`, runs the desktop and button-service installers, and regenerates the initramfs when `auto_initramfs=1`.
 - `build.sh` — `--force` / `--no-reboot` flags, rebuilds on kernel change, synchronous install, initramfs regen.
 - `Makefile` — `make amoled PANEL=9203|9202|548|5inch`; symlinks the chosen source to `panel-pibrick.c`; refuses to uninstall if the new `.ko` is missing.
 - `pibrick.service` — rebuilds the out-of-tree modules automatically on kernel updates.
+- `battery/Makefile` — includes calibration targets: `make install-calibration`, `make enable-calibration`, `make disable-calibration`, `make apply-calibration`.
 
-### Desktop & tools
+### Desktop & Tools
 
 - `desktop/pibrick-battery-indicator.py` taskbar battery indicator with autostart.
 - `tools/pibrick-display-settings.sh`, `tools/gnome-display-rate.py`, `tools/ocv-calibrate.py`.
+- Calibration tools: `battery-calibration-logger.py`, `battery-auto-calibrator.py`, `fix-ocv-table.py`
+
+---
+
+## UPower KDE Fix
+
+On **KDE Plasma Mobile**, the battery indicator may show "Discharging" even while plugged in and charging. This is caused by a bug in UPower (all versions since ~0.99.x) where it overrides the battery state to `Discharging` whenever `current_now < 0` in sysfs — contradicting the actual `status` attribute.
+
+The BQ25895 driver follows the Linux `power_supply` convention where **negative current = charging**. The fix rebuilds UPower from source with this override disabled.
+
+**Applied automatically** by `install.sh --install battery` or `install.sh --fix-upower`. After installation, log out and back in (or reboot) for the change to propagate to the KDE battery indicator.
+
+To apply manually on a running system:
+
+```bash
+sudo bash ./install.sh --install upower
+```
+
+To verify after install:
+
+```bash
+upower -i /org/freedesktop/UPower/devices/battery_battery | grep state
+# should show: state:               charging
+```
+
+If the KDE indicator still shows "Discharging" immediately after the fix, the KDE session needs to be restarted (`sudo systemctl restart plasma-mobile` or reboot).
 
 ---
 
@@ -86,7 +303,7 @@ The default refresh rate is **90 Hz** for the 9203 panel (saved to `/etc/pibrick
 
 The GPIO button daemon lives under `button-service/` and is installed by `install.sh`.
 
-### GPIO wiring
+### GPIO Wiring
 
 | Line | Chip | Offset | Role |
 |------|------|--------|------|
@@ -103,7 +320,7 @@ Measured levels on PocketCM5:
 
 Power does **not** pull line 23 low; only the user button does. The daemon decodes `press == 0 && select == 0` as power and `press == 1 && select == 0` as user.
 
-### Default button actions
+### Default Button Actions
 
 | Gesture | Action |
 |---------|--------|
@@ -112,7 +329,7 @@ Power does **not** pull line 23 low; only the user button does. The daemon decod
 | **Power short** | Native desktop power menu (GNOME, KDE, XFCE, Pi OS `pishutdown`, …) |
 | **Power long** | Hold `KEY_POWER` for 2 s, release on button up (Pi-style shutdown) |
 
-### Daemon implementation
+### Daemon Implementation
 
 - **libgpiod v2** C API with persistent line requests.
 - Long-press threshold **2000 ms** (`LONG_PRESS_MS`); settle + release debounce + identity sampling.
@@ -122,7 +339,7 @@ Power does **not** pull line 23 low; only the user button does. The daemon decod
 - systemd unit: `Restart=on-failure`, `Before=graphical.target`.
 - Display-toggle sysfs write is enabled for the user by `99-pibrick-display.rules` (driver attr stays `0644`).
 
-### Action scripts
+### Action Scripts
 
 | Script | Role |
 |--------|------|
@@ -132,7 +349,7 @@ Power does **not** pull line 23 low; only the user button does. The daemon decod
 | `run-as-session-user.sh` | Run GUI commands as the logged-in desktop user (`loginctl` + `/run/user` fallback, `runuser` / `su`) |
 | `power-menu.sh` | DE-aware power menu (GNOME, XFCE, Pi OS `pishutdown`; KDE/MATE/LXQt fallbacks) |
 
-### Power menu
+### Power Menu
 
 Power short press runs `power-short.sh` → `run-as-session-user.sh` → `power-menu.sh` in the active graphical session.
 
@@ -161,16 +378,17 @@ sudo bash /etc/pibrick/power-short.sh
 
 ---
 
-## Sysfs interfaces (quick reference)
+## Sysfs Interfaces (Quick Reference)
 
 | Node | Purpose |
 |------|---------|
 | `/sys/class/backlight/pibrick-backlight/brightness` | Backlight 0–1023 |
 | `…/pibrick_display_enable` (under DSI device) | Display on/off (`0` / `1`) |
 | `…/color_profile` | `natural`, `vivid`, `srgb`, `warm`, `cool`, `night`, `soft` (9203 only) |
-| `/sys/class/power_supply/battery/` | Capacity, voltage, charging state (BQ25895 driver) |
+| `/sys/class/power_supply/battery/` | Capacity, voltage, charging state (BQ25895 driver + INA228) |
+| `/sys/class/power_supply/battery/ina228_*` | INA228 precise measurements |
 
-### Display settings menu
+### Display Settings Menu
 
 ```bash
 pibrick-display-settings
@@ -184,7 +402,7 @@ Interactive menu for:
 Refresh-rate backend is chosen automatically:
 
 | Desktop | Backend | Status |
-|---------|---------|--------|
+|---------|--------|--------|
 | **GNOME Wayland** (48) | `tools/gnome-display-rate.py` via `org.gnome.Mutter.DisplayConfig` (`python3-dbus`, else `gdbus`) | Tested |
 | **Pi OS / labwc** | `wlr-randr` (rate embedded in mode, e.g. `1080x1240@90Hz`) | Supported |
 | **XFCE / X11** | `xrandr` (current rate marked with `*`) | Supported |
@@ -217,7 +435,7 @@ Dependencies: `python3-gi`, `python3-dbus` (installed by `setup-desktop.sh` when
 
 ---
 
-## Touch troubleshooting
+## Touch Troubleshooting
 
 Touch is driven by `hyn_ts` and follows panel power via the mainline `drm_panel_follower` API.
 
@@ -250,7 +468,7 @@ If the panel never registers a follower (older kernel without `CONFIG_DRM_PANEL`
 
 ---
 
-## Customizing buttons
+## Customizing Buttons
 
 Edit scripts under `/etc/pibrick/` (copied from `button-service/etc/pibrick/`):
 
@@ -272,7 +490,7 @@ sudo /usr/local/bin/pibrickbtn --test
 
 ---
 
-## Legacy panels
+## Legacy Panels
 
 **9202**, **5.48 inch** (`548`), and **5 inch** (`5inch`) drivers and matching DTS overlays live alongside the default **9203** sources. Select the panel during `install.sh` or with `PANEL=`; the choice is saved to `/etc/pibrick.panel`.
 
@@ -282,4 +500,4 @@ Note: the **548** overlay uses an FocalTech touch controller (`edt-ft5406`); the
 
 ## Credits
 
-Display, touch, and battery kernel code originates from **Ahmad Amarullah** ([amarullz.com](https://amarullz.com)). The panel selection, kernel 6.18 modernization, touch panel-follower port, battery fuel-gauge extensions, button service, desktop indicator, and PocketCM5-specific fixes in this tree are community maintenance on top of those originals.
+Display, touch, and battery kernel code originates from **Ahmad Amarullah** ([amarullz.com](https://amarullz.com)). The panel selection, kernel 6.18 modernization, touch panel-follower port, INA228 integration, battery calibration system, button service, desktop indicator, and PocketCM5-specific fixes in this tree are community maintenance on top of those originals.
