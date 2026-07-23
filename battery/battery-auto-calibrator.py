@@ -338,7 +338,17 @@ def generate_c_header(table, stats):
 
 
 def save_calibration_status(stats, calibrated_table, confidence, confidence_threshold=None):
-    """Save calibration status and suggested table."""
+    """Save calibration status and suggested table.
+
+    The status JSON is always overwritten (it's cheap and reflects "the
+    latest analysis"). The suggested_ocv_table.h, however, is the actual
+    artifact we'd feed into --apply, so we only overwrite it when the new
+    analysis clears the confidence threshold — otherwise a fresh, low-
+    confidence run would clobber a previously-good table. The apply
+    path is gated on `ready_for_apply` regardless, so this is belt-and-
+    suspenders, but it keeps the .h file trustworthy as a "best known
+    calibration" even when run mid-cycle.
+    """
     if confidence_threshold is None:
         confidence_threshold = CONFIDENCE_THRESHOLD
     status = {
@@ -365,7 +375,9 @@ def save_calibration_status(stats, calibrated_table, confidence, confidence_thre
         "version": "1.1"
     }, indent=2))
 
-    if calibrated_table:
+    # Only overwrite the .h file if the new analysis meets the threshold.
+    # See docstring above for the rationale.
+    if calibrated_table and confidence >= confidence_threshold:
         header = generate_c_header(calibrated_table, stats)
         OCV_TABLE_FILE.write_text(header)
 
