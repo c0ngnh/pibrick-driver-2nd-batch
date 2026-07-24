@@ -78,8 +78,8 @@ INSTALL_CALIBRATION=
 INSTALL_UPower=
 INSTALL_BUTTON=
 INSTALL_AUTOROTATION=         # MMA8451Q accelerometer-based screen rotation
-INSTALL_KDE_DESKTOP=          # Enable SDDM + graphical.target (KDE Plasma prerequisite)
-INSTALL_PLASMA_MOBILE=       # KDE Plasma Mobile KWin fix (requires kde-desktop)
+INSTALL_KDE_MOBILE_DESKTOP=  # Enable SDDM + graphical.target (KDE Plasma prerequisite)
+INSTALL_PLASMA_MOBILE=       # KDE Plasma Mobile KWin fix (requires kde-mobile-desktop)
 INSTALL_EXPLICIT=
 
 # ── Calibration functions (must be defined before use) ──────────────────────────
@@ -344,7 +344,7 @@ ${BOLD}Battery Components:${RESET}
 
 ${BOLD}Other Components:${RESET}
   upower           UPower KDE fix (show Charging state)
-  kde-desktop      Enable SDDM + graphical.target (prerequisite for Plasma fixes)
+  kde-mobile-desktop      Enable SDDM + graphical.target (prerequisite for Plasma fixes)
   button           Button service (pibrickbtn over libgpiod)
   autorotation     Autorotation service (MMA8451Q accelerometer)
 
@@ -354,7 +354,7 @@ ${BOLD}All Components:${RESET}
 ${BOLD}Uninstall (requires root, prompts for typed YES):${RESET}
   $0 --uninstall <component[,component...]>    # Remove one or more components
   $0 --uninstall all                            # Remove everything pibrick-tools installed
-  Components: display, battery, calibration, upower, kde-desktop, button, autorotation, wrapper
+  Components: display, battery, calibration, upower, kde-mobile-desktop, button, autorotation, wrapper
 
 ${BOLD}Options:${RESET}
   --apply-calibration       Apply calibrated OCV table to installed driver
@@ -371,7 +371,7 @@ ${BOLD}Options:${RESET}
                                 --force            Bypass safety checks (coulomb_uah)
                                 --show             Show all current values
                                 --list             List all parameters
-  --install kde-desktop     Enable SDDM + graphical.target (run before upower / plasma-mobile-black-recent-fix fixes)
+  --install kde-mobile-desktop     Enable SDDM + graphical.target (run before upower / plasma-mobile-black-recent-fix fixes)
   --install autorotation    Install autorotation service (MMA8451Q accelerometer)
   --enable-autorotation     Enable and start autorotation service
   --disable-autorotation    Stop and disable autorotation service
@@ -401,7 +401,7 @@ ${BOLD}Examples:${RESET}
   $0 --autorotation-lock       # Lock to normal orientation
   $0 --autorotation-lock left  # Lock to landscape-left
   $0 --autorotation-unlock     # Resume auto-rotation
-  $0 --install kde-desktop     # Enable SDDM + graphical.target (KDE Plasma prerequisite)
+  $0 --install kde-mobile-desktop     # Enable SDDM + graphical.target (KDE Plasma prerequisite)
 
 ${BOLD}Environment:${RESET}
   PANEL=9203  Select panel (9203, 9202, 548, 5inch)
@@ -440,7 +440,7 @@ do_uninstall() {
 		battery)    { lsmod 2>/dev/null | grep -q bq25890_battery || [ ! -f /etc/modprobe.d/pibrick-battery.conf ]; } && missing="$missing battery" ;;
 		calibration) [ ! -f /etc/systemd/system/pibrick-battery-calibration.service ] && missing="$missing calibration" ;;
 		upower)     [ ! -f /usr/libexec/upowerd ] && missing="$missing upower" ;;
-		kde-desktop)  [ ! -d "$HOME/.config/systemd/user/plasma-kwin_wayland.service.d/pi-kwin-recent-fix.conf" ] && missing="$missing kde-desktop" ;;
+		kde-mobile-desktop)  [ ! -f "$HOME/.config/systemd/user/plasma-kwin_wayland.service.d/pi-kwin-recent-fix.conf" ] && missing="$missing kde-mobile-desktop" ;;
 		button)     { [ ! -f /usr/local/bin/pibrickbtn ] && [ ! -f /etc/systemd/system/pibrickbtn.service ]; } && missing="$missing button" ;;
 		autorotation) { [ ! -f /usr/local/bin/pibrick-autorotation.sh ] && [ ! -f /etc/systemd/system/pibrick-autorotation.service ]; } && missing="$missing autorotation" ;;
 		wrapper)    [ ! -f /usr/local/bin/pibrick-tools ] && missing="$missing wrapper" ;;
@@ -480,7 +480,7 @@ do_uninstall() {
 	echo
 
 	# Uninstall in dependency order regardless of the order the user typed.
-	local ordered="calibration battery display upower kde-desktop button autorotation wrapper"
+	local ordered="calibration battery display upower kde-mobile-desktop button autorotation wrapper"
 	for comp in $ordered; do
 		case " $targets " in
 		*" $comp "*)
@@ -768,8 +768,8 @@ while [ $# -gt 0 ]; do
 			INSTALL_UPower=1
 			INSTALL_EXPLICIT=1
 			;;
-		kde-desktop)
-			INSTALL_KDE_DESKTOP=1
+		kde-mobile-desktop)
+			INSTALL_KDE_MOBILE_DESKTOP=1
 			INSTALL_EXPLICIT=1
 			;;
 		button)
@@ -804,7 +804,7 @@ while [ $# -gt 0 ]; do
 		all)
 			UNINSTALL_TARGETS="$UNINSTALL_TARGETS display battery calibration upower button autorotation plasma-mobile-black-recent-fix wrapper"
 			;;
-		display|battery|calibration|upower|kde-desktop|button|autorotation|plasma-mobile-black-recent-fix|wrapper)
+		display|battery|calibration|upower|kde-mobile-desktop|button|autorotation|plasma-mobile-black-recent-fix|wrapper)
 			UNINSTALL_TARGETS="$UNINSTALL_TARGETS $comp"
 				;;
 			*)
@@ -1065,7 +1065,7 @@ kde_packages_available() {
 	if dpkg -l kde-standard 2>/dev/null | grep -q "^ii "; then
 		return 0
 	fi
-	if dpkg -l plasma-mobile-black-recent-fix 2>/dev/null | grep -q "^ii "; then
+	if dpkg -l plasma-mobile 2>/dev/null | grep -q "^ii "; then
 		return 0
 	fi
 	return 1
@@ -1081,7 +1081,7 @@ fix_upower() {
 	# Require KDE desktop (UPower belongs to the desktop session, not system services).
 	if ! kde_packages_available; then
 		error "KDE Plasma packages not installed."
-		echo "  Run \`sudo pibrick-tools --install kde-desktop\` first to install KDE Plasma."
+		echo "  Run \`sudo pibrick-tools --install kde-mobile-desktop\` first to install KDE Plasma."
 		return 1
 	fi
 
@@ -1213,14 +1213,14 @@ restart_upower() {
 # Writes a systemd user drop-in for plasma-kwin_wayland.service that forces
 # OpenGL ES 2.0 (KWIN_COMPOSE=O2ES) to fix the black Recent / task-switcher
 # on Raspberry Pi V3D driver.
-# Requires KDE desktop to be installed first (--install kde-desktop).
+# Requires KDE desktop to be installed first (--install kde-mobile-desktop).
 # https://bugs.kde.org/show_bug.cgi?id=519099
 fix_plasma_mobile() {
 	info "Applying Plasma Mobile KWin fix..."
 
 	if ! kde_packages_available; then
 		error "KDE Plasma not installed."
-		echo "  Run \`sudo pibrick-tools --install kde-desktop\` first."
+		echo "  Run \`sudo pibrick-tools --install kde-mobile-desktop\` first."
 		echo "  This will install kde-standard + sddm and enable the graphical target."
 		return 1
 	fi
@@ -1240,11 +1240,11 @@ fix_plasma_mobile() {
 	[ -z "$desk_user" ] && { error "Cannot determine desktop user."; return 1; }
 
 	# ── Re-apply the KWin drop-in ───────────────────────────────────────────────
-	# The KWin drop-in is written by install_kde_desktop() as part of
-	# `pibrick-tools --install kde-desktop`. That step also handles SDDM
+	# The KWin drop-in is written by install_kde_mobile_desktop() as part of
+	# `pibrick-tools --install kde-mobile-desktop`. That step also handles SDDM
 	# and graphical.target. `fix_plasma_mobile()` is now only the "KWin fix"
 	# guard — it checks KDE packages are present (done above) and then
-	# re-applies the drop-in so running --install kde-desktop followed by
+	# re-applies the drop-in so running --install kde-mobile-desktop followed by
 	# --install plasma-mobile-black-recent-fix also works.
 
 	local zink_flag="${ZINK_FALLBACK:-0}"
@@ -1277,7 +1277,7 @@ ZINKFIX
 		rm -f "$zink_conf"
 		cat > "$zink_disabled" << 'ZINKDIS'
 # Optional fallback if OpenGL ES alone is not enough (higher CPU usage).
-# Enable with: ZINK_FALLBACK=1 sudo pibrick-tools --install kde-desktop
+# Enable with: ZINK_FALLBACK=1 sudo pibrick-tools --install kde-mobile-desktop
 [Service]
 Environment=MESA_LOADER_DRIVER_OVERRIDE=zink
 ZINKDIS
@@ -1293,7 +1293,7 @@ ZINKDIS
 # ── Install KDE desktop ─────────────────────────────────────────────────────────
 # Detects installed packages, prompts to install via apt, enables SDDM and
 # graphical.target, then applies the Plasma Mobile KWin fix.
-install_kde_desktop() {
+install_kde_mobile_desktop() {
 	info "Setting up KDE desktop..."
 
 	# ── Derive the desktop user ────────────────────────────────────────────────
@@ -1319,11 +1319,11 @@ install_kde_desktop() {
 	local have_kde_standard=0
 	local have_sddm=0
 
-	if dpkg -l plasma-mobile-black-recent-fix 2>/dev/null | grep -q "^ii "; then
+	if dpkg -l plasma-mobile 2>/dev/null | grep -q "^ii "; then
 		have_plasma_mobile=1
-		info "plasma-mobile-black-recent-fix package: installed"
+		info "plasma-mobile package: installed"
 	else
-		info "plasma-mobile-black-recent-fix package: not installed"
+		info "plasma-mobile package: not installed"
 	fi
 
 	if dpkg -l kde-standard 2>/dev/null | grep -q "^ii "; then
@@ -1344,7 +1344,7 @@ install_kde_desktop() {
 	if [ "$have_plasma_mobile" = "0" ] || [ "$have_kde_standard" = "0" ] || [ "$have_sddm" = "0" ]; then
 		echo
 		echo -e "${BOLD}Missing packages detected:${RESET}"
-		[ "$have_plasma_mobile" = "0" ] && echo "  - plasma-mobile-black-recent-fix"
+		[ "$have_plasma_mobile" = "0" ] && echo "  - plasma-mobile (apt package)"
 		[ "$have_kde_standard" = "0" ] && echo "  - kde-standard"
 		[ "$have_sddm" = "0" ] && echo "  - sddm"
 		echo
@@ -1358,7 +1358,7 @@ install_kde_desktop() {
 			case "${pkgs_reply,,}" in
 				n|no)
 					info "Skipping package installation."
-					echo "Install manually, then re-run: sudo pibrick-tools --install kde-desktop"
+					echo "Install manually, then re-run: sudo pibrick-tools --install kde-mobile-desktop"
 					return 1
 					;;
 				*)
@@ -1403,7 +1403,7 @@ install_kde_desktop() {
 	fi
 
 	# ── Write the KWin drop-in (fix_plasma_mobile does the writing) ────────────
-	# Move zink_flag here since the drop-in writing moved to kde-desktop setup.
+	# Move zink_flag here since the drop-in writing moved to kde-mobile-desktop setup.
 	local zink_flag="${ZINK_FALLBACK:-0}"
 
 	local drop_in_dir="$desk_home/.config/systemd/user/plasma-kwin_wayland.service.d"
@@ -1435,7 +1435,7 @@ ZINKFIX
 		rm -f "$zink_conf"
 		cat > "$zink_disabled" << 'ZINKDIS'
 # Optional fallback if OpenGL ES alone is not enough (higher CPU usage).
-# Enable with: ZINK_FALLBACK=1 sudo pibrick-tools --install kde-desktop
+# Enable with: ZINK_FALLBACK=1 sudo pibrick-tools --install kde-mobile-desktop
 [Service]
 Environment=MESA_LOADER_DRIVER_OVERRIDE=zink
 ZINKDIS
@@ -1466,7 +1466,7 @@ install_plasma_packages() {
 
 	# Build the install list
 	local to_install=""
-	[ "$have_pm" = "0" ] && to_install="$to_install plasma-mobile-black-recent-fix"
+	[ "$have_pm" = "0" ] && to_install="$to_install plasma-mobile"
 	[ "$have_ks" = "0" ] && to_install="$to_install kde-standard"
 	[ "$have_sd" = "0" ] && to_install="$to_install sddm"
 
@@ -1485,7 +1485,7 @@ install_plasma_packages() {
 	success "Packages installed: $to_install"
 }
 
-uninstall_kde_desktop() {
+uninstall_kde_mobile_desktop() {
 	info "Uninstalling KDE desktop setup..."
 
 	# Remove the KWin drop-in
@@ -2034,7 +2034,7 @@ main() {
 	[ -n "$INSTALL_BATTERY_ORIGINAL" ] && install_battery_original
 	[ -n "$INSTALL_CALIBRATION" ] && install_calibration
 	[ -n "$INSTALL_UPower" ] && fix_upower
-	[ -n "$INSTALL_KDE_DESKTOP" ] && install_kde_desktop
+	[ -n "$INSTALL_KDE_MOBILE_DESKTOP" ] && install_kde_mobile_desktop
 	[ -n "$INSTALL_PLASMA_MOBILE" ] && fix_plasma_mobile
 	[ -n "$INSTALL_BUTTON" ] && install_button
 	[ -n "$INSTALL_AUTOROTATION" ] && install_autorotation
