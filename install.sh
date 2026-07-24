@@ -78,6 +78,7 @@ INSTALL_CALIBRATION=
 INSTALL_UPower=
 INSTALL_BUTTON=
 INSTALL_AUTOROTATION=         # MMA8451Q accelerometer-based screen rotation
+INSTALL_PLASMA_MOBILE=       # KDE Plasma Mobile recent/task-switcher black-screen fix
 INSTALL_EXPLICIT=
 
 # ── Calibration functions (must be defined before use) ──────────────────────────
@@ -342,16 +343,17 @@ ${BOLD}Battery Components:${RESET}
 
 ${BOLD}Other Components:${RESET}
   upower           UPower KDE fix (show Charging state)
+  plasma-mobile    Plasma Mobile KWin fix (black Recent/switcher on Pi V3D)
   button           Button service (pibrickbtn over libgpiod)
   autorotation     Autorotation service (MMA8451Q accelerometer)
 
 ${BOLD}All Components:${RESET}
-  all              Install display + battery-new + calibration + upower + button + autorotation
+  all              Install display + battery-new + calibration + upower + plasma-mobile + button + autorotation
 
 ${BOLD}Uninstall (requires root, prompts for typed YES):${RESET}
   $0 --uninstall <component[,component...]>    # Remove one or more components
   $0 --uninstall all                            # Remove everything pibrick-tools installed
-  Components: display, battery, calibration, upower, button, autorotation, wrapper
+  Components: display, battery, calibration, upower, plasma-mobile, button, autorotation, wrapper
 
 ${BOLD}Options:${RESET}
   --apply-calibration       Apply calibrated OCV table to installed driver
@@ -397,6 +399,7 @@ ${BOLD}Examples:${RESET}
   $0 --autorotation-lock       # Lock to normal orientation
   $0 --autorotation-lock left  # Lock to landscape-left
   $0 --autorotation-unlock     # Resume auto-rotation
+  ZINK_FALLBACK=1 $0 --install plasma-mobile   # With Zink GPU fallback
 
 ${BOLD}Environment:${RESET}
   PANEL=9203  Select panel (9203, 9202, 548, 5inch)
@@ -474,7 +477,7 @@ do_uninstall() {
 	echo
 
 	# Uninstall in dependency order regardless of the order the user typed.
-	local ordered="calibration battery display upower autorotation button wrapper"
+	local ordered="calibration battery display upower autorotation plasma-mobile button wrapper"
 	for comp in $ordered; do
 		case " $targets " in
 		*" $comp "*)
@@ -734,6 +737,7 @@ while [ $# -gt 0 ]; do
 			INSTALL_UPower=1
 			INSTALL_BUTTON=1
 			INSTALL_AUTOROTATION=1
+			INSTALL_PLASMA_MOBILE=1
 			INSTALL_EXPLICIT=1
 			;;
 			none)
@@ -772,6 +776,10 @@ while [ $# -gt 0 ]; do
 			INSTALL_AUTOROTATION=1
 			INSTALL_EXPLICIT=1
 			;;
+		plasma-mobile)
+			INSTALL_PLASMA_MOBILE=1
+			INSTALL_EXPLICIT=1
+			;;
 		*)
 			error "Unknown component: $comp"
 			usage
@@ -790,9 +798,9 @@ while [ $# -gt 0 ]; do
 		for comp in $(echo "$1" | tr ',' ' '); do
 			case "$comp" in
 		all)
-			UNINSTALL_TARGETS="$UNINSTALL_TARGETS display battery calibration upower button autorotation wrapper"
+			UNINSTALL_TARGETS="$UNINSTALL_TARGETS display battery calibration upower button autorotation plasma-mobile wrapper"
 			;;
-		display|battery|calibration|upower|button|autorotation|wrapper)
+		display|battery|calibration|upower|button|autorotation|plasma-mobile|wrapper)
 			UNINSTALL_TARGETS="$UNINSTALL_TARGETS $comp"
 				;;
 			*)
@@ -982,10 +990,11 @@ choose_components() {
 
 	prompt_yesno "Install Calibration Tools (logger + auto-calibrator)" INSTALL_CALIBRATION
 	prompt_yesno "Apply UPower KDE Fix (show Charging state)" INSTALL_UPower
+	prompt_yesno "Apply Plasma Mobile KWin fix (black Recent/switcher)" INSTALL_PLASMA_MOBILE
 	prompt_yesno "Install Button Service (pibrickbtn)" INSTALL_BUTTON
 	prompt_yesno "Install Autorotation Service (MMA8451Q accelerometer)" INSTALL_AUTOROTATION
 
-	if [ -z "${INSTALL_DISPLAY:-}${INSTALL_BATTERY_NEW:-}${INSTALL_BATTERY_ORIGINAL:-}${INSTALL_CALIBRATION:-}${INSTALL_UPower:-}${INSTALL_BUTTON:-}" ]; then
+	if [ -z "${INSTALL_DISPLAY:-}${INSTALL_BATTERY_NEW:-}${INSTALL_BATTERY_ORIGINAL:-}${INSTALL_CALIBRATION:-}${INSTALL_UPower:-}${INSTALL_PLASMA_MOBILE:-}${INSTALL_BUTTON:-}" ]; then
 		error "Nothing selected. Exiting."
 		exit 0
 	fi
@@ -1178,6 +1187,130 @@ restart_upower() {
 	else
 		warn "UPower state doesn't match driver. Reboot may be needed."
 	fi
+}
+
+# ── Plasma Mobile black-screen fix ─────────────────────────────────────────────
+# Installs a systemd user drop-in for plasma-kwin_wayland.service that forces
+# OpenGL ES 2.0 (KWIN_COMPOSE=O2ES) to fix the black Recent / task-switcher
+# on Raspberry Pi V3D driver.  Must run as the desktop user, not root.
+# https://bugs.kde.org/show_bug.cgi?id=519099
+fix_plasma_mobile() {
+	info "Applying Plasma Mobile KWin fix..."
+
+	# Derive the logged-in desktop user.  When the main install.sh runs under
+	# sudo, $SUDO_USER is set and we look up their home; otherwise fall back
+	# to whoever is logged in on the active seat.
+	local desk_user=""
+	if [ -n "${SUDO_USER:-}" ] && [ "$(id -un)" = "root" ]; then
+		desk_user="$SUDO_USER"
+	elif command -v loginctl >/dev/null 2>&1; then
+		desk_user=$(loginctl show-session "$(loginctl | grep -E '^\s*c[0-9]+' | head -1 | awk '{print $1}' 2>/dev/null)" -p User --value 2>/dev/null)
+		desk_user="${desk_user:-$(who | head -1 | awk '{print $1}')}"
+	else
+		desk_user=$(who | head -1 | awk '{print $1}')
+	fi
+
+	if [ -z "$desk_user" ]; then
+		error "Cannot determine desktop user. Run this as the desktop user or provide SUDO_USER."
+		return 1
+	fi
+
+	local desk_home
+	desk_home=$(getent passwd "$desk_user" | cut -d: -f6)
+	desk_home="${desk_home:-/home/$desk_user}"
+
+	# Check kwin-wayland is installed
+	if [ ! -f /usr/lib/systemd/user/plasma-kwin_wayland.service ] \
+		&& [ ! -f /lib/systemd/user/plasma-kwin_wayland.service ]; then
+		warn "plasma-kwin_wayland.service not found — is KDE Plasma installed?"
+		return 0
+	fi
+
+	# Determine whether to enable the Zink fallback flag
+	local zink_flag="${ZINK_FALLBACK:-0}"
+
+	local drop_in_dir="$desk_home/.config/systemd/user/plasma-kwin_wayland.service.d"
+	local fix_conf="$drop_in_dir/pi-kwin-recent-fix.conf"
+	local zink_conf="$drop_in_dir/pi-kwin-zink-fallback.conf"
+	local zink_disabled="$drop_in_dir/pi-kwin-zink-fallback.conf.disabled"
+
+	# Create as the desktop user so systemd picks it up correctly
+	install -d -m 755 "$drop_in_dir"
+
+	# Write the base fix: force OpenGL ES 2.0 via environment variables
+	cat > "$fix_conf" << 'PLASMAFIX'
+[Service]
+# Fix black screen in mobile task switcher / overview on Raspberry Pi (KDE bug 519099)
+Environment=KWIN_DRM_USE_MODIFIERS=0
+Environment=KWIN_COMPOSE=O2ES
+Environment=KWIN_PERSISTENT_VBO=1
+Environment=KWIN_RENDER_BACKEND=gles
+Environment=KWIN_OPENGL_INTERFACE=egl
+PLASMAFIX
+
+	# Write the Zink fallback as a separate drop-in so it can be toggled
+	# independently of the base fix.
+	if [ "$zink_flag" = "1" ]; then
+		cat > "$zink_conf" << 'ZINKFIX'
+[Service]
+# Fallback when OpenGL ES alone is not enough (higher CPU usage).
+Environment=MESA_LOADER_DRIVER_OVERRIDE=zink
+ZINKFIX
+		rm -f "$zink_disabled"
+		info "Zink fallback enabled (software Vulkan via Mesa)."
+	else
+		rm -f "$zink_conf"
+		cat > "$zink_disabled" << 'ZINKDIS'
+# Optional fallback if OpenGL ES alone is not enough (higher CPU usage).
+# Enable with: ZINK_FALLBACK=1 sudo pibrick-tools --install plasma-mobile
+[Service]
+Environment=MESA_LOADER_DRIVER_OVERRIDE=zink
+ZINKDIS
+		info "Zink fallback left disabled (set ZINK_FALLBACK=1 to enable)."
+	fi
+
+	# Reload the user's systemd instance as the desktop user
+	su - "$desk_user" -c 'systemctl --user daemon-reload' 2>/dev/null || true
+
+	success "Plasma Mobile KWin fix installed."
+	info "Log out and back in (or reboot) for changes to take effect."
+	info "Verify after login:"
+	info "  qdbus6 org.kde.KWin /KWin org.kde.KWin.supportInformation | grep -i compositing"
+}
+
+uninstall_plasma_mobile() {
+	info "Uninstalling Plasma Mobile KWin fix..."
+
+	local desk_user=""
+	if [ -n "${SUDO_USER:-}" ] && [ "$(id -un)" = "root" ]; then
+		desk_user="$SUDO_USER"
+	elif command -v loginctl >/dev/null 2>&1; then
+		desk_user=$(loginctl show-session "$(loginctl | grep -E '^\s*c[0-9]+' | head -1 | awk '{print $1}' 2>/dev/null)" -p User --value 2>/dev/null)
+		desk_user="${desk_user:-$(who | head -1 | awk '{print $1}')}"
+	else
+		desk_user=$(who | head -1 | awk '{print $1}')
+	fi
+
+	if [ -z "$desk_user" ]; then
+		error "Cannot determine desktop user."
+		return 1
+	fi
+
+	local desk_home
+	desk_home=$(getent passwd "$desk_user" | cut -d: -f6)
+	desk_home="${desk_home:-/home/$desk_user}"
+
+	local drop_in_dir="$desk_home/.config/systemd/user/plasma-kwin_wayland.service.d"
+
+	rm -f "$drop_in_dir/pi-kwin-recent-fix.conf"
+	rm -f "$drop_in_dir/pi-kwin-zink-fallback.conf"
+	rm -f "$drop_in_dir/pi-kwin-zink-fallback.conf.disabled"
+	rmdir "$drop_in_dir" 2>/dev/null || true
+
+	su - "$desk_user" -c 'systemctl --user daemon-reload' 2>/dev/null || true
+
+	success "Plasma Mobile KWin fix removed."
+	info "Log out and back in for changes to take effect."
 }
 
 # ── Copy source tree ────────────────────────────────────────────────────────────
@@ -1647,6 +1780,7 @@ main() {
 	[ -n "$INSTALL_BATTERY_ORIGINAL" ] && install_battery_original
 	[ -n "$INSTALL_CALIBRATION" ] && install_calibration
 	[ -n "$INSTALL_UPower" ] && fix_upower
+	[ -n "$INSTALL_PLASMA_MOBILE" ] && fix_plasma_mobile
 	[ -n "$INSTALL_BUTTON" ] && install_button
 	[ -n "$INSTALL_AUTOROTATION" ] && install_autorotation
 
@@ -1670,6 +1804,7 @@ main() {
 	[ -n "$INSTALL_BATTERY_ORIGINAL" ] && echo "  - Battery driver (bq25895 + INA228 auto-detect)"
 	[ -n "$INSTALL_CALIBRATION" ] && echo "  - Calibration tools (logger + auto-calibrator)"
 	[ -n "$INSTALL_UPower" ] && echo "  - UPower KDE fix"
+	[ -n "$INSTALL_PLASMA_MOBILE" ] && echo "  - Plasma Mobile KWin fix (black Recent/switcher)"
 	[ -n "$INSTALL_BUTTON" ] && echo "  - Button service"
 	[ -n "$INSTALL_AUTOROTATION" ] && echo "  - Autorotation service (MMA8451Q accelerometer)"
 	echo

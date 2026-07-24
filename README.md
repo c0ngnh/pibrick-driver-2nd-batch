@@ -12,6 +12,7 @@ Kernel modules and user-space helpers for the piBrick CM5 handheld (Raspberry Pi
 | Tools | `tools/` | Display settings menu, GNOME refresh helper, touch reset, OCV calibration |
 | Calibration | `battery/battery-calibration-logger.py`, `battery/battery-auto-calibrator.py` | Automatic battery OCV calibration service |
 | Autorotation | `autorotation-service/` | MMA8451Q accelerometer-based automatic screen rotation |
+| Plasma Mobile | `plasma-mobile/` | KWin OpenGL ES 2.0 fix for black Recent/task-switcher on Pi V3D |
 
 This repository bundles the display, touch, battery, button, and desktop pieces into a single installable tree, targeting **Raspberry Pi OS on kernel 6.18** with **GNOME 48 (Wayland)** or **KDE Plasma Mobile**.
 
@@ -71,6 +72,7 @@ sudo pibrick-tools --install calibration        # Calibration logger + auto-cali
 sudo pibrick-tools --install upower             # UPower KDE charging-state fix
 sudo pibrick-tools --install button             # GPIO button service
 sudo pibrick-tools --install autorotation       # MMA8451Q accelerometer autorotation
+sudo pibrick-tools --install plasma-mobile     # Plasma Mobile KWin black-screen fix
 sudo pibrick-tools --install battery-new,calibration   # Comma-separated, multiple at once
 ```
 
@@ -90,6 +92,7 @@ sudo pibrick-tools --uninstall calibration
 sudo pibrick-tools --uninstall upower
 sudo pibrick-tools --uninstall button
 sudo pibrick-tools --uninstall autorotation
+sudo pibrick-tools --uninstall plasma-mobile
 sudo pibrick-tools --uninstall wrapper
 
 # Remove several components at once (comma-separated, same as --install)
@@ -448,6 +451,7 @@ The new **interactive installer** provides a user-friendly menu for selecting co
 | `--apply-calibration` | Apply calibrated OCV table |
 | `--status-calibration` | Show calibration status |
 | `--check` | Re-analyze CSV → refresh status JSON |
+| `--install plasma-mobile` | Plasma Mobile KWin black-screen fix (Pi V3D) |
 | `--autorotation-lock [n]` | Lock rotation to normal\|left\|right\|inverted |
 | `--autorotation-unlock` | Resume auto-rotation |
 | `--autorotation-status` | Show autorotation service status |
@@ -862,6 +866,66 @@ GPIO test without the daemon:
 sudo systemctl stop pibrickbtn
 sudo /usr/local/bin/pibrickbtn --test
 ```
+
+---
+
+## Plasma Mobile KWin Fix
+
+Fixes black screen when opening Recent / task switcher on KDE Plasma Mobile running on Raspberry Pi (Pi 4/5/500+) with the V3D GPU driver. See [KDE bug 519099](https://bugs.kde.org/show_bug.cgi?id=519099).
+
+### Root Cause
+
+KWin effects (mobiletaskswitcher, overview, tiling) fail when using desktop OpenGL on Pi. The fix forces KWin to use **OpenGL ES 2.0** via `KWIN_COMPOSE=O2ES`.
+
+### Installation
+
+```bash
+sudo pibrick-tools --install plasma-mobile
+# With Zink GPU fallback (higher CPU usage):
+ZINK_FALLBACK=1 sudo pibrick-tools --install plasma-mobile
+```
+
+### What it does
+
+Installs a systemd user drop-in at:
+```
+~/.config/systemd/user/plasma-kwin_wayland.service.d/pi-kwin-recent-fix.conf
+```
+
+With these environment variables:
+
+```
+KWIN_DRM_USE_MODIFIERS=0
+KWIN_COMPOSE=O2ES
+KWIN_PERSISTENT_VBO=1
+KWIN_RENDER_BACKEND=gles
+KWIN_OPENGL_INTERFACE=egl
+```
+
+### After install
+
+Log out and back in (or reboot), then verify:
+
+```bash
+qdbus6 org.kde.KWin /KWin org.kde.KWin.supportInformation | grep -i 'Compositing Type'
+# Expected: Compositing Type: OpenGL ES 2.0
+```
+
+### Uninstall
+
+```bash
+sudo pibrick-tools --uninstall plasma-mobile
+```
+
+### Zink Fallback
+
+If OpenGL ES alone doesn't fix the issue, enable Zink (software Vulkan via Mesa):
+
+```bash
+ZINK_FALLBACK=1 sudo pibrick-tools --install plasma-mobile
+```
+
+This adds `MESA_LOADER_DRIVER_OVERRIDE=zink` to a second drop-in. It has higher CPU usage.
 
 ---
 

@@ -26,7 +26,7 @@ _pibrick_tools() {
 	opts_install=(
 		"all" "display" "display-new" "display-old"
 		"battery" "battery-new" "battery-original"
-		"calibration" "upower" "button" "autorotation"
+		"calibration" "upower" "plasma-mobile" "button" "autorotation"
 	)
 
 	# Sub-params you can pass to --battery-config <param>
