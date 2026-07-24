@@ -1567,8 +1567,13 @@ install_battery() {
 	# path baked in at install time) can find it. The file in $PIBRICK_LIB
 	# is the source-of-truth copy that is pushed via git.
 	if [ -f "$PIBRICK_LIB/battery/pibrick-battery-load-soc.sh" ]; then
-		install -m 755 "$PIBRICK_LIB/battery/pibrick-battery-load-soc.sh" \
-			"$PIBRICK_TOOLS_DIR/pibrick-battery-load-soc.sh"
+		# Skip if source==dest (PIBRICK_TOOLS_DIR == PIBRICK_LIB/battery)
+		if [ "$PIBRICK_LIB/battery/pibrick-battery-load-soc.sh" -ef "$PIBRICK_TOOLS_DIR/pibrick-battery-load-soc.sh" ]; then
+			: # already in place
+		else
+			install -m 755 "$PIBRICK_LIB/battery/pibrick-battery-load-soc.sh" \
+				"$PIBRICK_TOOLS_DIR/pibrick-battery-load-soc.sh"
+		fi
 	fi
 
 	if [ -f "$PIBRICK_LIB/battery/pibrick-battery-load-soc.service" ]; then
@@ -1651,8 +1656,13 @@ install_battery_original() {
 	# path baked in at install time) can find it. The file in $PIBRICK_LIB
 	# is the source-of-truth copy that is pushed via git.
 	if [ -f "$PIBRICK_LIB/battery/pibrick-battery-load-soc.sh" ]; then
-		install -m 755 "$PIBRICK_LIB/battery/pibrick-battery-load-soc.sh" \
-			"$PIBRICK_TOOLS_DIR/pibrick-battery-load-soc.sh"
+		# Skip if source==dest (PIBRICK_TOOLS_DIR == PIBRICK_LIB/battery)
+		if [ "$PIBRICK_LIB/battery/pibrick-battery-load-soc.sh" -ef "$PIBRICK_TOOLS_DIR/pibrick-battery-load-soc.sh" ]; then
+			: # already in place
+		else
+			install -m 755 "$PIBRICK_LIB/battery/pibrick-battery-load-soc.sh" \
+				"$PIBRICK_TOOLS_DIR/pibrick-battery-load-soc.sh"
+		fi
 	fi
 
 	if [ -f "$PIBRICK_LIB/battery/pibrick-battery-load-soc.service" ]; then
