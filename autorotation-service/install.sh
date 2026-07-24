@@ -299,11 +299,17 @@ export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user
 export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-wayland}"
 exec kscreen-doctor "$@"
 HELPEREOF
-install -m 755 /usr/local/bin/pibrick-kscreen-helper.sh
+install -m 755 /usr/local/bin/pibrick-kscreen-helper.sh 2>/dev/null || chmod +x /usr/local/bin/pibrick-kscreen-helper.sh
 
-# For KDE Plasma Mobile, create autostart entry (optional)
-if [ -d "$HOME/.config/autostart" ] || mkdir -p "$HOME/.config/autostart" 2>/dev/null; then
-    cat > "$HOME/.config/autostart/pibrick-autorotation.desktop" << 'AUTOSTARTEOF'
+# For KDE Plasma Mobile, create autostart entry (optional).
+# Resolve the real desktop user so the .desktop file lands in the correct home.
+autostart_home="/root"
+if [ -n "${SUDO_USER:-}" ] && [ "$(id -un)" = "root" ]; then
+	autostart_home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+	autostart_home="${autostart_home:-/root}"
+fi
+if mkdir -p "$autostart_home/.config/autostart" 2>/dev/null; then
+    cat > "$autostart_home/.config/autostart/pibrick-autorotation.desktop" << 'AUTOSTARTEOF'
 [Desktop Entry]
 Type=Application
 Name=piBrick Autorotation

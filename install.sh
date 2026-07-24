@@ -858,7 +858,7 @@ while [ $# -gt 0 ]; do
 		success "Rotation locked to: $ORIENT"
 		# Apply immediately if service is running
 		if systemctl is-active --quiet pibrick-autorotation.service 2>/dev/null; then
-			sudo /usr/local/bin/pibrick-autorotation.sh --status >/dev/null 2>&1 || true
+			sudo -n /usr/local/bin/pibrick-autorotation.sh --status >/dev/null 2>&1 || true
 		fi
 		exit 0
 		;;
@@ -869,7 +869,7 @@ while [ $# -gt 0 ]; do
 		exit 0
 		;;
 	--autorotation-status)
-		/usr/lib/pibrick/autorotation/pibrick-autorotation.sh --status 2>/dev/null || {
+		/usr/local/bin/pibrick-autorotation.sh --status 2>/dev/null || {
 			error "Autorotation service not installed or not found"
 			exit 1
 		}
@@ -1076,6 +1076,19 @@ kde_packages_available() {
 # so any `cp` over it returns ETXTBSY. The whole patch must run with the daemon
 # stopped; `restart_upower()` re-launches it at the end.
 fix_upower() {
+	# Require root — this function needs to stop/restart upowerd and write system files.
+	# If we got here via `nohup bash install.sh --install upower` (without outer sudo),
+	# re-invoke ourselves under sudo. The `-n` flag ensures we fail fast instead of
+	# prompting for a password in non-interactive contexts.
+	if [ "$(id -u)" != "0" ]; then
+		if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then
+			exec sudo -n bash "$0" "$@"
+		fi
+		error "UPower fix requires root."
+		error "Re-run: sudo $0 $*" >&2
+		return 1
+	fi
+
 	info "Applying UPower KDE fix..."
 
 	# Require KDE desktop (UPower belongs to the desktop session, not system services).
@@ -1101,7 +1114,8 @@ fix_upower() {
 
 	info "Patching UPower (rebuild from source)..."
 	local UPVER
-	UPVER=$(upower --version 2>/dev/null | awk '{print $NF}' || echo "unknown")
+	UPVER=$(upower --version 2>/dev/null | grep '^UPower daemon' | awk '{print $NF}' | tr -d '\n')
+	[ -z "$UPVER" ] && UPVER="unknown"
 	info "UPower daemon version: $UPVER"
 
 	local UP_SRC=/tmp/upower-pibrick-src
@@ -1109,15 +1123,15 @@ fix_upower() {
 		info "Cloning UPower source (tag v$UPVER) — this may take a few minutes..."
 		rm -rf "$UP_SRC"
 		# Capture stderr (progress) to filter out noise; exit code is git's.
-		{ git clone --depth=1 --branch="v$UPVER" \
+		{ sudo git clone --depth=1 --branch="v$UPVER" \
 			https://gitlab.freedesktop.org/upower/upower.git "$UP_SRC" \
-			2>&1 | grep -vE '^(Cloning|Receiving|Resolving|Updating|Checking|Enumerating)'; } \
+			2>&1 | grep -vE '^(Cloning|Receiving|Resolving|Updating|Checking|Enumerating|warning:|fatal:|error:)'; } \
 		&& git_ok=1 || git_ok=0
 		if [ "$git_ok" -eq 0 ]; then
 			info "Tag v$UPVER not found — trying main branch..."
-			{ git clone --depth=1 \
+			{ sudo git clone --depth=1 \
 				https://gitlab.freedesktop.org/upower/upower.git "$UP_SRC" \
-				2>&1 | grep -vE '^(Cloning|Receiving|Resolving|Updating|Checking|Enumerating)'; } \
+				2>&1 | grep -vE '^(Cloning|Receiving|Resolving|Updating|Checking|Enumerating|warning:|fatal:|error:)'; } \
 			&& git_ok=1 || git_ok=0
 		fi
 		if [ "$git_ok" -eq 0 ]; then
@@ -1143,29 +1157,63 @@ new = '''	/* piBrick: disabled — BQ25895 follows power_supply convention (nega
 	    0 && /* DISABLED: was: current_now < 0 */
 	    g_udev_device_get_sysfs_attr_as_double_uncached (native, \"current_now\") < 0.0)
 		values.state = UP_DEVICE_STATE_DISCHARGING;'''
-if old in content:
+	if old in content:
     content = content.replace(old, new)
     open('$UP_SRC/src/linux/up-device-supply-battery.c', 'w').write(content)
     print('Source patched: disabled current_now override')
 else:
-    print('Source pattern not found — trying alternate pattern...')
-    content = content.replace(
-        'g_udev_device_get_sysfs_attr_as_double_uncached (native, \"current_now\") < 0.0)',
-        '0 && /* DISABLED */ g_udev_device_get_sysfs_attr_as_double_uncached (native, \"current_now\") < 0.0)'
-    )
-    open('$UP_SRC/src/linux/up-device-supply-battery.c', 'w').write(content)
-    print('Source patched via sed replacement')
+    print('Primary pattern not found — source may already be modified or differs.')
+    print('UPower may not need patching on this version.')
 "
 
 	info "Building UPower..."
 	cd "$UP_SRC"
+
+	# Install build dependencies required by meson/ninja.
+	info "Installing UPower build dependencies..."
+	if ! apt-get install -y \
+			libglib2.0-dev \
+			libgcrypt20-dev \
+			libdbus-1-dev \
+			libgudev-1.0-dev \
+			libpolkit-gobject-1-dev \
+			pkg-config \
+			gir1.2-gudev-1.0 \
+			xsltproc \
+			docbook-xsl \
+			gtk-doc-tools \
+			gettext 2>/dev/null; then
+		warn "Could not install all build deps — continuing anyway"
+	fi
+
+	# Remove any stale build dir (may be owned by non-root from a previous run).
+	# Recreate as root so meson/ninja can write without permission errors.
+	rm -rf build
 	mkdir -p build
+
+	# Patch udev_dir into libudev.pc (Debian ships udev_dir as a shell variable,
+	# not a pkg-config variable, but UPower's meson.build expects pkg-config access).
+	local pcfile=/usr/lib/aarch64-linux-gnu/pkgconfig/libudev.pc
+	if [ -f "$pcfile" ] && ! grep -q "^udev_dir=" "$pcfile"; then
+		sudo sed -i '/^prefix=/a udev_dir=/lib/udev' "$pcfile"
+	fi
+
+	# Also patch udev → libudev in meson.build (Debian uses libudev.pc).
+	# Only apply if not already patched.
+	if ! grep -q "dependency('libudev'" meson.build 2>/dev/null; then
+		sudo sed -i "s/dependency('udev'/dependency('libudev'/g" meson.build 2>/dev/null || true
+	fi
+
 	info "Running meson setup..."
 	local meson_output
 	meson_output=$(PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig \
 		meson setup build --prefix=/usr \
 			-Dudevrulesdir=/lib/udev/rules.d \
-			-Dsystemdsystemunitdir=/lib/systemd/system 2>&1)
+			-Dudevhwdbdir=/lib/udev/hwdb.d \
+			-Dsystemdsystemunitdir=no \
+			-Dgtk-doc=false \
+			-Dintrospection=disabled \
+			-Dman=false 2>&1)
 	meson_exit=$?
 	echo "$meson_output" | grep -vE '^[+@# ]' | head -20 | sed 's/^/    /'
 	if [ "$meson_exit" -ne 0 ]; then
@@ -1203,8 +1251,8 @@ else:
 }
 
 stop_upower() {
-	systemctl --user stop upower 2>/dev/null || \
-		sudo systemctl stop upower 2>/dev/null || \
+	sudo -n systemctl stop upower 2>/dev/null || \
+		sudo -n systemctl --user stop upower 2>/dev/null || \
 		killall -9 upowerd 2>/dev/null || true
 	sleep 2
 }
@@ -1212,7 +1260,7 @@ stop_upower() {
 restart_upower() {
 	info "Restarting UPower daemon..."
 	stop_upower
-	/usr/libexec/upowerd &
+	sudo -n systemctl start upower 2>/dev/null || /usr/libexec/upowerd &
 	sleep 4
 
 	local STATE
@@ -2055,9 +2103,9 @@ reload_drivers() {
 
 	# Battery
 	if lsmod | grep -q bq25890_battery; then
-		sudo modprobe -r bq25890_battery 2>/dev/null || true
+		sudo -n modprobe -r bq25890_battery 2>/dev/null || true
 		sleep 1
-		sudo modprobe bq25890_battery
+		sudo -n modprobe bq25890_battery
 		success "Battery driver reloaded"
 	fi
 }
