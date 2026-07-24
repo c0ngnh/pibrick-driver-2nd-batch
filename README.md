@@ -29,7 +29,11 @@ sudo bash ./install.sh
 ```
 
 The interactive menu lets you pick which components to install. The default
-selects everything (display, battery, calibration, UPower fix, button service).
+selects everything (display, battery, calibration, button service).
+
+UPower KDE Fix and Plasma Mobile KWin Fix require KDE Plasma to be installed
+and are available as separate manual steps: `sudo pibrick-tools --install upower`
+and `sudo pibrick-tools --install plasma-mobile`.
 
 **Only one display panel is installed at a time.** When you opt into the
 display category, the installer prompts for a single panel variant

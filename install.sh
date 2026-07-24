@@ -348,7 +348,7 @@ ${BOLD}Other Components:${RESET}
   autorotation     Autorotation service (MMA8451Q accelerometer)
 
 ${BOLD}All Components:${RESET}
-  all              Install display + battery-new + calibration + upower + plasma-mobile + button
+  all              Install display + battery-new + calibration + button
 
 ${BOLD}Uninstall (requires root, prompts for typed YES):${RESET}
   $0 --uninstall <component[,component...]>    # Remove one or more components
@@ -734,9 +734,7 @@ while [ $# -gt 0 ]; do
 			INSTALL_DISPLAY=1
 			INSTALL_BATTERY_NEW=1
 			INSTALL_CALIBRATION=1
-			INSTALL_UPower=1
 			INSTALL_BUTTON=1
-			INSTALL_PLASMA_MOBILE=1
 			INSTALL_EXPLICIT=1
 			;;
 			none)
@@ -987,8 +985,6 @@ choose_components() {
 	esac
 
 	prompt_yesno "Install Calibration Tools (logger + auto-calibrator)" INSTALL_CALIBRATION
-	prompt_yesno "Apply UPower KDE Fix (show Charging state)" INSTALL_UPower
-	prompt_yesno "Apply Plasma Mobile KWin fix (black Recent/switcher)" INSTALL_PLASMA_MOBILE
 	prompt_yesno "Install Button Service (pibrickbtn)" INSTALL_BUTTON
 
 	if [ -z "${INSTALL_DISPLAY:-}${INSTALL_BATTERY_NEW:-}${INSTALL_BATTERY_ORIGINAL:-}${INSTALL_CALIBRATION:-}${INSTALL_UPower:-}${INSTALL_PLASMA_MOBILE:-}${INSTALL_BUTTON:-}" ]; then
@@ -1923,8 +1919,6 @@ main() {
 	[ -n "$INSTALL_BATTERY_NEW" ] && echo "  - Battery driver (bq25895 + INA228 auto-detect)"
 	[ -n "$INSTALL_BATTERY_ORIGINAL" ] && echo "  - Battery driver (bq25895 + INA228 auto-detect)"
 	[ -n "$INSTALL_CALIBRATION" ] && echo "  - Calibration tools (logger + auto-calibrator)"
-	[ -n "$INSTALL_UPower" ] && echo "  - UPower KDE fix"
-	[ -n "$INSTALL_PLASMA_MOBILE" ] && echo "  - Plasma Mobile KWin fix (black Recent/switcher)"
 	[ -n "$INSTALL_BUTTON" ] && echo "  - Button service"
 	echo
 	echo "Use \`pibrick-tools\` for everything from now on:"
