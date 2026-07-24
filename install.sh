@@ -959,13 +959,40 @@ choose_components() {
 		esac
 	}
 
+	# ── Display component ────────────────────────────────────────────────────────
+	echo
+	echo -e "${BOLD}=== Display Driver ===${RESET}"
+	prompt_yesno "Install Display Driver" INSTALL_DISPLAY
+	if [ -n "$INSTALL_DISPLAY" ]; then
+		echo "Select your panel type:"
+		echo "  1) 9203 - Visionox 1080x1240 @ 90/60 Hz (PocketCM5 default)"
+		echo "  2) 9202 - Visionox 1080x1240 @ 60 Hz (legacy)"
+		echo "  3) 548 - 5.48 inch 1080x1920 @ 60 Hz (FocalTech touch)"
+		echo "  4) 5inch - 5 inch 1080x1240 @ 90/60 Hz"
+		echo -n "Choose [1]: " >&2
+		read -r panel_choice || panel_choice=1
+		case "${panel_choice:-1}" in
+		2) PANEL=9202 ;;
+		3) PANEL=548 ;;
+		4) PANEL=5inch ;;
+		*) PANEL=9203 ;;
+		esac
+	fi
+
+	# ── Battery driver type ───────────────────────────────────────────────────────
+	echo
+	echo -e "${BOLD}=== Battery Driver ===${RESET}"
+	echo "  1) Battery + INA228 (recommended) — high-precision current sensor"
+	echo "  2) Battery only (original)       — if no INA228 hardware present"
+	echo -n "Choose [1]: " >&2
+	read -r batt_choice || batt_choice=1
+	case "${batt_choice:-1}" in
+	2) INSTALL_BATTERY_ORIGINAL=1 ;;
+	*) INSTALL_BATTERY_NEW=1 ;;
+	esac
+
 	prompt_yesno "Install Calibration Tools (logger + auto-calibrator)" INSTALL_CALIBRATION
 	prompt_yesno "Install Button Service (pibrickbtn)" INSTALL_BUTTON
-
-	# Default battery to INA228 in interactive mode (recommended)
-	if [ -z "${INSTALL_BATTERY_NEW:-}${INSTALL_BATTERY_ORIGINAL:-}" ]; then
-		INSTALL_BATTERY_NEW=1
-	fi
 
 	if [ -z "${INSTALL_DISPLAY:-}${INSTALL_BATTERY_NEW:-}${INSTALL_BATTERY_ORIGINAL:-}${INSTALL_CALIBRATION:-}${INSTALL_UPower:-}${INSTALL_PLASMA_MOBILE:-}${INSTALL_BUTTON:-}" ]; then
 		error "Nothing selected. Exiting."
@@ -1506,6 +1533,24 @@ install_plasma_packages() {
 
 	info "Installing Plasma Mobile packages (requires network)..."
 	info "This may take a while on first run as it downloads ~1-2 GB of packages."
+
+	# Fix any previously interrupted dpkg state before running apt-get.
+	# An interrupted apt/dpkg (e.g. Ctrl+C) leaves stale lock files that cause
+	# "dpkg was interrupted" errors on every subsequent apt call.
+	# Only fix when dpkg is not currently running (fuser checks if lock is live).
+	if [ -f /var/lib/dpkg/lock-frontend ]; then
+		if command -v fuser >/dev/null 2>&1 && fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1; then
+			info "dpkg is currently running — waiting for it to finish..."
+			sleep 5
+		else
+			info "Detected interrupted dpkg — running dpkg --configure -a..."
+			if ! dpkg --configure -a 2>&1 | sed 's/^/    /'; then
+				error "dpkg --configure -a failed."
+				error "Please run manually: sudo dpkg --configure -a"
+				return 1
+			fi
+		fi
+	fi
 
 	# Update package lists
 	apt-get update -qq || { warn "apt-get update failed"; return 1; }
