@@ -12,7 +12,7 @@ Kernel modules and user-space helpers for the piBrick CM5 handheld (Raspberry Pi
 | Tools | `tools/` | Display settings menu, GNOME refresh helper, touch reset, OCV calibration |
 | Calibration | `battery/battery-calibration-logger.py`, `battery/battery-auto-calibrator.py` | Automatic battery OCV calibration service |
 | Autorotation | `autorotation-service/` | MMA8451Q accelerometer-based automatic screen rotation |
-| Plasma Mobile | `plasma-mobile/` | KWin OpenGL ES 2.0 fix for black Recent/task-switcher on Pi V3D |
+| Plasma Mobile | `plasma-mobile-black-recent-fix/` | KWin OpenGL ES 2.0 fix for black Recent/task-switcher on Pi V3D |
 
 This repository bundles the display, touch, battery, button, and desktop pieces into a single installable tree, targeting **Raspberry Pi OS on kernel 6.18** with **GNOME 48 (Wayland)** or **KDE Plasma Mobile**.
 
@@ -37,7 +37,7 @@ Install KDE first, then the fixes:
 ```bash
 sudo pibrick-tools --install kde-desktop  # Install + enable KDE Plasma + SDDM
 sudo pibrick-tools --install upower       # UPower charging state fix
-sudo pibrick-tools --install plasma-mobile  # KWin black-screen fix
+sudo pibrick-tools --install plasma-mobile-black-recent-fix  # KWin black-screen fix
 ```
 
 **Only one display panel is installed at a time.** When you opt into the
@@ -83,7 +83,7 @@ sudo pibrick-tools --install button             # GPIO button service
 sudo pibrick-tools --install autorotation       # MMA8451Q accelerometer autorotation
 sudo pibrick-tools --install kde-desktop         # Install + enable KDE Plasma (prerequisite for Plasma fixes)
 sudo pibrick-tools --install upower             # UPower charging state fix (requires kde-desktop)
-sudo pibrick-tools --install plasma-mobile      # KWin black-screen fix (requires kde-desktop)
+sudo pibrick-tools --install plasma-mobile-black-recent-fix      # KWin black-screen fix (requires kde-desktop)
 sudo pibrick-tools --install battery-new,calibration   # Comma-separated, multiple at once
 ```
 
@@ -104,7 +104,7 @@ sudo pibrick-tools --uninstall upower
 sudo pibrick-tools --uninstall button
 sudo pibrick-tools --uninstall autorotation
 sudo pibrick-tools --uninstall kde-desktop
-sudo pibrick-tools --uninstall plasma-mobile
+sudo pibrick-tools --uninstall plasma-mobile-black-recent-fix
 sudo pibrick-tools --uninstall wrapper
 
 # Remove several components at once (comma-separated, same as --install)
@@ -463,7 +463,7 @@ The new **interactive installer** provides a user-friendly menu for selecting co
 | `--apply-calibration` | Apply calibrated OCV table |
 | `--status-calibration` | Show calibration status |
 | `--check` | Re-analyze CSV → refresh status JSON |
-| `--install plasma-mobile` | Plasma Mobile KWin black-screen fix (Pi V3D) |
+| `--install plasma-mobile-black-recent-fix` | Plasma Mobile KWin black-screen fix (Pi V3D) |
 | `--autorotation-lock [n]` | Lock rotation to normal\|left\|right\|inverted |
 | `--autorotation-unlock` | Resume auto-rotation |
 | `--autorotation-status` | Show autorotation service status |
@@ -685,7 +685,7 @@ upower -i /org/freedesktop/UPower/devices/battery_battery | grep state
 # should show: state:               charging
 ```
 
-If the KDE indicator still shows "Discharging" immediately after the fix, the KDE session needs to be restarted (`sudo systemctl restart plasma-mobile` or reboot).
+If the KDE indicator still shows "Discharging" immediately after the fix, the KDE session needs to be restarted (`sudo systemctl restart plasma-mobile-black-recent-fix` or reboot).
 
 ---
 
@@ -894,7 +894,7 @@ KWin effects (mobiletaskswitcher, overview, tiling) fail when using desktop Open
 
 ```bash
 sudo pibrick-tools --install kde-desktop    # Step 1: install + enable KDE Plasma + SDDM
-sudo pibrick-tools --install plasma-mobile  # Step 2: apply the KWin fix
+sudo pibrick-tools --install plasma-mobile-black-recent-fix  # Step 2: apply the KWin fix
 
 # With Zink GPU fallback (higher CPU usage, only if KWin still fails):
 ZINK_FALLBACK=1 sudo pibrick-tools --install kde-desktop
@@ -903,11 +903,11 @@ ZINK_FALLBACK=1 sudo pibrick-tools --install kde-desktop
 ### What it does
 
 1. **kde-desktop** (`--install kde-desktop`):
-   - Installs `plasma-mobile`, `kde-standard`, and `sddm` if missing (with confirmation prompt; auto-installs in non-interactive mode).
+   - Installs `plasma-mobile-black-recent-fix`, `kde-standard`, and `sddm` if missing (with confirmation prompt; auto-installs in non-interactive mode).
    - Enables SDDM and sets `graphical.target`.
    - Writes the KWin drop-in for the black-screen fix.
 
-2. **plasma-mobile** (`--install plasma-mobile`):
+2. **plasma-mobile-black-recent-fix** (`--install plasma-mobile-black-recent-fix`):
    - Re-applies the KWin drop-in. Only applies when KDE Plasma is already installed; otherwise prints a clear error directing to `--install kde-desktop`.
 
 KWin drop-in at `~/.config/systemd/user/plasma-kwin_wayland.service.d/pi-kwin-recent-fix.conf`:

@@ -371,7 +371,7 @@ ${BOLD}Options:${RESET}
                                 --force            Bypass safety checks (coulomb_uah)
                                 --show             Show all current values
                                 --list             List all parameters
-  --install kde-desktop     Enable SDDM + graphical.target (run before upower / plasma-mobile fixes)
+  --install kde-desktop     Enable SDDM + graphical.target (run before upower / plasma-mobile-black-recent-fix fixes)
   --install autorotation    Install autorotation service (MMA8451Q accelerometer)
   --enable-autorotation     Enable and start autorotation service
   --disable-autorotation    Stop and disable autorotation service
@@ -780,7 +780,7 @@ while [ $# -gt 0 ]; do
 			INSTALL_AUTOROTATION=1
 			INSTALL_EXPLICIT=1
 			;;
-		plasma-mobile)
+		plasma-mobile-black-recent-fix)
 			INSTALL_PLASMA_MOBILE=1
 			INSTALL_EXPLICIT=1
 			;;
@@ -802,9 +802,9 @@ while [ $# -gt 0 ]; do
 		for comp in $(echo "$1" | tr ',' ' '); do
 			case "$comp" in
 		all)
-			UNINSTALL_TARGETS="$UNINSTALL_TARGETS display battery calibration upower button autorotation plasma-mobile wrapper"
+			UNINSTALL_TARGETS="$UNINSTALL_TARGETS display battery calibration upower button autorotation plasma-mobile-black-recent-fix wrapper"
 			;;
-		display|battery|calibration|upower|kde-desktop|button|autorotation|plasma-mobile|wrapper)
+		display|battery|calibration|upower|kde-desktop|button|autorotation|plasma-mobile-black-recent-fix|wrapper)
 			UNINSTALL_TARGETS="$UNINSTALL_TARGETS $comp"
 				;;
 			*)
@@ -1065,7 +1065,7 @@ kde_packages_available() {
 	if dpkg -l kde-standard 2>/dev/null | grep -q "^ii "; then
 		return 0
 	fi
-	if dpkg -l plasma-mobile 2>/dev/null | grep -q "^ii "; then
+	if dpkg -l plasma-mobile-black-recent-fix 2>/dev/null | grep -q "^ii "; then
 		return 0
 	fi
 	return 1
@@ -1245,7 +1245,7 @@ fix_plasma_mobile() {
 	# and graphical.target. `fix_plasma_mobile()` is now only the "KWin fix"
 	# guard — it checks KDE packages are present (done above) and then
 	# re-applies the drop-in so running --install kde-desktop followed by
-	# --install plasma-mobile also works.
+	# --install plasma-mobile-black-recent-fix also works.
 
 	local zink_flag="${ZINK_FALLBACK:-0}"
 	local drop_in_dir="$desk_home/.config/systemd/user/plasma-kwin_wayland.service.d"
@@ -1319,11 +1319,11 @@ install_kde_desktop() {
 	local have_kde_standard=0
 	local have_sddm=0
 
-	if dpkg -l plasma-mobile 2>/dev/null | grep -q "^ii "; then
+	if dpkg -l plasma-mobile-black-recent-fix 2>/dev/null | grep -q "^ii "; then
 		have_plasma_mobile=1
-		info "plasma-mobile package: installed"
+		info "plasma-mobile-black-recent-fix package: installed"
 	else
-		info "plasma-mobile package: not installed"
+		info "plasma-mobile-black-recent-fix package: not installed"
 	fi
 
 	if dpkg -l kde-standard 2>/dev/null | grep -q "^ii "; then
@@ -1344,7 +1344,7 @@ install_kde_desktop() {
 	if [ "$have_plasma_mobile" = "0" ] || [ "$have_kde_standard" = "0" ] || [ "$have_sddm" = "0" ]; then
 		echo
 		echo -e "${BOLD}Missing packages detected:${RESET}"
-		[ "$have_plasma_mobile" = "0" ] && echo "  - plasma-mobile"
+		[ "$have_plasma_mobile" = "0" ] && echo "  - plasma-mobile-black-recent-fix"
 		[ "$have_kde_standard" = "0" ] && echo "  - kde-standard"
 		[ "$have_sddm" = "0" ] && echo "  - sddm"
 		echo
@@ -1466,7 +1466,7 @@ install_plasma_packages() {
 
 	# Build the install list
 	local to_install=""
-	[ "$have_pm" = "0" ] && to_install="$to_install plasma-mobile"
+	[ "$have_pm" = "0" ] && to_install="$to_install plasma-mobile-black-recent-fix"
 	[ "$have_ks" = "0" ] && to_install="$to_install kde-standard"
 	[ "$have_sd" = "0" ] && to_install="$to_install sddm"
 
