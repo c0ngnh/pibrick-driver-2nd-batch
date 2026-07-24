@@ -348,7 +348,7 @@ ${BOLD}Other Components:${RESET}
   autorotation     Autorotation service (MMA8451Q accelerometer)
 
 ${BOLD}All Components:${RESET}
-  all              Install display + battery-new + calibration + upower + plasma-mobile + button + autorotation
+  all              Install display + battery-new + calibration + upower + plasma-mobile + button
 
 ${BOLD}Uninstall (requires root, prompts for typed YES):${RESET}
   $0 --uninstall <component[,component...]>    # Remove one or more components
@@ -736,7 +736,6 @@ while [ $# -gt 0 ]; do
 			INSTALL_CALIBRATION=1
 			INSTALL_UPower=1
 			INSTALL_BUTTON=1
-			INSTALL_AUTOROTATION=1
 			INSTALL_PLASMA_MOBILE=1
 			INSTALL_EXPLICIT=1
 			;;
@@ -932,7 +931,6 @@ choose_components() {
 		INSTALL_CALIBRATION=1
 		INSTALL_UPower=1
 		INSTALL_BUTTON=1
-		INSTALL_AUTOROTATION=1
 		return 0
 	fi
 
@@ -992,7 +990,6 @@ choose_components() {
 	prompt_yesno "Apply UPower KDE Fix (show Charging state)" INSTALL_UPower
 	prompt_yesno "Apply Plasma Mobile KWin fix (black Recent/switcher)" INSTALL_PLASMA_MOBILE
 	prompt_yesno "Install Button Service (pibrickbtn)" INSTALL_BUTTON
-	prompt_yesno "Install Autorotation Service (MMA8451Q accelerometer)" INSTALL_AUTOROTATION
 
 	if [ -z "${INSTALL_DISPLAY:-}${INSTALL_BATTERY_NEW:-}${INSTALL_BATTERY_ORIGINAL:-}${INSTALL_CALIBRATION:-}${INSTALL_UPower:-}${INSTALL_PLASMA_MOBILE:-}${INSTALL_BUTTON:-}" ]; then
 		error "Nothing selected. Exiting."
@@ -1929,7 +1926,6 @@ main() {
 	[ -n "$INSTALL_UPower" ] && echo "  - UPower KDE fix"
 	[ -n "$INSTALL_PLASMA_MOBILE" ] && echo "  - Plasma Mobile KWin fix (black Recent/switcher)"
 	[ -n "$INSTALL_BUTTON" ] && echo "  - Button service"
-	[ -n "$INSTALL_AUTOROTATION" ] && echo "  - Autorotation service (MMA8451Q accelerometer)"
 	echo
 	echo "Use \`pibrick-tools\` for everything from now on:"
 	echo "  sudo pibrick-tools --battery-status"
