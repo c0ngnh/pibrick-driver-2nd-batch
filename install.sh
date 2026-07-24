@@ -1467,11 +1467,16 @@ install_tools() {
 	# from any cwd (e.g. when re-run after a previous system-wide install).
 	for script in battery_set.py battery-check.py battery-soc-persist.py \
 	              battery-calibration-logger.py battery-auto-calibrator.py; do
-		if [ -f "$PIBRICK_LIB/battery/$script" ]; then
-			cp "$PIBRICK_LIB/battery/$script" "$PIBRICK_TOOLS/"
-			chmod +x "$PIBRICK_TOOLS/$script"
-			success "Installed: $script"
+		if [ ! -f "$PIBRICK_LIB/battery/$script" ]; then
+			continue
 		fi
+		# Skip if source and destination are the same (i.e. PIBRICK_TOOLS_DIR == PIBRICK_LIB/battery)
+		if [ "$PIBRICK_LIB/battery/$script" -ef "$PIBRICK_TOOLS/$script" ]; then
+			continue
+		fi
+		cp "$PIBRICK_LIB/battery/$script" "$PIBRICK_TOOLS/"
+		chmod +x "$PIBRICK_TOOLS/$script"
+		success "Installed: $script"
 	done
 }
 
