@@ -37,7 +37,7 @@ Install KDE first, then the fixes:
 ```bash
 sudo pibrick-tools --install kde-mobile-desktop  # Install + enable KDE Plasma + SDDM
 sudo pibrick-tools --install upower       # UPower charging state fix
-sudo pibrick-tools --install plasma-mobile-black-recent-fix  # KWin black-recent-screen fix
+sudo pibrick-tools --install plasma-mobile-black-recent-fix  # KWin black-screen fix
 ```
 
 **Only one display panel is installed at a time.** When you opt into the
@@ -81,9 +81,9 @@ sudo pibrick-tools --install calibration        # Calibration logger + auto-cali
 sudo pibrick-tools --install upower             # UPower KDE charging-state fix
 sudo pibrick-tools --install button             # GPIO button service
 sudo pibrick-tools --install autorotation       # MMA8451Q accelerometer autorotation
-sudo pibrick-tools --install kde-mobile-desktop         # Install + enable KDE Plasma (prerequisite for Plasma fixes)
+sudo pibrick-tools --install kde-mobile-desktop         # Install + enable KDE Plasma + SDDM (run first)
 sudo pibrick-tools --install upower             # UPower charging state fix (requires kde-mobile-desktop)
-sudo pibrick-tools --install plasma-mobile-black-recent-fix      # KWin black-recent-screen fix (requires kde-mobile-desktop)
+sudo pibrick-tools --install plasma-mobile-black-recent-fix      # KWin black-screen fix (requires kde-mobile-desktop)
 sudo pibrick-tools --install battery-new,calibration   # Comma-separated, multiple at once
 ```
 
@@ -115,8 +115,8 @@ sudo pibrick-tools --uninstall all
 ```
 
 Components are removed in dependency order regardless of the order you
-type: `calibration` → `battery` → `display` → `upower` → `button` →
-`wrapper`. The UPower fix is restored from the most recent
+type: `calibration` → `battery` → `display` → `upower` → `kde-mobile-desktop` →
+`button` → `autorotation` → `wrapper`. The UPower fix is restored from the most recent
 `/usr/libexec/upowerd.bak-pibrick-*` backup (created at install time), so
 the stock UPower from your distro comes back. If no backup exists the
 patched binary is left in place and you'll be told to run
@@ -136,6 +136,7 @@ end of the run is your cue.
 | `battery` | `bq25890_battery.ko`, `/etc/modprobe.d/pibrick-battery.conf`, `/var/lib/bq25890_battery/soc_persist`, `/etc/cron.d/pibrick-battery-soc`, `pibrick-battery-{calibration,load-soc,soc-persist}.service` units, `$PIBRICK_TOOLS_DIR/pibrick-battery-load-soc.sh` |
 | `calibration` | `pibrick-battery-calibration.service`, the entire `/var/log/bq25890_battery/` directory (CSV, logs, `suggested_ocv_table.h`, `calibration_status.json`), `battery-calibration-logger.py`, `battery-auto-calibrator.py`. `battery_set.py` / `battery-soc-persist.py` are **kept** as they are useful diagnostics even with no driver loaded |
 | `upower` | Restores `/usr/libexec/upowerd` from the most recent `.bak-pibrick-*` backup |
+| `kde-mobile-desktop` | SDDM config, `/etc/sddm.conf.d/kde-plasma-mobile.conf`, KWin drop-ins; `kde-standard`/`sddm` packages left in place |
 | `button` | `pibrickbtn.service`, `/usr/local/bin/pibrickbtn`, `/etc/pibrick/` |
 | `wrapper` | `/usr/local/bin/pibrick-tools`, bash completion files |
 
@@ -463,7 +464,8 @@ The new **interactive installer** provides a user-friendly menu for selecting co
 | `--apply-calibration` | Apply calibrated OCV table |
 | `--status-calibration` | Show calibration status |
 | `--check` | Re-analyze CSV → refresh status JSON |
-| `--install plasma-mobile-black-recent-fix` | Plasma Mobile KWin black-recent-screen fix (Pi V3D) |
+| `--install kde-mobile-desktop` | Install + enable SDDM as default display manager; sets Plasma Mobile as default session |
+| `--install plasma-mobile-black-recent-fix` | Apply KWin black-screen fix (requires kde-mobile-desktop) |
 | `--autorotation-lock [n]` | Lock rotation to normal\|left\|right\|inverted |
 | `--autorotation-unlock` | Resume auto-rotation |
 | `--autorotation-status` | Show autorotation service status |

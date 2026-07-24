@@ -1374,36 +1374,90 @@ install_kde_mobile_desktop() {
 	fi
 
 	# ── Enable SDDM and set graphical target ───────────────────────────────────
-	info "Enabling SDDM display manager and graphical target..."
+	# If the system is currently running lightdm (the Raspbian Desktop default),
+	# we must stop and disable it — otherwise both lightdm and SDDM fight over
+	# the VT and only one can win. Also set Plasma Mobile as the default
+	# session so the next boot logs in directly without user interaction.
+	info "Configuring SDDM as the default display manager..."
+
+	# Stop any active display manager first (safe to call even if not running).
+	for dm in lightdm sddm gdm3 lxdm; do
+		if systemctl is-active --quiet "$dm" 2>/dev/null; then
+			if [ "$dm" != "sddm" ]; then
+				info "Stopping active display manager: $dm"
+				systemctl stop "$dm" 2>/dev/null || true
+				systemctl disable "$dm" 2>/dev/null || true
+				# Mask so systemd doesn't auto-restart it on boot.
+				systemctl mask "$dm" 2>/dev/null || true
+			fi
+		else
+			# Disable for boot even if not currently running.
+			if [ "$dm" != "sddm" ]; then
+				systemctl disable "$dm" 2>/dev/null || true
+				systemctl mask "$dm" 2>/dev/null || true
+			fi
+		fi
+	done
 
 	systemctl daemon-reload
 
-	if systemctl is-active --quiet sddm 2>/dev/null; then
-		info "SDDM is already running."
+	# Enable SDDM
+	info "Enabling and starting SDDM..."
+	systemctl enable sddm 2>/dev/null || true
+	systemctl unmask sddm 2>/dev/null || true
+	if [ -z "${WAYLAND_DISPLAY:-}" ] && [ -z "${DISPLAY:-}" ]; then
+		systemctl start sddm 2>/dev/null || \
+			warn "Could not start SDDM now. Reboot to activate."
 	else
-		info "Enabling and starting SDDM..."
-		systemctl enable sddm --no-setup-hook 2>/dev/null || \
-			systemctl enable sddm 2>/dev/null || true
-		if [ -z "${WAYLAND_DISPLAY:-}" ] && [ -z "${DISPLAY:-}" ]; then
-			systemctl start sddm 2>/dev/null || \
-				warn "Could not start SDDM automatically. Reboot to activate."
-		else
-			info "SDDM will be active after next reboot."
-		fi
+		info "SDDM will be active after next reboot."
 	fi
 
+	# Set default target
 	local current_target
 	current_target=$(systemctl get-default 2>/dev/null || echo "unknown")
 	if [ "$current_target" != "graphical.target" ]; then
 		info "Setting default target to graphical.target..."
 		systemctl set-default graphical.target 2>/dev/null || \
-			warn "Could not set default target. Run manually: sudo systemctl set-default graphical.target"
+			warn "Could not set default target. Run: sudo systemctl set-default graphical.target"
 	else
 		info "Default target already set to graphical.target."
 	fi
 
-	# ── Write the KWin drop-in (fix_plasma_mobile does the writing) ────────────
-	# Move zink_flag here since the drop-in writing moved to kde-mobile-desktop setup.
+	# ── Set Plasma Mobile as default SDDM session ───────────────────────────────
+	# Write SDDM.conf so the Plasma Mobile Wayland session is pre-selected
+	# at the SDDM greeter. The session name varies by install; detect it.
+	local sddm_conf="/etc/sddm.conf.d/kde-plasma-mobile.conf"
+	local plasma_mobile_session=""
+	for dir in /usr/share/xsessions /usr/share/wayland-sessions; do
+		for f in "$dir"/plasma-mobile*.desktop "$dir"/plasma-mobile.desktop; do
+			[ -f "$f" ] || continue
+			# Extract session name from Desktop Entry (e.g. Plasma Mobile)
+			plasma_mobile_session=$(awk -F= '$1=="Name"{print $2; exit}' "$f" 2>/dev/null)
+			plasma_mobile_session="${plasma_mobile_session:-plasma-mobile}"
+			info "Found Plasma Mobile session: $plasma_mobile_session ($f)"
+			break 2
+		done
+	done
+
+	if [ -n "$plasma_mobile_session" ]; then
+		install -d -m 755 /etc/sddm.conf.d
+		cat > "$sddm_conf" << SDDMEOF
+[General]
+# piBrick: default to Plasma Mobile session
+Session=$plasma_mobile_session.desktop
+
+[Autologin]
+# piBrick: do not auto-login; let SDDM greeter prompt for user selection
+User=
+Session=
+SDDMEOF
+		success "SDDM configured: Plasma Mobile ($plasma_mobile_session) is the default session."
+	else
+		warn "Could not detect Plasma Mobile session files."
+		warn "You may need to manually select the Plasma Mobile session in SDDM."
+	fi
+
+	# ── Write the KWin drop-in ────────────────────────────────────────────────
 	local zink_flag="${ZINK_FALLBACK:-0}"
 
 	local drop_in_dir="$desk_home/.config/systemd/user/plasma-kwin_wayland.service.d"
@@ -1488,6 +1542,15 @@ install_plasma_packages() {
 uninstall_kde_mobile_desktop() {
 	info "Uninstalling KDE desktop setup..."
 
+	# Remove the SDDM default-session config
+	rm -f /etc/sddm.conf.d/kde-plasma-mobile.conf
+
+	# Unmask any display managers we masked during install so the user can
+	# manually re-enable their preferred one.
+	for dm in lightdm gdm3 lxdm; do
+		systemctl unmask "$dm" 2>/dev/null || true
+	done
+
 	# Remove the KWin drop-in
 	local desk_user=""
 	if [ -n "${SUDO_USER:-}" ] && [ "$(id -un)" = "root" ]; then
@@ -1515,8 +1578,10 @@ uninstall_kde_mobile_desktop() {
 	su - "$desk_user" -c 'systemctl --user daemon-reload' 2>/dev/null || true
 
 	success "KDE desktop setup removed."
-	info "The kde-standard + sddm packages were not touched (remove them manually if desired)."
-	info "Log out and back in for changes to take effect."
+	info "SDDM config + KWin drop-ins removed. kde-standard + sddm packages untouched."
+	info "To switch back to your previous display manager:"
+	info "  sudo systemctl enable lightdm  # (or gdm3, lxdm, …)"
+	info "  sudo reboot"
 }
 
 uninstall_plasma_mobile() {
@@ -2058,6 +2123,7 @@ main() {
 	[ -n "$INSTALL_BATTERY_NEW" ] && echo "  - Battery driver (bq25895 + INA228 auto-detect)"
 	[ -n "$INSTALL_BATTERY_ORIGINAL" ] && echo "  - Battery driver (bq25895 + INA228 auto-detect)"
 	[ -n "$INSTALL_CALIBRATION" ] && echo "  - Calibration tools (logger + auto-calibrator)"
+	[ -n "$INSTALL_KDE_MOBILE_DESKTOP" ] && echo "  - KDE Mobile Desktop (SDDM + Plasma Mobile, default session)"
 	[ -n "$INSTALL_BUTTON" ] && echo "  - Button service"
 	echo
 	echo "Use \`pibrick-tools\` for everything from now on:"
@@ -2073,6 +2139,7 @@ main() {
 	echo "Run \`pibrick-tools --help\` for the full command list."
 	echo
 	[ -n "$INSTALL_DISPLAY" ] && echo "Reboot to apply display changes: sudo reboot"
+	[ -n "$INSTALL_KDE_MOBILE_DESKTOP" ] && echo "Reboot to start Plasma Mobile: sudo reboot"
 }
 
 main "$@"
