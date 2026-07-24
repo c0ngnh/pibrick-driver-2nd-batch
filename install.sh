@@ -359,6 +359,7 @@ ${BOLD}Options:${RESET}
   --enable-calibration      Enable calibration logging service
   --disable-calibration     Disable calibration logging service
   --reset-calibration       Stop logger, delete old CSV/log, restart fresh
+  --check                   Re-analyze CSV → refresh calibration status JSON
   --battery-status          Show current battery params + persisted config
   --battery-config [args]   Configure battery driver params (interactive)
                               Args forwarded to battery_set.py:
@@ -370,6 +371,9 @@ ${BOLD}Options:${RESET}
   --install autorotation    Install autorotation service (MMA8451Q accelerometer)
   --enable-autorotation     Enable and start autorotation service
   --disable-autorotation    Stop and disable autorotation service
+  --autorotation-lock [n]   Lock rotation to normal|left|right|inverted (default: normal)
+  --autorotation-unlock     Resume auto-rotation
+  --autorotation-status     Show autorotation service status
   --uninstall autorotation  Remove autorotation service
   --version                 Print install paths
   -h, --help                Show this help
@@ -390,6 +394,9 @@ ${BOLD}Examples:${RESET}
   $0 --battery-config          # Interactive battery parameter setter
   $0 --battery-config charge_full_uah 3800 mAh --persist
                                 # Set 3800mAh battery capacity and persist it
+  $0 --autorotation-lock       # Lock to normal orientation
+  $0 --autorotation-lock left  # Lock to landscape-left
+  $0 --autorotation-unlock     # Resume auto-rotation
 
 ${BOLD}Environment:${RESET}
   PANEL=9203  Select panel (9203, 9202, 548, 5inch)
@@ -823,6 +830,46 @@ while [ $# -gt 0 ]; do
 		systemctl disable pibrick-autorotation.service 2>/dev/null || true
 		success "Autorotation service disabled and stopped"
 		exit 0
+		;;
+	--autorotation-lock)
+		STATE_DIR="/var/lib/pibrick"
+		mkdir -p "$STATE_DIR"
+		ORIENT="${2:-normal}"
+		case "$ORIENT" in
+			normal|inverted|left|right) ;;
+			*)
+				error "Invalid orientation: $ORIENT (use: normal, inverted, left, right)"
+				exit 1
+				;;
+		esac
+		echo "$ORIENT" > "$STATE_DIR/autorotation.lock"
+		success "Rotation locked to: $ORIENT"
+		# Apply immediately if service is running
+		if systemctl is-active --quiet pibrick-autorotation.service 2>/dev/null; then
+			sudo -u root /usr/lib/pibrick/autorotation/pibrick-autorotation.sh --status >/dev/null 2>&1 || true
+		fi
+		exit 0
+		;;
+	--autorotation-unlock)
+		STATE_DIR="/var/lib/pibrick"
+		rm -f "$STATE_DIR/autorotation.lock"
+		success "Auto-rotation resumed"
+		exit 0
+		;;
+	--autorotation-status)
+		/usr/lib/pibrick/autorotation/pibrick-autorotation.sh --status 2>/dev/null || {
+			error "Autorotation service not installed or not found"
+			exit 1
+		}
+		exit 0
+		;;
+	--check)
+		calibrator="$PIBRICK_TOOLS/battery-auto-calibrator.py"
+		if [ ! -f "$calibrator" ]; then
+			error "battery-auto-calibrator.py not found at $calibrator"
+			exit 1
+		fi
+		exec python3 "$calibrator" --check
 		;;
 	--enable-calibration)
 		systemctl enable pibrick-battery-calibration.service 2>/dev/null || true
@@ -1563,7 +1610,7 @@ main() {
 		case "$arg" in
 			--status|--status-calibration|--battery-status|--version|-h|--help|help)
 				needs_root=0 ;;
-			--install|--uninstall|--enable-calibration|--disable-calibration|--reset-calibration|--apply-calibration|--battery-config|--battery-check|--enable-upower|--disable-upower|--enable-autorotation|--disable-autorotation)
+			--install|--uninstall|--enable-calibration|--disable-calibration|--reset-calibration|--apply-calibration|--battery-config|--battery-check|--enable-upower|--disable-upower|--enable-autorotation|--disable-autorotation|--autorotation-lock|--autorotation-unlock|--check)
 				needs_root=1; break ;;
 		esac
 	done

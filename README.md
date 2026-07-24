@@ -11,6 +11,7 @@ Kernel modules and user-space helpers for the piBrick CM5 handheld (Raspberry Pi
 | Desktop | `desktop/` | GTK taskbar battery indicator, `pibrick-display-settings` |
 | Tools | `tools/` | Display settings menu, GNOME refresh helper, touch reset, OCV calibration |
 | Calibration | `battery/battery-calibration-logger.py`, `battery/battery-auto-calibrator.py` | Automatic battery OCV calibration service |
+| Autorotation | `autorotation-service/` | MMA8451Q accelerometer-based automatic screen rotation |
 
 This repository bundles the display, touch, battery, button, and desktop pieces into a single installable tree, targeting **Raspberry Pi OS on kernel 6.18** with **GNOME 48 (Wayland)** or **KDE Plasma Mobile**.
 
@@ -52,7 +53,11 @@ sudo pibrick-tools --status-calibration      # Calibration status / confidence
 sudo pibrick-tools --enable-calibration      # Start logging
 sudo pibrick-tools --disable-calibration     # Stop logging
 sudo pibrick-tools --apply-calibration       # Apply calibrated OCV table
+sudo pibrick-tools --check                   # Re-analyze CSV → refresh status JSON
 sudo pibrick-tools --install <component>     # Add another component later
+sudo pibrick-tools --autorotation-lock left   # Lock to landscape-left
+sudo pibrick-tools --autorotation-unlock     # Resume auto-rotation
+sudo pibrick-tools --autorotation-status     # Show autorotation status
 sudo pibrick-tools --help                    # Full command reference
 ```
 
@@ -65,6 +70,7 @@ sudo pibrick-tools --install battery-new        # Battery driver (bq25895 + INA2
 sudo pibrick-tools --install calibration        # Calibration logger + auto-calibrator
 sudo pibrick-tools --install upower             # UPower KDE charging-state fix
 sudo pibrick-tools --install button             # GPIO button service
+sudo pibrick-tools --install autorotation       # MMA8451Q accelerometer autorotation
 sudo pibrick-tools --install battery-new,calibration   # Comma-separated, multiple at once
 ```
 
@@ -83,6 +89,7 @@ sudo pibrick-tools --uninstall battery
 sudo pibrick-tools --uninstall calibration
 sudo pibrick-tools --uninstall upower
 sudo pibrick-tools --uninstall button
+sudo pibrick-tools --uninstall autorotation
 sudo pibrick-tools --uninstall wrapper
 
 # Remove several components at once (comma-separated, same as --install)
@@ -435,12 +442,17 @@ The new **interactive installer** provides a user-friendly menu for selecting co
 | `--install calibration` | Calibration logger + auto-calibrator |
 | `--install upower` | UPower KDE fix |
 | `--install button` | Button service |
-| `--status-calibration` | Show calibration status |
+| `--install autorotation` | MMA8451Q accelerometer autorotation |
 | `--enable-calibration` | Start calibration logging |
 | `--disable-calibration` | Stop calibration logging |
 | `--apply-calibration` | Apply calibrated OCV table |
-| `--uninstall <component>` | Remove one component (`display`, `battery`, `calibration`, `upower`, `button`, `wrapper`) — requires typed `YES` |
-| `--uninstall all` | Remove everything `pibrick-tools` has installed — requires typed `YES` |
+| `--status-calibration` | Show calibration status |
+| `--check` | Re-analyze CSV → refresh status JSON |
+| `--autorotation-lock [n]` | Lock rotation to normal\|left\|right\|inverted |
+| `--autorotation-unlock` | Resume auto-rotation |
+| `--autorotation-status` | Show autorotation service status |
+| `--uninstall <component>` | Remove one component — requires typed `YES` |
+| `--uninstall all` | Remove everything — requires typed `YES` |
 
 > **Uninstall safety.** `--uninstall` requires root and always prompts
 > for a typed `YES` before doing anything, even in non-interactive mode.
@@ -849,6 +861,81 @@ GPIO test without the daemon:
 ```bash
 sudo systemctl stop pibrickbtn
 sudo /usr/local/bin/pibrickbtn --test
+```
+
+---
+
+## Autorotation
+
+The autorotation service automatically rotates the screen based on the MMA8451Q accelerometer. Based on the piBrick AOSP17 V6 implementation by Sconioo.
+
+### Hardware Requirements
+
+- **MMA8451Q** accelerometer (or MMA8452/MMA8453 compatible)
+- Kernel IIO driver (`mma8452`) OR userspace I2C fallback
+
+### Installation
+
+```bash
+sudo pibrick-tools --install autorotation
+```
+
+### Service Management
+
+```bash
+sudo pibrick-tools --enable-autorotation    # Start service
+sudo pibrick-tools --disable-autorotation   # Stop service
+sudo pibrick-tools --autorotation-status     # Check status
+```
+
+### Orientation Lock
+
+Lock the screen to a specific orientation (disables auto-rotation):
+
+```bash
+sudo pibrick-tools --autorotation-lock           # Lock to normal
+sudo pibrick-tools --autorotation-lock left      # Lock to landscape-left
+sudo pibrick-tools --autorotation-lock right     # Lock to landscape-right
+sudo pibrick-tools --autorotation-lock inverted  # Lock to inverted
+sudo pibrick-tools --autorotation-unlock       # Resume auto-rotation
+```
+
+### Supported Desktops
+
+| Desktop | Rotation Method |
+|---------|----------------|
+| GNOME (Wayland) | gsettings + busctl Mutter API |
+| KDE Plasma | kscreen-doctor |
+| X11 | xrandr |
+| labwc/sway | wlr-randr |
+
+### Axis Mapping
+
+| Orientation | Condition | Rotation |
+|-------------|-----------|----------|
+| Normal | Y dominant, Y negative | Portrait normal |
+| Inverted | Y dominant, Y positive | Portrait inverted |
+| Left | X dominant, X positive | Landscape left |
+| Right | X dominant, X negative | Landscape right |
+
+### Kernel Module
+
+If the MMA8452 kernel module is not loaded automatically:
+
+```bash
+sudo modprobe mma8452
+# Or for userspace I2C fallback:
+sudo modprobe i2c-dev
+```
+
+### Diagnostics
+
+```bash
+# Check if MMA8451Q is detected
+cat /sys/bus/iio/devices/*/name 2>/dev/null | grep mma845
+
+# View service logs
+journalctl -u pibrick-autorotation -n 50
 ```
 
 ---

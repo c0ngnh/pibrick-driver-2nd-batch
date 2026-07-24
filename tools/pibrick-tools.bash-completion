@@ -13,11 +13,13 @@ _pibrick_tools() {
 		"--help" "--version"
 		"--install" "--uninstall"
 		"--enable-calibration" "--disable-calibration"
-		"--reset-calibration"
+		"--reset-calibration" "--check"
 		"--status-calibration" "--apply-calibration"
 		"--battery-status" "--battery-config"
 		"--enable-upower" "--disable-upower"
 		"--enable-autorotation" "--disable-autorotation"
+		"--autorotation-lock" "--autorotation-unlock"
+		"--autorotation-status"
 	)
 
 	# Components you can pass to --install
