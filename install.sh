@@ -1189,55 +1189,133 @@ restart_upower() {
 	fi
 }
 
-# ── Plasma Mobile black-screen fix ─────────────────────────────────────────────
-# Installs a systemd user drop-in for plasma-kwin_wayland.service that forces
-# OpenGL ES 2.0 (KWIN_COMPOSE=O2ES) to fix the black Recent / task-switcher
-# on Raspberry Pi V3D driver.  Must run as the desktop user, not root.
+# ── Plasma Mobile KWin fix + desktop setup ───────────────────────────────────────
+# This component serves two purposes:
+#  1. Install Plasma Mobile + SDDM if missing (with user confirmation).
+#  2. Write a systemd user drop-in for plasma-kwin_wayland.service that forces
+#     OpenGL ES 2.0 (KWIN_COMPOSE=O2ES) to fix the black Recent / task-switcher
+#     on Raspberry Pi V3D driver.
 # https://bugs.kde.org/show_bug.cgi?id=519099
 fix_plasma_mobile() {
-	info "Applying Plasma Mobile KWin fix..."
+	info "Setting up Plasma Mobile desktop..."
 
-	# Derive the logged-in desktop user.  When the main install.sh runs under
-	# sudo, $SUDO_USER is set and we look up their home; otherwise fall back
-	# to whoever is logged in on the active seat.
+	# ── Derive the desktop user ────────────────────────────────────────────────
 	local desk_user=""
 	if [ -n "${SUDO_USER:-}" ] && [ "$(id -un)" = "root" ]; then
 		desk_user="$SUDO_USER"
 	elif command -v loginctl >/dev/null 2>&1; then
-		desk_user=$(loginctl show-session "$(loginctl | grep -E '^\s*c[0-9]+' | head -1 | awk '{print $1}' 2>/dev/null)" -p User --value 2>/dev/null)
+		desk_user=$(loginctl show-session \
+			"$(loginctl | grep -E '^\s*c[0-9]+' | head -1 | awk '{print $1}' 2>/dev/null)" \
+			-p User --value 2>/dev/null)
 		desk_user="${desk_user:-$(who | head -1 | awk '{print $1}')}"
 	else
 		desk_user=$(who | head -1 | awk '{print $1}')
 	fi
-
-	if [ -z "$desk_user" ]; then
-		error "Cannot determine desktop user. Run this as the desktop user or provide SUDO_USER."
-		return 1
-	fi
+	[ -z "$desk_user" ] && { error "Cannot determine desktop user."; return 1; }
 
 	local desk_home
 	desk_home=$(getent passwd "$desk_user" | cut -d: -f6)
 	desk_home="${desk_home:-/home/$desk_user}"
 
-	# Check kwin-wayland is installed
-	if [ ! -f /usr/lib/systemd/user/plasma-kwin_wayland.service ] \
-		&& [ ! -f /lib/systemd/user/plasma-kwin_wayland.service ]; then
-		warn "plasma-kwin_wayland.service not found — is KDE Plasma installed?"
-		return 0
+	# ── Detect installed packages ───────────────────────────────────────────────
+	local have_plasma_mobile=0
+	local have_kde_standard=0
+	local have_sddm=0
+
+	if dpkg -l plasma-mobile 2>/dev/null | grep -q "^ii "; then
+		have_plasma_mobile=1
+		info "plasma-mobile package: installed"
+	else
+		info "plasma-mobile package: not installed"
 	fi
 
-	# Determine whether to enable the Zink fallback flag
-	local zink_flag="${ZINK_FALLBACK:-0}"
+	if dpkg -l kde-standard 2>/dev/null | grep -q "^ii "; then
+		have_kde_standard=1
+		info "kde-standard package: installed"
+	else
+		info "kde-standard package: not installed"
+	fi
 
+	if dpkg -l sddm 2>/dev/null | grep -q "^ii "; then
+		have_sddm=1
+		info "sddm package: installed"
+	else
+		info "sddm package: not installed"
+	fi
+
+	# ── Offer to install missing packages ──────────────────────────────────────
+	if [ "$have_plasma_mobile" = "0" ] || [ "$have_kde_standard" = "0" ] || [ "$have_sddm" = "0" ]; then
+		echo
+		echo -e "${BOLD}Missing packages detected:${RESET}"
+		[ "$have_plasma_mobile" = "0" ] && echo "  - plasma-mobile"
+		[ "$have_kde_standard" = "0" ] && echo "  - kde-standard"
+		[ "$have_sddm" = "0" ] && echo "  - sddm"
+		echo
+		echo "The Plasma Mobile KWin fix requires a Plasma Mobile desktop."
+		echo "Would you like to install these packages now?"
+
+		# In non-interactive mode (no TTY or INSTALL_EXPLICIT), skip the prompt
+		# and install automatically since the user explicitly asked for it.
+		if [ -t 0 ]; then
+			printf "Install packages? [Y/n]: " >&2
+			local pkgs_reply
+			read -r pkgs_reply || pkgs_reply="y"
+			case "${pkgs_reply,,}" in
+				n|no) info "Skipping package installation." ;;
+				*)
+					install_plasma_packages "$have_plasma_mobile" "$have_kde_standard" "$have_sddm" "$desk_user"
+					;;
+			esac
+		else
+			info "Non-interactive mode — installing packages automatically."
+			install_plasma_packages "$have_plasma_mobile" "$have_kde_standard" "$have_sddm" "$desk_user"
+		fi
+	else
+		info "All required packages already installed."
+	fi
+
+	# ── Enable SDDM and set graphical target ───────────────────────────────────
+	info "Enabling SDDM display manager and graphical target..."
+
+	# Reload systemd daemon first so the new unit files are visible
+	systemctl daemon-reload
+
+	# Enable SDDM (non-interactive: --no-reload to avoid hanging)
+	if systemctl is-active --quiet sddm 2>/dev/null; then
+		info "SDDM is already running."
+	else
+		info "Enabling and starting SDDM..."
+		systemctl enable sddm --no-setup-hook 2>/dev/null || \
+			systemctl enable sddm 2>/dev/null || true
+		# Only start SDDM if not already on a graphical session
+		if [ -z "${WAYLAND_DISPLAY:-}" ] && [ -z "${DISPLAY:-}" ]; then
+			systemctl start sddm 2>/dev/null || \
+				warn "Could not start SDDM automatically. Reboot to activate."
+		else
+			info "SDDM will be active after next reboot."
+		fi
+	fi
+
+	# Set default target to graphical
+	local current_target
+	current_target=$(systemctl get-default 2>/dev/null || echo "unknown")
+	if [ "$current_target" != "graphical.target" ]; then
+		info "Setting default target to graphical.target..."
+		systemctl set-default graphical.target 2>/dev/null || \
+			warn "Could not set default target. Run manually: sudo systemctl set-default graphical.target"
+	else
+		info "Default target already set to graphical.target."
+	fi
+
+	# ── Write the KWin drop-in ─────────────────────────────────────────────────
+	local zink_flag="${ZINK_FALLBACK:-0}"
 	local drop_in_dir="$desk_home/.config/systemd/user/plasma-kwin_wayland.service.d"
 	local fix_conf="$drop_in_dir/pi-kwin-recent-fix.conf"
 	local zink_conf="$drop_in_dir/pi-kwin-zink-fallback.conf"
 	local zink_disabled="$drop_in_dir/pi-kwin-zink-fallback.conf.disabled"
 
-	# Create as the desktop user so systemd picks it up correctly
 	install -d -m 755 "$drop_in_dir"
 
-	# Write the base fix: force OpenGL ES 2.0 via environment variables
 	cat > "$fix_conf" << 'PLASMAFIX'
 [Service]
 # Fix black screen in mobile task switcher / overview on Raspberry Pi (KDE bug 519099)
@@ -1248,8 +1326,6 @@ Environment=KWIN_RENDER_BACKEND=gles
 Environment=KWIN_OPENGL_INTERFACE=egl
 PLASMAFIX
 
-	# Write the Zink fallback as a separate drop-in so it can be toggled
-	# independently of the base fix.
 	if [ "$zink_flag" = "1" ]; then
 		cat > "$zink_conf" << 'ZINKFIX'
 [Service]
@@ -1269,13 +1345,47 @@ ZINKDIS
 		info "Zink fallback left disabled (set ZINK_FALLBACK=1 to enable)."
 	fi
 
-	# Reload the user's systemd instance as the desktop user
 	su - "$desk_user" -c 'systemctl --user daemon-reload' 2>/dev/null || true
 
-	success "Plasma Mobile KWin fix installed."
-	info "Log out and back in (or reboot) for changes to take effect."
-	info "Verify after login:"
-	info "  qdbus6 org.kde.KWin /KWin org.kde.KWin.supportInformation | grep -i compositing"
+	success "Plasma Mobile setup complete."
+	echo
+	echo "Next step: reboot to start the Plasma Mobile session via SDDM."
+	echo "  sudo reboot"
+	echo
+	echo "After login, verify the compositor:"
+	echo "  qdbus6 org.kde.KWin /KWin org.kde.KWin.supportInformation | grep -i compositing"
+	echo "  Expected: Compositing Type: OpenGL ES 2.0"
+}
+
+# ── Install Plasma Mobile packages ────────────────────────────────────────────────
+install_plasma_packages() {
+	local have_pm=$1 have_ks=$2 have_sd=$3 desk_user=$4
+
+	info "Installing Plasma Mobile packages (requires network)..."
+	info "This may take a while on first run as it downloads ~1-2 GB of packages."
+
+	# Update package lists
+	apt-get update -qq || { warn "apt-get update failed"; return 1; }
+
+	# Build the install list
+	local to_install=""
+	[ "$have_pm" = "0" ] && to_install="$to_install plasma-mobile"
+	[ "$have_ks" = "0" ] && to_install="$to_install kde-standard"
+	[ "$have_sd" = "0" ] && to_install="$to_install sddm"
+
+	if [ -z "$to_install" ]; then
+		info "Nothing to install."
+		return 0
+	fi
+
+	info "Installing:$to_install"
+	if ! apt-get install -y $to_install 2>&1 | tail -20; then
+		error "Package installation failed."
+		error "Try installing manually: sudo apt install $to_install"
+		return 1
+	fi
+
+	success "Packages installed: $to_install"
 }
 
 uninstall_plasma_mobile() {
@@ -1285,16 +1395,14 @@ uninstall_plasma_mobile() {
 	if [ -n "${SUDO_USER:-}" ] && [ "$(id -un)" = "root" ]; then
 		desk_user="$SUDO_USER"
 	elif command -v loginctl >/dev/null 2>&1; then
-		desk_user=$(loginctl show-session "$(loginctl | grep -E '^\s*c[0-9]+' | head -1 | awk '{print $1}' 2>/dev/null)" -p User --value 2>/dev/null)
+		desk_user=$(loginctl show-session \
+			"$(loginctl | grep -E '^\s*c[0-9]+' | head -1 | awk '{print $1}' 2>/dev/null)" \
+			-p User --value 2>/dev/null)
 		desk_user="${desk_user:-$(who | head -1 | awk '{print $1}')}"
 	else
 		desk_user=$(who | head -1 | awk '{print $1}')
 	fi
-
-	if [ -z "$desk_user" ]; then
-		error "Cannot determine desktop user."
-		return 1
-	fi
+	[ -z "$desk_user" ] && { error "Cannot determine desktop user."; return 1; }
 
 	local desk_home
 	desk_home=$(getent passwd "$desk_user" | cut -d: -f6)

@@ -879,6 +879,8 @@ KWin effects (mobiletaskswitcher, overview, tiling) fail when using desktop Open
 
 ### Installation
 
+The component checks for `plasma-mobile`, `kde-standard`, and `sddm` first. If any are missing, it prompts for confirmation (or auto-installs in non-interactive mode) before proceeding.
+
 ```bash
 sudo pibrick-tools --install plasma-mobile
 # With Zink GPU fallback (higher CPU usage):
@@ -887,11 +889,13 @@ ZINK_FALLBACK=1 sudo pibrick-tools --install plasma-mobile
 
 ### What it does
 
-Installs a systemd user drop-in at:
+1. **Installs packages** — `plasma-mobile`, `kde-standard`, and `sddm` if not already present (with confirmation prompt; auto-installs in non-interactive/script mode).
+2. **Enables SDDM** — display manager is enabled and started.
+3. **Sets graphical target** — `systemctl set-default graphical.target`.
+4. **Writes KWin drop-in** — systemd user drop-in at:
 ```
 ~/.config/systemd/user/plasma-kwin_wayland.service.d/pi-kwin-recent-fix.conf
 ```
-
 With these environment variables:
 
 ```
