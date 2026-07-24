@@ -858,7 +858,7 @@ while [ $# -gt 0 ]; do
 		success "Rotation locked to: $ORIENT"
 		# Apply immediately if service is running
 		if systemctl is-active --quiet pibrick-autorotation.service 2>/dev/null; then
-			sudo -u root /usr/lib/pibrick/autorotation/pibrick-autorotation.sh --status >/dev/null 2>&1 || true
+			sudo /usr/local/bin/pibrick-autorotation.sh --status >/dev/null 2>&1 || true
 		fi
 		exit 0
 		;;
@@ -959,40 +959,13 @@ choose_components() {
 		esac
 	}
 
-	# Display - Panel selection
-	echo
-	echo -e "${BOLD}=== Display Panel Selection ===${RESET}"
-	echo "Select your panel type:"
-	echo "  1) 9203 - Visionox 1080x1240 @ 90/60 Hz (PocketCM5 default)"
-	echo "  2) 9202 - Visionox 1080x1240 @ 60 Hz (legacy)"
-	echo "  3) 548 - 5.48 inch 1080x1920 @ 60 Hz (FocalTech touch)"
-	echo "  4) 5inch - 5 inch 1080x1240 @ 90/60 Hz"
-	echo "  5) Skip display installation"
-	echo -n "Choose [1]: " >&2
-	read -r panel_choice || panel_choice=1
-	case "${panel_choice:-1}" in
-	1) INSTALL_DISPLAY=1; PANEL=9203 ;;
-	2) INSTALL_DISPLAY=1; PANEL=9202 ;;
-	3) INSTALL_DISPLAY=1; PANEL=548 ;;
-	4) INSTALL_DISPLAY=1; PANEL=5inch ;;
-	5) ;; # Skip
-	*) INSTALL_DISPLAY=1; PANEL=9203 ;;
-	esac
-
-	# Battery driver type
-	echo
-	echo -e "${BOLD}=== Battery Driver Selection ===${RESET}"
-	echo "  1) Battery + INA228 (recommended) - High-precision current sensor"
-	echo "  2) Battery only (original) - If no INA228 hardware installed"
-	echo -n "Choose [1]: " >&2
-	read -r batt_choice || batt_choice=1
-	case "${batt_choice:-1}" in
-	2) INSTALL_BATTERY_ORIGINAL=1 ;;
-	*) INSTALL_BATTERY_NEW=1 ;;
-	esac
-
 	prompt_yesno "Install Calibration Tools (logger + auto-calibrator)" INSTALL_CALIBRATION
 	prompt_yesno "Install Button Service (pibrickbtn)" INSTALL_BUTTON
+
+	# Default battery to INA228 in interactive mode (recommended)
+	if [ -z "${INSTALL_BATTERY_NEW:-}${INSTALL_BATTERY_ORIGINAL:-}" ]; then
+		INSTALL_BATTERY_NEW=1
+	fi
 
 	if [ -z "${INSTALL_DISPLAY:-}${INSTALL_BATTERY_NEW:-}${INSTALL_BATTERY_ORIGINAL:-}${INSTALL_CALIBRATION:-}${INSTALL_UPower:-}${INSTALL_PLASMA_MOBILE:-}${INSTALL_BUTTON:-}" ]; then
 		error "Nothing selected. Exiting."

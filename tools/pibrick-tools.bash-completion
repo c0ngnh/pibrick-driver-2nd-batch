@@ -3,7 +3,7 @@
 # (or /usr/share/bash-completion/completions/pibrick-tools).
 
 _pibrick_tools() {
-	local cur prev opts_general opts_install opts_calib opts_battery
+	local cur prev opts_general opts_install opts_battery
 	COMPREPLY=()
 	cur="${COMP_WORDS[COMP_CWORD]}"
 	prev="${COMP_WORDS[COMP_CWORD-1]}"
@@ -16,17 +16,18 @@ _pibrick_tools() {
 		"--reset-calibration" "--check"
 		"--status-calibration" "--apply-calibration"
 		"--battery-status" "--battery-config"
-		"--enable-upower" "--disable-upower"
 		"--enable-autorotation" "--disable-autorotation"
 		"--autorotation-lock" "--autorotation-unlock"
 		"--autorotation-status"
 	)
 
-	# Components you can pass to --install
+	# Components you can pass to --install / --uninstall
 	opts_install=(
-		"all" "display" "display-new" "display-old"
-		"battery" "battery-new" "battery-original"
-		"calibration" "upower" "plasma-mobile" "button" "autorotation"
+		"all" "display" "display-hyn"
+		"battery" "battery-new"
+		"calibration" "upower"
+		"kde-mobile-desktop" "plasma-mobile-black-recent-fix"
+		"button" "autorotation"
 	)
 
 	# Sub-params you can pass to --battery-config <param>
@@ -39,7 +40,7 @@ _pibrick_tools() {
 	)
 
 	case "$prev" in
-		--install)
+		--install|--uninstall)
 			COMPREPLY=( $(compgen -W "${opts_install[*]}" -- "$cur") )
 			return 0
 			;;
