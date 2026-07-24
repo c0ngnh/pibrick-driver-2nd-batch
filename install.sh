@@ -1106,16 +1106,25 @@ fix_upower() {
 
 	local UP_SRC=/tmp/upower-pibrick-src
 	if [ ! -d "$UP_SRC/.git" ]; then
-		info "Cloning UPower source (tag v$UPVER)..."
+		info "Cloning UPower source (tag v$UPVER) — this may take a few minutes..."
 		rm -rf "$UP_SRC"
-		git clone --depth=1 --branch="v$UPVER" \
-			https://gitlab.freedesktop.org/upower/upower.git "$UP_SRC" >/dev/null 2>&1 || {
-			git clone --depth=1 \
-				https://gitlab.freedesktop.org/upower/upower.git "$UP_SRC" >/dev/null 2>&1 || {
-					error "Failed to clone UPower source."
-					return 1
-				}
-		}
+		# Capture stderr (progress) to filter out noise; exit code is git's.
+		{ git clone --depth=1 --branch="v$UPVER" \
+			https://gitlab.freedesktop.org/upower/upower.git "$UP_SRC" \
+			2>&1 | grep -vE '^(Cloning|Receiving|Resolving|Updating|Checking|Enumerating)'; } \
+		&& git_ok=1 || git_ok=0
+		if [ "$git_ok" -eq 0 ]; then
+			info "Tag v$UPVER not found — trying main branch..."
+			{ git clone --depth=1 \
+				https://gitlab.freedesktop.org/upower/upower.git "$UP_SRC" \
+				2>&1 | grep -vE '^(Cloning|Receiving|Resolving|Updating|Checking|Enumerating)'; } \
+			&& git_ok=1 || git_ok=0
+		fi
+		if [ "$git_ok" -eq 0 ]; then
+			error "Failed to clone UPower source."
+			return 1
+		fi
+		info "UPower source ready."
 	fi
 
 	local BAK="${UPowerD}.bak-pibrick-$(date +%Y%m%d%H%M%S)"
@@ -1151,23 +1160,33 @@ else:
 	info "Building UPower..."
 	cd "$UP_SRC"
 	mkdir -p build
-	PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig \
+	info "Running meson setup..."
+	local meson_output
+	meson_output=$(PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig \
 		meson setup build --prefix=/usr \
 			-Dudevrulesdir=/lib/udev/rules.d \
-			-Dsystemdsystemunitdir=/lib/systemd/system \
-			> /tmp/meson-pibrick.log 2>&1 || {
+			-Dsystemdsystemunitdir=/lib/systemd/system 2>&1)
+	meson_exit=$?
+	echo "$meson_output" | grep -vE '^[+@# ]' | head -20 | sed 's/^/    /'
+	if [ "$meson_exit" -ne 0 ]; then
+		echo "$meson_output" > /tmp/meson-pibrick.log
 		error "meson setup failed. See /tmp/meson-pibrick.log"
 		cp "$BAK" "$UPowerD"
 		cd /
 		return 1
-	}
+	fi
 
-	ninja -C build > /tmp/ninja-pibrick.log 2>&1 || {
+	info "Compiling UPower (ninja -C build)..."
+	local ninja_output
+	ninja_output=$(ninja -C build 2>&1) && ninja_ok=1 || ninja_ok=0
+	echo "$ninja_output" | grep -vE '^\[' | head -20 | sed 's/^/    /'
+	if [ "$ninja_ok" -eq 0 ]; then
+		echo "$ninja_output" > /tmp/ninja-pibrick.log
 		error "ninja build failed. See /tmp/ninja-pibrick.log"
 		cp "$BAK" "$UPowerD"
 		cd /
 		return 1
-	}
+	fi
 
 	if [ ! -f build/src/upowerd ]; then
 		error "Build succeeded but upowerd not found."
@@ -1529,8 +1548,10 @@ install_plasma_packages() {
 		return 0
 	fi
 
+	# Stream apt output directly so the user sees download + install progress.
+	# The `|| { ...; return 1; }` block runs only on apt exit code != 0.
 	info "Installing:$to_install"
-	if ! apt-get install -y $to_install 2>&1 | tail -20; then
+	if ! apt-get install -y $to_install 2>&1 | grep -v '^Get:\|^Fetched\|^Selecting\|^Preparing\|^Unpacking\|^Setting up\|^Processing '; then
 		error "Package installation failed."
 		error "Try installing manually: sudo apt install $to_install"
 		return 1
