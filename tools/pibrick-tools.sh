@@ -36,7 +36,7 @@ needs_root() {
 	local arg
 	for arg in "$@"; do
 		case "$arg" in
-			--status|--status-calibration|--battery-status|--version|-h|--help|help)
+			--status|--status-calibration|--battery-status|--autorotation-status|--version|-h|--help|help)
 				return 1 ;;
 		esac
 	done

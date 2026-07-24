@@ -249,7 +249,7 @@ info "Setting up device tree overlay..."
 DTBO_DIR="/boot/firmware/overlays"
 DTBO_NAME="pibrick-mma8451q"
 
-if [ ! -f "dtb/mma8451q-overlay.dts" ]; then
+if [ ! -f "$SCRIPT_DIR/dtb/mma8451q-overlay.dts" ]; then
     warn "Device tree source not found"
 else
     # Check if dtc is available
@@ -261,7 +261,7 @@ else
         
         # Compile the overlay
         if dtc -I dts -O dtb -o "$DTBO_DIR/$DTBO_NAME.dtbo" \
-            -@ -b 0 -d /dev/null "dtb/mma8451q-overlay.dts" 2>/dev/null; then
+            -@ -b 0 -d /dev/null "$SCRIPT_DIR/dtb/mma8451q-overlay.dts" 2>/dev/null; then
             info "  Device tree overlay compiled: $DTBO_NAME.dtbo"
             
             # Add to config.txt if not already present
@@ -286,8 +286,8 @@ mkdir -p /var/lib/pibrick
 chmod 755 /var/lib/pibrick
 
 # Install main service script
-install -m 755 pibrick-autorotation.sh /usr/local/bin/pibrick-autorotation.sh
-install -m 755 pibrick-autorotation.sh /usr/local/bin/pibrick-autorotation  # Alias
+install -m 755 "$SCRIPT_DIR/pibrick-autorotation.sh" /usr/local/bin/pibrick-autorotation.sh
+install -m 755 "$SCRIPT_DIR/pibrick-autorotation.sh" /usr/local/bin/pibrick-autorotation  # Alias
 
 # Install kscreen helper script for KDE Plasma rotation (optional, for reference)
 cat > /usr/local/bin/pibrick-kscreen-helper.sh << 'HELPEREOF'
@@ -315,10 +315,10 @@ fi
 
 # Install action scripts
 mkdir -p /etc/pibrick/actions
-install -m 755 etc/pibrick/actions/autorotation-lock.sh /etc/pibrick/actions/autorotation-lock.sh
+install -m 755 "$SCRIPT_DIR/etc/pibrick/actions/autorotation-lock.sh" /etc/pibrick/actions/autorotation-lock.sh
 
 # Install systemd service
-install -m 644 pibrick-autorotation.service /etc/systemd/system/pibrick-autorotation.service
+install -m 644 "$SCRIPT_DIR/pibrick-autorotation.service" /etc/systemd/system/pibrick-autorotation.service
 
 # Reload systemd
 systemctl daemon-reload

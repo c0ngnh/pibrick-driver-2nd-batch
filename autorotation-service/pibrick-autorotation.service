@@ -9,7 +9,7 @@ After=display-manager.service
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/pibrick-autorotation.sh
+ExecStart=/usr/lib/pibrick/autorotation-service/pibrick-autorotation.sh
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
