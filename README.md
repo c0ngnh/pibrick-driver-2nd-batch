@@ -31,9 +31,14 @@ sudo bash ./install.sh
 The interactive menu lets you pick which components to install. The default
 selects everything (display, battery, calibration, button service).
 
-UPower KDE Fix and Plasma Mobile KWin Fix require KDE Plasma to be installed
-and are available as separate manual steps: `sudo pibrick-tools --install upower`
-and `sudo pibrick-tools --install plasma-mobile`.
+UPower KDE Fix and Plasma Mobile KWin Fix require KDE Plasma to be installed.
+Install KDE first, then the fixes:
+
+```bash
+sudo pibrick-tools --install kde-desktop  # Install + enable KDE Plasma + SDDM
+sudo pibrick-tools --install upower       # UPower charging state fix
+sudo pibrick-tools --install plasma-mobile  # KWin black-screen fix
+```
 
 **Only one display panel is installed at a time.** When you opt into the
 display category, the installer prompts for a single panel variant
@@ -76,7 +81,9 @@ sudo pibrick-tools --install calibration        # Calibration logger + auto-cali
 sudo pibrick-tools --install upower             # UPower KDE charging-state fix
 sudo pibrick-tools --install button             # GPIO button service
 sudo pibrick-tools --install autorotation       # MMA8451Q accelerometer autorotation
-sudo pibrick-tools --install plasma-mobile     # Plasma Mobile KWin black-screen fix
+sudo pibrick-tools --install kde-desktop         # Install + enable KDE Plasma (prerequisite for Plasma fixes)
+sudo pibrick-tools --install upower             # UPower charging state fix (requires kde-desktop)
+sudo pibrick-tools --install plasma-mobile      # KWin black-screen fix (requires kde-desktop)
 sudo pibrick-tools --install battery-new,calibration   # Comma-separated, multiple at once
 ```
 
@@ -96,6 +103,7 @@ sudo pibrick-tools --uninstall calibration
 sudo pibrick-tools --uninstall upower
 sudo pibrick-tools --uninstall button
 sudo pibrick-tools --uninstall autorotation
+sudo pibrick-tools --uninstall kde-desktop
 sudo pibrick-tools --uninstall plasma-mobile
 sudo pibrick-tools --uninstall wrapper
 
@@ -663,12 +671,11 @@ On **KDE Plasma Mobile**, the battery indicator may show "Discharging" even whil
 
 The BQ25895 driver follows the Linux `power_supply` convention where **negative current = charging**. The fix rebuilds UPower from source with this override disabled.
 
-**Applied automatically** by `install.sh --install battery` or `install.sh --fix-upower`. After installation, log out and back in (or reboot) for the change to propagate to the KDE battery indicator.
-
-To apply manually on a running system:
+**Requires KDE Plasma to be installed first.** Apply after `sudo pibrick-tools --install kde-desktop`.
 
 ```bash
-sudo bash ./install.sh --install upower
+sudo bash ./install.sh --install kde-desktop  # Install + enable KDE first
+sudo pibrick-tools --install upower
 ```
 
 To verify after install:
@@ -883,24 +890,27 @@ KWin effects (mobiletaskswitcher, overview, tiling) fail when using desktop Open
 
 ### Installation
 
-The component checks for `plasma-mobile`, `kde-standard`, and `sddm` first. If any are missing, it prompts for confirmation (or auto-installs in non-interactive mode) before proceeding.
+**Requires KDE Plasma to be installed first** (`--install kde-desktop`).
 
 ```bash
-sudo pibrick-tools --install plasma-mobile
-# With Zink GPU fallback (higher CPU usage):
-ZINK_FALLBACK=1 sudo pibrick-tools --install plasma-mobile
+sudo pibrick-tools --install kde-desktop    # Step 1: install + enable KDE Plasma + SDDM
+sudo pibrick-tools --install plasma-mobile  # Step 2: apply the KWin fix
+
+# With Zink GPU fallback (higher CPU usage, only if KWin still fails):
+ZINK_FALLBACK=1 sudo pibrick-tools --install kde-desktop
 ```
 
 ### What it does
 
-1. **Installs packages** — `plasma-mobile`, `kde-standard`, and `sddm` if not already present (with confirmation prompt; auto-installs in non-interactive/script mode).
-2. **Enables SDDM** — display manager is enabled and started.
-3. **Sets graphical target** — `systemctl set-default graphical.target`.
-4. **Writes KWin drop-in** — systemd user drop-in at:
-```
-~/.config/systemd/user/plasma-kwin_wayland.service.d/pi-kwin-recent-fix.conf
-```
-With these environment variables:
+1. **kde-desktop** (`--install kde-desktop`):
+   - Installs `plasma-mobile`, `kde-standard`, and `sddm` if missing (with confirmation prompt; auto-installs in non-interactive mode).
+   - Enables SDDM and sets `graphical.target`.
+   - Writes the KWin drop-in for the black-screen fix.
+
+2. **plasma-mobile** (`--install plasma-mobile`):
+   - Re-applies the KWin drop-in. Only applies when KDE Plasma is already installed; otherwise prints a clear error directing to `--install kde-desktop`.
+
+KWin drop-in at `~/.config/systemd/user/plasma-kwin_wayland.service.d/pi-kwin-recent-fix.conf`:
 
 ```
 KWIN_DRM_USE_MODIFIERS=0
@@ -910,19 +920,10 @@ KWIN_RENDER_BACKEND=gles
 KWIN_OPENGL_INTERFACE=egl
 ```
 
-### After install
-
-Log out and back in (or reboot), then verify:
-
-```bash
-qdbus6 org.kde.KWin /KWin org.kde.KWin.supportInformation | grep -i 'Compositing Type'
-# Expected: Compositing Type: OpenGL ES 2.0
-```
-
 ### Uninstall
 
 ```bash
-sudo pibrick-tools --uninstall plasma-mobile
+sudo pibrick-tools --uninstall kde-desktop   # Remove KDE desktop setup (packages untouched)
 ```
 
 ### Zink Fallback
@@ -930,7 +931,7 @@ sudo pibrick-tools --uninstall plasma-mobile
 If OpenGL ES alone doesn't fix the issue, enable Zink (software Vulkan via Mesa):
 
 ```bash
-ZINK_FALLBACK=1 sudo pibrick-tools --install plasma-mobile
+ZINK_FALLBACK=1 sudo pibrick-tools --install kde-desktop
 ```
 
 This adds `MESA_LOADER_DRIVER_OVERRIDE=zink` to a second drop-in. It has higher CPU usage.
