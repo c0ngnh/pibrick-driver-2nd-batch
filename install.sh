@@ -27,7 +27,7 @@ error()   { echo -e "${RED}[ERROR]${RESET} $*" >&2; }
 PANEL_CONFIG=/etc/pibrick.panel
 DISPLAY_REFRESH_CONFIG=/etc/pibrick.display-refresh
 PIBRICK_LIB=/usr/lib/pibrick
-PIBRICK_TOOLS_DIR="$PIBRICK_LIB/battery-tools"
+PIBRICK_TOOLS_DIR="$PIBRICK_LIB/battery"
 PIBRICK_TOOLS="$PIBRICK_TOOLS_DIR"
 PIBRICK_WRAPPER="/usr/local/bin/pibrick-tools"
 
@@ -77,6 +77,7 @@ INSTALL_BATTERY_ORIGINAL=     # Alias for INSTALL_BATTERY_NEW (kept for compat)
 INSTALL_CALIBRATION=
 INSTALL_UPower=
 INSTALL_BUTTON=
+INSTALL_AUTOROTATION=         # MMA8451Q accelerometer-based screen rotation
 INSTALL_EXPLICIT=
 
 # ── Calibration functions (must be defined before use) ──────────────────────────
@@ -342,14 +343,15 @@ ${BOLD}Battery Components:${RESET}
 ${BOLD}Other Components:${RESET}
   upower           UPower KDE fix (show Charging state)
   button           Button service (pibrickbtn over libgpiod)
+  autorotation     Autorotation service (MMA8451Q accelerometer)
 
 ${BOLD}All Components:${RESET}
-  all              Install display + battery-new + calibration + upower + button
+  all              Install display + battery-new + calibration + upower + button + autorotation
 
 ${BOLD}Uninstall (requires root, prompts for typed YES):${RESET}
   $0 --uninstall <component[,component...]>    # Remove one or more components
   $0 --uninstall all                            # Remove everything pibrick-tools installed
-  Components: display, battery, calibration, upower, button, wrapper
+  Components: display, battery, calibration, upower, button, autorotation, wrapper
 
 ${BOLD}Options:${RESET}
   --apply-calibration       Apply calibrated OCV table to installed driver
@@ -365,6 +367,10 @@ ${BOLD}Options:${RESET}
                                 --force            Bypass safety checks (coulomb_uah)
                                 --show             Show all current values
                                 --list             List all parameters
+  --install autorotation    Install autorotation service (MMA8451Q accelerometer)
+  --enable-autorotation     Enable and start autorotation service
+  --disable-autorotation    Stop and disable autorotation service
+  --uninstall autorotation  Remove autorotation service
   --version                 Print install paths
   -h, --help                Show this help
 
@@ -423,6 +429,7 @@ do_uninstall() {
 		calibration) [ ! -f /etc/systemd/system/pibrick-battery-calibration.service ] && missing="$missing calibration" ;;
 		upower)     [ ! -f /usr/libexec/upowerd ] && missing="$missing upower" ;;
 		button)     { [ ! -f /usr/local/bin/pibrickbtn ] && [ ! -f /etc/systemd/system/pibrickbtn.service ]; } && missing="$missing button" ;;
+		autorotation) { [ ! -f /usr/local/bin/pibrick-autorotation.sh ] && [ ! -f /etc/systemd/system/pibrick-autorotation.service ]; } && missing="$missing autorotation" ;;
 		wrapper)    [ ! -f /usr/local/bin/pibrick-tools ] && missing="$missing wrapper" ;;
 		esac
 	done
@@ -460,7 +467,7 @@ do_uninstall() {
 	echo
 
 	# Uninstall in dependency order regardless of the order the user typed.
-	local ordered="calibration battery display upower button wrapper"
+	local ordered="calibration battery display upower autorotation button wrapper"
 	for comp in $ordered; do
 		case " $targets " in
 		*" $comp "*)
@@ -690,7 +697,7 @@ if [ "$(id -u)" != "0" ]; then
                 read_only=1 ;;
             --install|--uninstall|--enable-calibration|--disable-calibration|\
 --reset-calibration|--apply-calibration|--battery-config|--battery-check|\
---enable-upower|--disable-upower)
+--enable-upower|--disable-upower|--enable-autorotation|--disable-autorotation)
                 read_only=0; break ;;
             *)
                 # Unknown / non-system-modifying arg — fall through to default
@@ -713,14 +720,15 @@ while [ $# -gt 0 ]; do
 		[ $# -eq 0 ] && { error "--install requires argument"; usage; exit 1; }
 		for comp in $(echo "$1" | tr ',' ' '); do
 			case "$comp" in
-			all)
-				INSTALL_DISPLAY=1
-				INSTALL_BATTERY_NEW=1
-				INSTALL_CALIBRATION=1
-				INSTALL_UPower=1
-				INSTALL_BUTTON=1
-				INSTALL_EXPLICIT=1
-				;;
+		all)
+			INSTALL_DISPLAY=1
+			INSTALL_BATTERY_NEW=1
+			INSTALL_CALIBRATION=1
+			INSTALL_UPower=1
+			INSTALL_BUTTON=1
+			INSTALL_AUTOROTATION=1
+			INSTALL_EXPLICIT=1
+			;;
 			none)
 				INSTALL_EXPLICIT=1
 				;;
@@ -749,15 +757,19 @@ while [ $# -gt 0 ]; do
 				INSTALL_UPower=1
 				INSTALL_EXPLICIT=1
 				;;
-			button)
-				INSTALL_BUTTON=1
-				INSTALL_EXPLICIT=1
-				;;
-			*)
-				error "Unknown component: $comp"
-				usage
-				exit 1
-				;;
+		button)
+			INSTALL_BUTTON=1
+			INSTALL_EXPLICIT=1
+			;;
+		autorotation)
+			INSTALL_AUTOROTATION=1
+			INSTALL_EXPLICIT=1
+			;;
+		*)
+			error "Unknown component: $comp"
+			usage
+			exit 1
+			;;
 			esac
 		done
 		shift
@@ -770,11 +782,11 @@ while [ $# -gt 0 ]; do
 		UNINSTALL_TARGETS=
 		for comp in $(echo "$1" | tr ',' ' '); do
 			case "$comp" in
-			all)
-				UNINSTALL_TARGETS="$UNINSTALL_TARGETS display battery calibration upower button wrapper"
-				;;
-			display|battery|calibration|upower|button|wrapper)
-				UNINSTALL_TARGETS="$UNINSTALL_TARGETS $comp"
+		all)
+			UNINSTALL_TARGETS="$UNINSTALL_TARGETS display battery calibration upower button autorotation wrapper"
+			;;
+		display|battery|calibration|upower|button|autorotation|wrapper)
+			UNINSTALL_TARGETS="$UNINSTALL_TARGETS $comp"
 				;;
 			*)
 				error "Unknown --uninstall component: $comp"
@@ -799,6 +811,18 @@ while [ $# -gt 0 ]; do
 	--status-calibration)
 		status_calibration
 		exit $?
+		;;
+	--enable-autorotation)
+		systemctl enable pibrick-autorotation.service 2>/dev/null || true
+		systemctl start pibrick-autorotation.service 2>/dev/null || true
+		success "Autorotation service enabled and started"
+		exit 0
+		;;
+	--disable-autorotation)
+		systemctl stop pibrick-autorotation.service 2>/dev/null || true
+		systemctl disable pibrick-autorotation.service 2>/dev/null || true
+		success "Autorotation service disabled and stopped"
+		exit 0
 		;;
 	--enable-calibration)
 		systemctl enable pibrick-battery-calibration.service 2>/dev/null || true
@@ -853,6 +877,7 @@ choose_components() {
 		INSTALL_CALIBRATION=1
 		INSTALL_UPower=1
 		INSTALL_BUTTON=1
+		INSTALL_AUTOROTATION=1
 		return 0
 	fi
 
@@ -911,6 +936,7 @@ choose_components() {
 	prompt_yesno "Install Calibration Tools (logger + auto-calibrator)" INSTALL_CALIBRATION
 	prompt_yesno "Apply UPower KDE Fix (show Charging state)" INSTALL_UPower
 	prompt_yesno "Install Button Service (pibrickbtn)" INSTALL_BUTTON
+	prompt_yesno "Install Autorotation Service (MMA8451Q accelerometer)" INSTALL_AUTOROTATION
 
 	if [ -z "${INSTALL_DISPLAY:-}${INSTALL_BATTERY_NEW:-}${INSTALL_BATTERY_ORIGINAL:-}${INSTALL_CALIBRATION:-}${INSTALL_UPower:-}${INSTALL_BUTTON:-}" ]; then
 		error "Nothing selected. Exiting."
@@ -1437,6 +1463,47 @@ install_button() {
 	fi
 }
 
+# ── Install autorotation service ─────────────────────────────────────────────────
+install_autorotation() {
+	info "Installing Autorotation Service..."
+
+	local AUTOROTATION_INSTALL="$PIBRICK_LIB/autorotation-service/install.sh"
+	if [ ! -f "$AUTOROTATION_INSTALL" ]; then
+		error "Autorotation install script not found (expected at $AUTOROTATION_INSTALL)"
+		return 1
+	fi
+
+	# Run the autorotation installer
+	bash "$AUTOROTATION_INSTALL"
+
+	success "Autorotation service installed"
+}
+
+# ── Uninstall autorotation ──────────────────────────────────────────────────────
+uninstall_autorotation() {
+	info "Uninstalling autorotation service..."
+
+	local AUTOROTATION_UNINSTALL="$PIBRICK_LIB/autorotation-service/uninstall.sh"
+	if [ -f "$AUTOROTATION_UNINSTALL" ]; then
+		bash "$AUTOROTATION_UNINSTALL"
+	else
+		# Manual cleanup if uninstall script not found
+		warn "Autorotation uninstall script not found, performing manual cleanup..."
+
+		systemctl stop pibrick-autorotation.service 2>/dev/null || true
+		systemctl disable pibrick-autorotation.service 2>/dev/null || true
+		rm -f /etc/systemd/system/pibrick-autorotation.service
+		rm -f /usr/local/bin/pibrick-autorotation.sh
+		rm -f /usr/local/bin/pibrick-autorotation
+		rm -f /etc/pibrick/actions/autorotation-lock.sh
+		rm -f /var/lib/pibrick/autorotation.lock
+		rm -f /var/lib/pibrick/autorotation.lock.type
+		systemctl daemon-reload
+	fi
+
+	success "Autorotation service uninstalled"
+}
+
 # ── Reload drivers ─────────────────────────────────────────────────────────────
 reload_drivers() {
 	info "Reloading drivers..."
@@ -1496,7 +1563,7 @@ main() {
 		case "$arg" in
 			--status|--status-calibration|--battery-status|--version|-h|--help|help)
 				needs_root=0 ;;
-			--install|--uninstall|--enable-calibration|--disable-calibration|--reset-calibration|--apply-calibration|--battery-config|--battery-check|--enable-upower|--disable-upower)
+			--install|--uninstall|--enable-calibration|--disable-calibration|--reset-calibration|--apply-calibration|--battery-config|--battery-check|--enable-upower|--disable-upower|--enable-autorotation|--disable-autorotation)
 				needs_root=1; break ;;
 		esac
 	done
@@ -1511,7 +1578,7 @@ main() {
 	choose_components "$@"
 
 	# Copy source tree for all installs
-	if [ -n "$INSTALL_DISPLAY$INSTALL_BATTERY_NEW$INSTALL_BATTERY_ORIGINAL$INSTALL_CALIBRATION$INSTALL_BUTTON" ]; then
+	if [ -n "$INSTALL_DISPLAY$INSTALL_BATTERY_NEW$INSTALL_BATTERY_ORIGINAL$INSTALL_CALIBRATION$INSTALL_BUTTON$INSTALL_AUTOROTATION" ]; then
 		copy_sources
 	fi
 
@@ -1532,9 +1599,10 @@ main() {
 	[ -n "$INSTALL_CALIBRATION" ] && install_calibration
 	[ -n "$INSTALL_UPower" ] && fix_upower
 	[ -n "$INSTALL_BUTTON" ] && install_button
+	[ -n "$INSTALL_AUTOROTATION" ] && install_autorotation
 
 	# Install the global /usr/local/bin/pibrick-tools wrapper so users
-	# don't have to remember the install.sh path under /usr/lib/pibrick.
+	# don't have to remember the install.sh path under /usr/lib/pibrick/.
 	# Also install bash completion if a completion dir is available.
 	if [ -f "$PIBRICK_SRC/tools/pibrick-tools.sh" ]; then
 		install_pibrick_wrapper
@@ -1554,6 +1622,7 @@ main() {
 	[ -n "$INSTALL_CALIBRATION" ] && echo "  - Calibration tools (logger + auto-calibrator)"
 	[ -n "$INSTALL_UPower" ] && echo "  - UPower KDE fix"
 	[ -n "$INSTALL_BUTTON" ] && echo "  - Button service"
+	[ -n "$INSTALL_AUTOROTATION" ] && echo "  - Autorotation service (MMA8451Q accelerometer)"
 	echo
 	echo "Use \`pibrick-tools\` for everything from now on:"
 	echo "  sudo pibrick-tools --battery-status"

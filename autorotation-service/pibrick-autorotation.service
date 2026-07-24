@@ -1,0 +1,44 @@
+[Unit]
+Description=piBrick MMA8451Q Autorotation Service
+After=graphical.target multi-user.target
+Wants=graphical.target
+
+# Allow the service to run even without a display manager (headless mode)
+# but prefer to run when a session is active
+After=display-manager.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/pibrick-autorotation.sh
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+# Run as root to access IIO sysfs and perform rotation
+User=root
+Group=root
+
+# Environment
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=WAYLAND_DISPLAY=wayland-0
+Environment=QT_QPA_PLATFORM=wayland
+
+# Hardening
+NoNewPrivileges=false
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/pibrick
+PrivateTmp=true
+
+# Allow access to IIO devices
+DevicePolicy=auto
+DeviceAllow=/dev/iio:device* rw
+DeviceAllow=/dev/i2c-* rw
+
+# Allow access to display
+SupplementaryGroups=video
+
+[Install]
+WantedBy=multi-user.target

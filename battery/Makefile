@@ -6,9 +6,9 @@ MODULE_INSTALL_DIR := /lib/modules/$(shell uname -r)/kernel/drivers/power/supply
 # Order of preference:
 #   1. PIBRICK_USER_HOME env var (set by install.sh)
 #   2. $HOME/battery-tools (per-user install)
-#   3. /usr/lib/pibrick/battery-tools (system-wide install)
+#   3. /usr/lib/pibrick/battery (system-wide install)
 PIBRICK_USER_HOME ?= $(HOME)/battery-tools
-PIBRICK_TOOLS ?= $(if $(wildcard $(PIBRICK_USER_HOME)/battery_set.py),$(PIBRICK_USER_HOME),/usr/lib/pibrick/battery-tools)
+PIBRICK_TOOLS ?= $(if $(wildcard $(PIBRICK_USER_HOME)/battery_set.py),$(PIBRICK_USER_HOME),$(if $(wildcard $(PIBRICK_USER_HOME)/../battery/battery_set.py),$(PIBRICK_USER_HOME)/../battery,/usr/lib/pibrick/battery))
 
 .PHONY: modules clean install remove install-tools install-calibration install-service
 

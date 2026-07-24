@@ -1,0 +1,48 @@
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "brcm,bcm2712", "raspberrypi,5-compute-module", "raspberrypi,5-model-b";
+
+	/*
+	 * piBrick MMA8451Q Accelerometer Overlay
+	 *
+	 * Based on the piBrick AOSP17 V6 release by Sconioo.
+	 * Adds MMA8451Q accelerometer to I2C1 for automatic screen rotation.
+	 *
+	 * Hardware: MMA8451Q 3-axis accelerometer
+	 * Interface: I2C at address 0x1C
+	 * Driver: mma8452 (handles MMA8451Q family)
+	 *
+	 * Pin connections:
+	 *   - VCC: 3.3V
+	 *   - GND: Ground
+	 *   - SDA: I2C1 SDA (GPIO 44)
+	 *   - SCL: I2C1 SCL (GPIO 45)
+	 *   - SA0: Floating (addr 0x1C)
+	 */
+
+	fragment@0 {
+		target = <&i2c1>;
+		__overlay__ {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "okay";
+
+			/* MMA8451Q 3-axis accelerometer at 0x1C */
+			accelerometer@1c {
+				compatible = "fsl,mma8451";
+				reg = <0x1c>;
+				status = "okay";
+
+				/*
+				 * pibrick,invert-x:
+				 * The MMA8451Q on piBrick has X axis inverted compared to
+				 * the standard orientation. This property enables the
+				 * kernel driver patch to invert the X reading.
+				 */
+				pibrick,invert-x;
+			};
+		};
+	};
+};

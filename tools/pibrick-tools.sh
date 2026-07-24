@@ -30,7 +30,8 @@ fi
 # ── Subcommand privilege check ─────────────────────────────────────────────────
 # Read-only subcommands (status / help / version) are allowed without sudo.
 # Everything else (--install, --uninstall, --*-calibration, --battery-*,
-# --*-upower) modifies /etc, /sys, /var/log, or the kernel and requires root.
+# --*-upower, --*-autorotation) modifies /etc, /sys, /var/log, or the kernel
+# and requires root.
 needs_root() {
 	local arg
 	for arg in "$@"; do
