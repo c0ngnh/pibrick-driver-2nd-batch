@@ -1301,7 +1301,11 @@ restart_upower() {
 	local DRIVER_STATUS
 	DRIVER_STATUS=$(cat /sys/class/power_supply/battery/status 2>/dev/null || echo "N/A")
 	info "UPower state='$STATE'  driver status='$DRIVER_STATUS'"
-	if [ "$STATE" = "$DRIVER_STATUS" ]; then
+	# Normalize to lowercase for comparison (UPower uses lowercase, sysfs may differ).
+	local STATE_LC DRIVER_STATUS_LC
+	STATE_LC=$(echo "$STATE" | tr '[:upper:]' '[:lower:]')
+	DRIVER_STATUS_LC=$(echo "$DRIVER_STATUS" | tr '[:upper:]' '[:lower:]')
+	if [ "$STATE_LC" = "$DRIVER_STATUS_LC" ]; then
 		success "UPower fix verified."
 	else
 		warn "UPower state doesn't match driver. Reboot may be needed."
