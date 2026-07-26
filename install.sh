@@ -1146,25 +1146,25 @@ fix_upower() {
 	info "Backed up to: $BAK"
 
 	python3 - <<-PYEOF
-import sys
-content = open('$UP_SRC/src/linux/up-device-supply-battery.c').read()
-old = '''\tif (values.state != UP_DEVICE_STATE_FULLY_CHARGED &&
+	import sys
+	content = open('$UP_SRC/src/linux/up-device-supply-battery.c').read()
+	old = '''\tif (values.state != UP_DEVICE_STATE_FULLY_CHARGED &&
 \t    g_udev_device_get_sysfs_attr_as_double_uncached (native, \"current_now\") < 0.0)
 \t\tvalues.state = UP_DEVICE_STATE_DISCHARGING;'''
-new = '''\t/* piBrick: disabled — BQ25895 follows power_supply convention (negative=charging).
+	new = '''\t/* piBrick: disabled — BQ25895 follows power_supply convention (negative=charging).
 \t * Restore this block if your hardware reports status=Charging when discharging. */
 \tif (values.state != UP_DEVICE_STATE_FULLY_CHARGED &&
 \t    0 && /* DISABLED: was: current_now < 0 */
 \t    g_udev_device_get_sysfs_attr_as_double_uncached (native, \"current_now\") < 0.0)
 \t\tvalues.state = UP_DEVICE_STATE_DISCHARGING;'''
-if old in content:
-	content = content.replace(old, new)
-	open('$UP_SRC/src/linux/up-device-supply-battery.c', 'w').write(content)
-	print('Source patched: disabled current_now override')
-else:
-	print('Primary pattern not found — source may already be modified or differs.')
-	print('UPower may not need patching on this version.')
-PYEOF
+	if old in content:
+		content = content.replace(old, new)
+		open('$UP_SRC/src/linux/up-device-supply-battery.c', 'w').write(content)
+		print('Source patched: disabled current_now override')
+	else:
+		print('Primary pattern not found — source may already be modified or differs.')
+		print('UPower may not need patching on this version.')
+	PYEOF
 
 	info "Building UPower..."
 	cd "$UP_SRC"
