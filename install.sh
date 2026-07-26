@@ -1158,12 +1158,12 @@ new = '''	/* piBrick: disabled — BQ25895 follows power_supply convention (nega
 	    g_udev_device_get_sysfs_attr_as_double_uncached (native, \"current_now\") < 0.0)
 		values.state = UP_DEVICE_STATE_DISCHARGING;'''
 	if old in content:
-    content = content.replace(old, new)
-    open('$UP_SRC/src/linux/up-device-supply-battery.c', 'w').write(content)
-    print('Source patched: disabled current_now override')
-else:
-    print('Primary pattern not found — source may already be modified or differs.')
-    print('UPower may not need patching on this version.')
+		content = content.replace(old, new)
+		open('$UP_SRC/src/linux/up-device-supply-battery.c', 'w').write(content)
+		print('Source patched: disabled current_now override')
+	else:
+		print('Primary pattern not found — source may already be modified or differs.')
+		print('UPower may not need patching on this version.')
 "
 
 	info "Building UPower..."
