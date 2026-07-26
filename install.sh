@@ -1146,12 +1146,12 @@ fix_upower() {
 	info "Backed up to: $BAK"
 
 	python3 -c "
-import sys
-content = open('$UP_SRC/src/linux/up-device-supply-battery.c').read()
-old = '''	if (values.state != UP_DEVICE_STATE_FULLY_CHARGED &&
+	import sys
+	content = open('$UP_SRC/src/linux/up-device-supply-battery.c').read()
+	old = '''	if (values.state != UP_DEVICE_STATE_FULLY_CHARGED &&
 	    g_udev_device_get_sysfs_attr_as_double_uncached (native, \"current_now\") < 0.0)
 		values.state = UP_DEVICE_STATE_DISCHARGING;'''
-new = '''	/* piBrick: disabled — BQ25895 follows power_supply convention (negative=charging).
+	new = '''	/* piBrick: disabled — BQ25895 follows power_supply convention (negative=charging).
 	 * Restore this block if your hardware reports status=Charging when discharging. */
 	if (values.state != UP_DEVICE_STATE_FULLY_CHARGED &&
 	    0 && /* DISABLED: was: current_now < 0 */
