@@ -1145,20 +1145,26 @@ fix_upower() {
 	cp "$UPowerD" "$BAK"
 	info "Backed up to: $BAK"
 
-	# Use sed to replace the offending condition while preserving all indentation.
-	# The change: "current_now < 0.0" → "0 && /* DISABLED: was: current_now < 0 */"
-	# This prevents UPower from mis-detecting discharging when the BQ25895
-	# reports negative current (which means charging per power_supply convention).
-	sed -i '
-	/UP_DEVICE_STATE_FULLY_CHARGED/,/UP_DEVICE_STATE_DISCHARGING/ {
-		/\t\tvalues\.state = UP_DEVICE_STATE_DISCHARGING;/ {
-			# Only patch the first occurrence inside the current_now < 0 block
-			# by replacing "current_now" with "0 /* DISABLED */" only in that block
-			N
-			s/\(current_now"\)) < 0\.0)/0 \&\& \/* DISABLED: was: current_now < 0 *\/\1/
-		}
-	}
-	' "$UP_SRC/src/linux/up-device-supply-battery.c"
+		# Replace the current_now discharge detection check in source.
+	# UPower mis-detects BQ25895 charging as discharging when current_now is
+	# negative.
+	UP_FILE="$UP_SRC/src/linux/up-device-supply-battery.c"
+	python3 <<PY
+from pathlib import Path
+path = Path("$UP_FILE")
+content = path.read_text()
+needle = 'g_udev_device_get_sysfs_attr_as_double_uncached (native, "current_now") < 0.0'
+if needle in content:
+    content = content.replace(
+        needle,
+        '0 && /* DISABLED: was: current_now < 0 */ g_udev_device_get_sysfs_attr_as_double_uncached (native, "current_now") < 0.0',
+        1)
+    path.write_text(content)
+    print('Source patched: disabled current_now override')
+else:
+    print('Primary pattern not found — source may already be modified or differs.')
+    print('UPower may not need patching on this version.')
+PY
 
 	# Verify patch was applied (look for our DISABLED marker)
 	if grep -q "DISABLED: was: current_now" \
