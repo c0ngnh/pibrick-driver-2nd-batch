@@ -1149,23 +1149,27 @@ fix_upower() {
 	# UPower mis-detects BQ25895 charging as discharging when current_now is
 	# negative.
 	UP_FILE="$UP_SRC/src/linux/up-device-supply-battery.c"
-	python3 <<PY
-	from pathlib import Path
-	path = Path("$UP_FILE")
-	content = path.read_text()
-	needle = 'g_udev_device_get_sysfs_attr_as_double_uncached (native, "current_now") < 0.0'
-	if needle in content:
-		content = content.replace(
-			needle,
-			'0 && /* DISABLED: was: current_now < 0 */ g_udev_device_get_sysfs_attr_as_double_uncached (native, "current_now") < 0.0',
-			1)
-		path.write_text(content)
-		print('Source patched: disabled current_now override')
-	else:
-		print('Primary pattern not found -- source may already be modified or differs.')
-		print('UPower may not need patching on this version.')
-	PY
-
+	# Write Python patcher to a temp file, then execute it.
+	# This avoids all heredoc indentation issues (bash <<- strips ALL leading
+	# tabs, which is incompatible with Python syntax). The quoted terminator
+	# on the inner heredoc prevents shell-variable expansion of the code.
+	cat > /tmp/pibrick-patch-upower.py <<'PYEOF'
+import pathlib, sys
+path = pathlib.Path(sys.argv[1])
+content = path.read_text()
+needle = 'g_udev_device_get_sysfs_attr_as_double_uncached (native, "current_now") < 0.0'
+if needle in content:
+    content = content.replace(
+        needle,
+        '0 && /* DISABLED: was: current_now < 0 */ g_udev_device_get_sysfs_attr_as_double_uncached (native, "current_now") < 0.0',
+        1)
+    path.write_text(content)
+    print('Source patched: disabled current_now override')
+else:
+    print('Primary pattern not found -- source may already be modified or differs.')
+    print('UPower may not need patching on this version.')
+PYEOF
+	python3 /tmp/pibrick-patch-upower.py "$UP_FILE"
 	# Verify patch was applied (look for our DISABLED marker)
 	if grep -q "DISABLED: was: current_now" \
 	   "$UP_SRC/src/linux/up-device-supply-battery.c" 2>/dev/null; then
