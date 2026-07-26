@@ -1,0 +1,716 @@
+{
+  "last_update": "2026-07-26T18:00:28.405212",
+  "confidence": 0.996039603960396,
+  "confidence_threshold": 0.85,
+  "no_ina228": false,
+  "stats": {
+    "total_records": 3964,
+    "resting_records": 3455,
+    "soc_coverage": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23,
+      24,
+      25,
+      26,
+      27,
+      28,
+      29,
+      30,
+      31,
+      32,
+      33,
+      34,
+      35,
+      36,
+      37,
+      38,
+      39,
+      40,
+      41,
+      42,
+      43,
+      44,
+      45,
+      46,
+      47,
+      48,
+      49,
+      50,
+      51,
+      52,
+      53,
+      54,
+      55,
+      56,
+      57,
+      58,
+      59,
+      60,
+      61,
+      62,
+      63,
+      64,
+      65,
+      66,
+      67,
+      68,
+      69,
+      70,
+      71,
+      72,
+      73,
+      74,
+      75,
+      76,
+      77,
+      78,
+      79,
+      80,
+      81,
+      82,
+      83,
+      84,
+      85,
+      86,
+      87,
+      88,
+      89,
+      90,
+      91,
+      92,
+      93,
+      94,
+      95,
+      96,
+      97,
+      98,
+      99
+    ],
+    "soc_coverage_pct": 99.00990099009901
+  },
+  "suggested_table": [
+    {
+      "voltage_cv": 324,
+      "soc": 3,
+      "samples": 7,
+      "std_dev": 2490
+    },
+    {
+      "voltage_cv": 324,
+      "soc": 2,
+      "samples": 4,
+      "std_dev": 1161
+    },
+    {
+      "voltage_cv": 325,
+      "soc": 4,
+      "samples": 7,
+      "std_dev": 2769
+    },
+    {
+      "voltage_cv": 326,
+      "soc": 5,
+      "samples": 7,
+      "std_dev": 1684
+    },
+    {
+      "voltage_cv": 326,
+      "soc": 1,
+      "samples": 9,
+      "std_dev": 24034
+    },
+    {
+      "voltage_cv": 327,
+      "soc": 8,
+      "samples": 13,
+      "std_dev": 12509
+    },
+    {
+      "voltage_cv": 327,
+      "soc": 7,
+      "samples": 8,
+      "std_dev": 2086
+    },
+    {
+      "voltage_cv": 327,
+      "soc": 6,
+      "samples": 6,
+      "std_dev": 1744
+    },
+    {
+      "voltage_cv": 328,
+      "soc": 9,
+      "samples": 17,
+      "std_dev": 6881
+    },
+    {
+      "voltage_cv": 330,
+      "soc": 10,
+      "samples": 24,
+      "std_dev": 17989
+    },
+    {
+      "voltage_cv": 330,
+      "soc": 0,
+      "samples": 4,
+      "std_dev": 629
+    },
+    {
+      "voltage_cv": 332,
+      "soc": 11,
+      "samples": 24,
+      "std_dev": 36420
+    },
+    {
+      "voltage_cv": 334,
+      "soc": 12,
+      "samples": 30,
+      "std_dev": 39109
+    },
+    {
+      "voltage_cv": 335,
+      "soc": 14,
+      "samples": 37,
+      "std_dev": 30911
+    },
+    {
+      "voltage_cv": 335,
+      "soc": 13,
+      "samples": 30,
+      "std_dev": 36911
+    },
+    {
+      "voltage_cv": 336,
+      "soc": 15,
+      "samples": 20,
+      "std_dev": 26257
+    },
+    {
+      "voltage_cv": 339,
+      "soc": 16,
+      "samples": 30,
+      "std_dev": 87373
+    },
+    {
+      "voltage_cv": 341,
+      "soc": 18,
+      "samples": 27,
+      "std_dev": 101944
+    },
+    {
+      "voltage_cv": 342,
+      "soc": 17,
+      "samples": 30,
+      "std_dev": 102365
+    },
+    {
+      "voltage_cv": 343,
+      "soc": 20,
+      "samples": 29,
+      "std_dev": 101697
+    },
+    {
+      "voltage_cv": 343,
+      "soc": 19,
+      "samples": 27,
+      "std_dev": 103676
+    },
+    {
+      "voltage_cv": 344,
+      "soc": 21,
+      "samples": 28,
+      "std_dev": 102600
+    },
+    {
+      "voltage_cv": 345,
+      "soc": 22,
+      "samples": 30,
+      "std_dev": 102989
+    },
+    {
+      "voltage_cv": 346,
+      "soc": 23,
+      "samples": 28,
+      "std_dev": 101949
+    },
+    {
+      "voltage_cv": 347,
+      "soc": 25,
+      "samples": 29,
+      "std_dev": 100437
+    },
+    {
+      "voltage_cv": 347,
+      "soc": 24,
+      "samples": 29,
+      "std_dev": 101603
+    },
+    {
+      "voltage_cv": 348,
+      "soc": 27,
+      "samples": 29,
+      "std_dev": 97064
+    },
+    {
+      "voltage_cv": 348,
+      "soc": 26,
+      "samples": 29,
+      "std_dev": 99361
+    },
+    {
+      "voltage_cv": 349,
+      "soc": 28,
+      "samples": 28,
+      "std_dev": 91616
+    },
+    {
+      "voltage_cv": 350,
+      "soc": 29,
+      "samples": 29,
+      "std_dev": 85279
+    },
+    {
+      "voltage_cv": 351,
+      "soc": 32,
+      "samples": 19,
+      "std_dev": 45993
+    },
+    {
+      "voltage_cv": 351,
+      "soc": 31,
+      "samples": 28,
+      "std_dev": 61215
+    },
+    {
+      "voltage_cv": 351,
+      "soc": 30,
+      "samples": 29,
+      "std_dev": 74679
+    },
+    {
+      "voltage_cv": 354,
+      "soc": 36,
+      "samples": 34,
+      "std_dev": 85500
+    },
+    {
+      "voltage_cv": 355,
+      "soc": 37,
+      "samples": 28,
+      "std_dev": 99608
+    },
+    {
+      "voltage_cv": 355,
+      "soc": 35,
+      "samples": 36,
+      "std_dev": 67428
+    },
+    {
+      "voltage_cv": 355,
+      "soc": 33,
+      "samples": 33,
+      "std_dev": 60194
+    },
+    {
+      "voltage_cv": 356,
+      "soc": 47,
+      "samples": 18,
+      "std_dev": 48913
+    },
+    {
+      "voltage_cv": 356,
+      "soc": 45,
+      "samples": 26,
+      "std_dev": 47262
+    },
+    {
+      "voltage_cv": 356,
+      "soc": 34,
+      "samples": 33,
+      "std_dev": 63930
+    },
+    {
+      "voltage_cv": 357,
+      "soc": 46,
+      "samples": 27,
+      "std_dev": 51615
+    },
+    {
+      "voltage_cv": 357,
+      "soc": 44,
+      "samples": 22,
+      "std_dev": 76511
+    },
+    {
+      "voltage_cv": 357,
+      "soc": 39,
+      "samples": 31,
+      "std_dev": 99064
+    },
+    {
+      "voltage_cv": 357,
+      "soc": 38,
+      "samples": 28,
+      "std_dev": 100708
+    },
+    {
+      "voltage_cv": 358,
+      "soc": 40,
+      "samples": 28,
+      "std_dev": 97573
+    },
+    {
+      "voltage_cv": 359,
+      "soc": 49,
+      "samples": 24,
+      "std_dev": 44453
+    },
+    {
+      "voltage_cv": 359,
+      "soc": 48,
+      "samples": 28,
+      "std_dev": 50841
+    },
+    {
+      "voltage_cv": 359,
+      "soc": 42,
+      "samples": 31,
+      "std_dev": 92830
+    },
+    {
+      "voltage_cv": 359,
+      "soc": 41,
+      "samples": 29,
+      "std_dev": 96051
+    },
+    {
+      "voltage_cv": 360,
+      "soc": 51,
+      "samples": 17,
+      "std_dev": 53327
+    },
+    {
+      "voltage_cv": 360,
+      "soc": 50,
+      "samples": 26,
+      "std_dev": 56341
+    },
+    {
+      "voltage_cv": 360,
+      "soc": 43,
+      "samples": 27,
+      "std_dev": 88343
+    },
+    {
+      "voltage_cv": 366,
+      "soc": 52,
+      "samples": 37,
+      "std_dev": 62821
+    },
+    {
+      "voltage_cv": 367,
+      "soc": 56,
+      "samples": 41,
+      "std_dev": 50723
+    },
+    {
+      "voltage_cv": 367,
+      "soc": 54,
+      "samples": 33,
+      "std_dev": 61667
+    },
+    {
+      "voltage_cv": 367,
+      "soc": 53,
+      "samples": 40,
+      "std_dev": 60579
+    },
+    {
+      "voltage_cv": 368,
+      "soc": 58,
+      "samples": 46,
+      "std_dev": 51459
+    },
+    {
+      "voltage_cv": 368,
+      "soc": 57,
+      "samples": 50,
+      "std_dev": 48234
+    },
+    {
+      "voltage_cv": 368,
+      "soc": 55,
+      "samples": 39,
+      "std_dev": 56843
+    },
+    {
+      "voltage_cv": 369,
+      "soc": 59,
+      "samples": 46,
+      "std_dev": 48973
+    },
+    {
+      "voltage_cv": 370,
+      "soc": 60,
+      "samples": 44,
+      "std_dev": 49330
+    },
+    {
+      "voltage_cv": 372,
+      "soc": 61,
+      "samples": 46,
+      "std_dev": 62182
+    },
+    {
+      "voltage_cv": 373,
+      "soc": 62,
+      "samples": 44,
+      "std_dev": 57572
+    },
+    {
+      "voltage_cv": 377,
+      "soc": 63,
+      "samples": 47,
+      "std_dev": 70004
+    },
+    {
+      "voltage_cv": 378,
+      "soc": 64,
+      "samples": 64,
+      "std_dev": 57179
+    },
+    {
+      "voltage_cv": 379,
+      "soc": 65,
+      "samples": 66,
+      "std_dev": 53750
+    },
+    {
+      "voltage_cv": 381,
+      "soc": 67,
+      "samples": 73,
+      "std_dev": 44767
+    },
+    {
+      "voltage_cv": 381,
+      "soc": 66,
+      "samples": 85,
+      "std_dev": 51336
+    },
+    {
+      "voltage_cv": 382,
+      "soc": 71,
+      "samples": 83,
+      "std_dev": 46436
+    },
+    {
+      "voltage_cv": 382,
+      "soc": 68,
+      "samples": 66,
+      "std_dev": 34816
+    },
+    {
+      "voltage_cv": 383,
+      "soc": 73,
+      "samples": 51,
+      "std_dev": 60411
+    },
+    {
+      "voltage_cv": 383,
+      "soc": 72,
+      "samples": 75,
+      "std_dev": 55861
+    },
+    {
+      "voltage_cv": 383,
+      "soc": 70,
+      "samples": 75,
+      "std_dev": 30547
+    },
+    {
+      "voltage_cv": 383,
+      "soc": 69,
+      "samples": 69,
+      "std_dev": 34313
+    },
+    {
+      "voltage_cv": 384,
+      "soc": 74,
+      "samples": 65,
+      "std_dev": 53598
+    },
+    {
+      "voltage_cv": 384,
+      "soc": 91,
+      "samples": 8,
+      "std_dev": 3297
+    },
+    {
+      "voltage_cv": 385,
+      "soc": 75,
+      "samples": 72,
+      "std_dev": 50733
+    },
+    {
+      "voltage_cv": 385,
+      "soc": 92,
+      "samples": 8,
+      "std_dev": 5505
+    },
+    {
+      "voltage_cv": 386,
+      "soc": 83,
+      "samples": 21,
+      "std_dev": 28492
+    },
+    {
+      "voltage_cv": 386,
+      "soc": 77,
+      "samples": 69,
+      "std_dev": 51743
+    },
+    {
+      "voltage_cv": 386,
+      "soc": 76,
+      "samples": 71,
+      "std_dev": 51436
+    },
+    {
+      "voltage_cv": 387,
+      "soc": 78,
+      "samples": 77,
+      "std_dev": 54026
+    },
+    {
+      "voltage_cv": 387,
+      "soc": 89,
+      "samples": 21,
+      "std_dev": 40854
+    },
+    {
+      "voltage_cv": 387,
+      "soc": 88,
+      "samples": 27,
+      "std_dev": 46512
+    },
+    {
+      "voltage_cv": 388,
+      "soc": 93,
+      "samples": 9,
+      "std_dev": 6758
+    },
+    {
+      "voltage_cv": 389,
+      "soc": 79,
+      "samples": 89,
+      "std_dev": 58838
+    },
+    {
+      "voltage_cv": 390,
+      "soc": 81,
+      "samples": 96,
+      "std_dev": 53248
+    },
+    {
+      "voltage_cv": 390,
+      "soc": 80,
+      "samples": 79,
+      "std_dev": 61376
+    },
+    {
+      "voltage_cv": 390,
+      "soc": 90,
+      "samples": 20,
+      "std_dev": 111395
+    },
+    {
+      "voltage_cv": 390,
+      "soc": 82,
+      "samples": 34,
+      "std_dev": 50271
+    },
+    {
+      "voltage_cv": 390,
+      "soc": 94,
+      "samples": 8,
+      "std_dev": 10386
+    },
+    {
+      "voltage_cv": 391,
+      "soc": 87,
+      "samples": 31,
+      "std_dev": 27706
+    },
+    {
+      "voltage_cv": 391,
+      "soc": 86,
+      "samples": 28,
+      "std_dev": 21922
+    },
+    {
+      "voltage_cv": 393,
+      "soc": 85,
+      "samples": 36,
+      "std_dev": 29504
+    },
+    {
+      "voltage_cv": 394,
+      "soc": 84,
+      "samples": 27,
+      "std_dev": 38736
+    },
+    {
+      "voltage_cv": 395,
+      "soc": 95,
+      "samples": 9,
+      "std_dev": 16625
+    },
+    {
+      "voltage_cv": 399,
+      "soc": 99,
+      "samples": 36,
+      "std_dev": 21613
+    },
+    {
+      "voltage_cv": 400,
+      "soc": 96,
+      "samples": 13,
+      "std_dev": 4876
+    },
+    {
+      "voltage_cv": 401,
+      "soc": 98,
+      "samples": 14,
+      "std_dev": 1568
+    },
+    {
+      "voltage_cv": 401,
+      "soc": 97,
+      "samples": 16,
+      "std_dev": 1586
+    }
+  ],
+  "ready_for_apply": true
+}
