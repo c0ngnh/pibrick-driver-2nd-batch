@@ -439,7 +439,7 @@ do_uninstall() {
 		display)    panel_artifact >/dev/null 2>&1 || { [ ! -f /etc/pibrick.panel ] && [ ! -f /etc/systemd/system/pibrick.service ] && missing="$missing display"; } ;;
 		battery)    { lsmod 2>/dev/null | grep -q bq25890_battery || [ ! -f /etc/modprobe.d/pibrick-battery.conf ]; } && missing="$missing battery" ;;
 		calibration) [ ! -f /etc/systemd/system/pibrick-battery-calibration.service ] && missing="$missing calibration" ;;
-		upower)     [ ! -f /usr/libexec/upowerd ] && missing="$missing upower" ;;
+		upower)     { [ ! -f /usr/libexec/upowerd ] && [ ! -f /usr/lib/upower/upowerd ]; } && missing="$missing upower" ;;
 		kde-mobile-desktop)  [ ! -f "$HOME/.config/systemd/user/plasma-kwin_wayland.service.d/pi-kwin-recent-fix.conf" ] && missing="$missing kde-mobile-desktop" ;;
 		button)     { [ ! -f /usr/local/bin/pibrickbtn ] && [ ! -f /etc/systemd/system/pibrickbtn.service ]; } && missing="$missing button" ;;
 		autorotation) { [ ! -f /usr/local/bin/pibrick-autorotation.sh ] && [ ! -f /etc/systemd/system/pibrick-autorotation.service ]; } && missing="$missing autorotation" ;;
@@ -612,14 +612,17 @@ uninstall_calibration() {
 uninstall_upower() {
 	info "Uninstalling UPower KDE fix..."
 
-	local UPowerD=/usr/libexec/upowerd
+	local UPowerD
+	UPowerD=$(command -v upowerd 2>/dev/null || \
+		[ -f /usr/lib/upower/upowerd ] && echo /usr/lib/upower/upowerd || \
+		echo /usr/libexec/upowerd)
 	if [ ! -f "$UPowerD" ]; then
-		warn "upowerd not found at $UPowerD — nothing to restore"
+		warn "upowerd binary not found — nothing to restore"
 		return 0
 	fi
 
 	# Sanity check: only restore if the current binary is patched.
-	if ! grep -q "piBrick:" "$UPowerD" 2>/dev/null; then
+	if ! grep -qE "piBrick|DISABLED.*current_now" "$UPowerD" 2>/dev/null; then
 		warn "upowerd does not look patched — leaving alone"
 		return 0
 	fi
@@ -1098,15 +1101,24 @@ fix_upower() {
 		return 1
 	fi
 
-	local UPowerD=/usr/libexec/upowerd
+	local UPowerD
+	UPowerD=$(command -v upowerd 2>/dev/null || echo "/usr/libexec/upowerd")
+	# Also check the alternative path used on Debian/Ubuntu
 	if [ ! -f "$UPowerD" ]; then
-		warn "upowerd not found at $UPowerD — skipping."
+		if [ -f /usr/lib/upower/upowerd ]; then
+			UPowerD=/usr/lib/upower/upowerd
+		elif [ -f /usr/libexec/upowerd ]; then
+			UPowerD=/usr/libexec/upowerd
+		fi
+	fi
+	if [ ! -f "$UPowerD" ]; then
+		warn "upowerd binary not found — skipping."
 		return 0
 	fi
 
-	if grep -q "piBrick\|DISABLED.*current_now" "$UPowerD" 2>/dev/null; then
+	if grep -qE "piBrick|DISABLED.*current_now" "$UPowerD" 2>/dev/null; then
 		success "UPower already patched."
-		restart_upower
+		restart_upower "$UPowerD"
 		return 0
 	fi
 
@@ -1118,18 +1130,24 @@ fix_upower() {
 	[ -z "$UPVER" ] && UPVER="unknown"
 	info "UPower daemon version: $UPVER"
 
+	# git is required for cloning — install it first if missing.
+	if ! command -v git >/dev/null 2>&1; then
+		info "Installing git..."
+		apt-get install -y git 2>/dev/null || true
+	fi
+
 	local UP_SRC=/tmp/upower-pibrick-src
 	if [ ! -d "$UP_SRC/.git" ]; then
 		info "Cloning UPower source (tag v$UPVER) — this may take a few minutes..."
 		rm -rf "$UP_SRC"
 		# Capture stderr (progress) to filter out noise; exit code is git's.
-		{ sudo git clone --depth=1 --branch="v$UPVER" \
+		{ git clone --depth=1 --branch="v$UPVER" \
 			https://gitlab.freedesktop.org/upower/upower.git "$UP_SRC" \
 			2>&1 | grep -vE '^(Cloning|Receiving|Resolving|Updating|Checking|Enumerating|warning:|fatal:|error:)'; } \
 		&& git_ok=1 || git_ok=0
 		if [ "$git_ok" -eq 0 ]; then
 			info "Tag v$UPVER not found — trying main branch..."
-			{ sudo git clone --depth=1 \
+			{ git clone --depth=1 \
 				https://gitlab.freedesktop.org/upower/upower.git "$UP_SRC" \
 				2>&1 | grep -vE '^(Cloning|Receiving|Resolving|Updating|Checking|Enumerating|warning:|fatal:|error:)'; } \
 			&& git_ok=1 || git_ok=0
@@ -1194,6 +1212,8 @@ PYEOF
 	# so install them via pip as a fallback.
 	info "Installing UPower build dependencies..."
 	if ! apt-get install -y \
+			git \
+			python3-pip \
 			libglib2.0-dev \
 			libgcrypt20-dev \
 			libdbus-1-dev \
@@ -1243,7 +1263,7 @@ PYEOF
 
 	info "Running meson setup..."
 	local meson_output
-	meson_output=$("$MESON" setup build --prefix=/usr \
+	meson_output=$("$MESON" setup "$UP_SRC/build" --prefix=/usr \
 			-Dudevrulesdir=/lib/udev/rules.d \
 			-Dudevhwdbdir=/lib/udev/hwdb.d \
 			-Dsystemdsystemunitdir=no \
@@ -1262,7 +1282,7 @@ PYEOF
 
 	info "Compiling UPower (ninja -C build)..."
 	local ninja_output
-	ninja_output=$("$NINJA" -C build 2>&1) && ninja_ok=1 || ninja_ok=0
+	ninja_output=$("$NINJA" -C "$UP_SRC/build" 2>&1) && ninja_ok=1 || ninja_ok=0
 	echo "$ninja_output" | grep -vE '^\[' | head -20 | sed 's/^/    /'
 	if [ "$ninja_ok" -eq 0 ]; then
 		echo "$ninja_output" > /tmp/ninja-pibrick.log
@@ -1272,18 +1292,18 @@ PYEOF
 		return 1
 	fi
 
-	if [ ! -f build/src/upowerd ]; then
+	if [ ! -f "$UP_SRC/build/src/upowerd" ]; then
 		error "Build succeeded but upowerd not found."
 		cp "$BAK" "$UPowerD"
 		cd /
 		return 1
 	fi
 
-	install -m 0755 build/src/upowerd "$UPowerD"
+	install -m 0755 "$UP_SRC/build/src/upowerd" "$UPowerD"
 	cd /
 
 	success "UPower rebuilt successfully."
-	restart_upower
+	restart_upower "$UPowerD"
 }
 
 stop_upower() {
@@ -1294,9 +1314,16 @@ stop_upower() {
 }
 
 restart_upower() {
+	local upowerd_path="${1:-}"
+	if [ -z "$upowerd_path" ]; then
+		upowerd_path=$(command -v upowerd 2>/dev/null || \
+			[ -f /usr/lib/upower/upowerd ] && echo /usr/lib/upower/upowerd || \
+			echo /usr/libexec/upowerd)
+	fi
+
 	info "Restarting UPower daemon..."
 	stop_upower
-	sudo -n systemctl start upower 2>/dev/null || /usr/libexec/upowerd &
+	sudo -n systemctl start upower 2>/dev/null || "$upowerd_path" &
 	sleep 4
 
 	local STATE
