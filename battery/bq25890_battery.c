@@ -196,6 +196,13 @@ struct bq25890_device {
 	int ina228_current_ua;		/* last sampled, for property readers */
 
 	/*
+	 * Fast-poll window: when the charger state changes, this is set to
+	 * jiffies + fast_poll_ms/HZ so that capacity_refresh_work schedules
+	 * a tighter interval instead of the default 30 s refresh.
+	 */
+	unsigned long fast_poll_until;
+
+	/*
 	 * Runtime override for BQ25890_FG_V_OCV_TAU_SEC. The constant
 	 * default (60 s) is tuned for INA228 hardware (clean live voltage).
 	 * When no INA228 is detected at probe time we bump this to 120 s
@@ -378,6 +385,18 @@ module_param(fg_v_ocv_tau_sec_override, int, 0644);
 MODULE_PARM_DESC(fg_v_ocv_tau_sec_override,
 		 "OCV tracker time constant in seconds. -1 = use probe-time "
 		 "default (60 with INA228, 120 without).");
+
+/*
+ * Fast poll interval (milliseconds) after a charger state change.
+ * On hardware where the STAT IRQ pin doesn't fire (e.g. rp1 pinctrl
+ * GPIO path), this is the only way to get sub-30 s charger detection.
+ * Set to 0 to disable fast polling (always use 30 s interval).
+ */
+static int fast_poll_ms = 2000;
+module_param(fast_poll_ms, int, 0644);
+MODULE_PARM_DESC(fast_poll_ms,
+		 "Poll interval (ms) after charger plug/unplug until state "
+		 "stabilises. 0 disables fast polling (default: 2000).");
 
 /* --- end INA228 --- */
 
@@ -1837,6 +1856,8 @@ static void bq25890_capacity_refresh_work(struct work_struct *work)
 	struct bq25890_state state;
 	bool ext_pwr, charging;
 	int soc;
+	unsigned long now = jiffies;
+	bool charger_toggled = false;
 
 	soc = bq25890_sample_and_update_fg(bq);
 	if (soc < 0)
@@ -1846,16 +1867,47 @@ static void bq25890_capacity_refresh_work(struct work_struct *work)
 	state = bq->state;
 	ext_pwr = bq->last_ext_pwr;
 	charging = bq->last_charging;
+
+	/*
+	 * Detect charger plug/unplug by comparing ext_pwr (VBus present) from
+	 * this sample against the previous one.  The fuel-gauge state is
+	 * protected by bq->lock, so it is safe to access last_ext_pwr /
+	 * last_charging even though they belong to a previous work-cycle.
+	 */
+	if (bq->capacity_valid) {
+		if (bq->last_ext_pwr != ext_pwr ||
+		    bq->last_charging != charging) {
+			charger_toggled = true;
+			bq->fast_poll_until = now +
+				msecs_to_jiffies(fast_poll_ms);
+		}
+	}
 	mutex_unlock(&bq->lock);
 
 	/* Periodically save SOC to persistent storage for reboot consistency */
 	bq25890_save_persisted_soc(soc);
 
+	/*
+	 * Always notify UPower on charger toggle — even if SOC hasn't changed,
+	 * the charging/discharging icon must update immediately.
+	 */
+	if (charger_toggled)
+		bq25890_power_supply_changed(bq);
+
 	bq25890_notify_if_changed(bq, &state, ext_pwr, charging);
 
 reschedule:
-	schedule_delayed_work(&bq->capacity_refresh_work,
-			      BQ25890_CAPACITY_REFRESH_INTERVAL);
+{
+	unsigned long interval;
+
+	if (fast_poll_ms > 0 &&
+	    time_before(now, bq->fast_poll_until))
+		interval = msecs_to_jiffies(fast_poll_ms);
+	else
+		interval = BQ25890_CAPACITY_REFRESH_INTERVAL;
+
+	schedule_delayed_work(&bq->capacity_refresh_work, interval);
+}
 }
 
 static void bq25890_capacity_calibrate_work(struct work_struct *work)
