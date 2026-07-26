@@ -1232,10 +1232,14 @@ fix_upower() {
 		sudo sed -i "s/dependency('udev'/dependency('libudev'/g" meson.build 2>/dev/null || true
 	fi
 
+	# meson and ninja are installed via pip to /usr/local/bin.
+	# Use full paths so they work even when PATH is restricted (e.g. under sudo).
+	local MESON=/usr/local/bin/meson
+	local NINJA=/usr/local/bin/ninja
+
 	info "Running meson setup..."
 	local meson_output
-	meson_output=$(PKG_CONFIG_PATH=/usr/lib/aarch64-linux-gnu/pkgconfig \
-		meson setup build --prefix=/usr \
+	meson_output=$("$MESON" setup build --prefix=/usr \
 			-Dudevrulesdir=/lib/udev/rules.d \
 			-Dudevhwdbdir=/lib/udev/hwdb.d \
 			-Dsystemdsystemunitdir=no \
@@ -1254,7 +1258,7 @@ fix_upower() {
 
 	info "Compiling UPower (ninja -C build)..."
 	local ninja_output
-	ninja_output=$(ninja -C build 2>&1) && ninja_ok=1 || ninja_ok=0
+	ninja_output=$("$NINJA" -C build 2>&1) && ninja_ok=1 || ninja_ok=0
 	echo "$ninja_output" | grep -vE '^\[' | head -20 | sed 's/^/    /'
 	if [ "$ninja_ok" -eq 0 ]; then
 		echo "$ninja_output" > /tmp/ninja-pibrick.log
