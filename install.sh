@@ -1145,7 +1145,7 @@ fix_upower() {
 	cp "$UPowerD" "$BAK"
 	info "Backed up to: $BAK"
 
-	python3 - <<'PYEOF'
+	python3 - <<PYEOF
 import sys
 content = open('$UP_SRC/src/linux/up-device-supply-battery.c').read()
 old = '''\tif (values.state != UP_DEVICE_STATE_FULLY_CHARGED &&
