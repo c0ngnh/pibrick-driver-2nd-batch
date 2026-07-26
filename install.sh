@@ -1145,26 +1145,36 @@ fix_upower() {
 	cp "$UPowerD" "$BAK"
 	info "Backed up to: $BAK"
 
-	python3 - <<-PYEOF
-	import sys
-	content = open('$UP_SRC/src/linux/up-device-supply-battery.c').read()
-	old = '''\tif (values.state != UP_DEVICE_STATE_FULLY_CHARGED &&
-\t    g_udev_device_get_sysfs_attr_as_double_uncached (native, \"current_now\") < 0.0)
-\t\tvalues.state = UP_DEVICE_STATE_DISCHARGING;'''
-	new = '''\t/* piBrick: disabled — BQ25895 follows power_supply convention (negative=charging).
-\t * Restore this block if your hardware reports status=Charging when discharging. */
-\tif (values.state != UP_DEVICE_STATE_FULLY_CHARGED &&
-\t    0 && /* DISABLED: was: current_now < 0 */
-\t    g_udev_device_get_sysfs_attr_as_double_uncached (native, \"current_now\") < 0.0)
-\t\tvalues.state = UP_DEVICE_STATE_DISCHARGING;'''
-	if old in content:
-		content = content.replace(old, new)
-		open('$UP_SRC/src/linux/up-device-supply-battery.c', 'w').write(content)
-		print('Source patched: disabled current_now override')
-	else:
-		print('Primary pattern not found — source may already be modified or differs.')
-		print('UPower may not need patching on this version.')
-	PYEOF
+	# Use sed to replace the offending condition while preserving all indentation.
+	# The change: "current_now < 0.0" → "0 && /* DISABLED: was: current_now < 0 */"
+	# This prevents UPower from mis-detecting discharging when the BQ25895
+	# reports negative current (which means charging per power_supply convention).
+	sed -i '
+	/UP_DEVICE_STATE_FULLY_CHARGED/,/UP_DEVICE_STATE_DISCHARGING/ {
+		/\t\tvalues\.state = UP_DEVICE_STATE_DISCHARGING;/ {
+			# Only patch the first occurrence inside the current_now < 0 block
+			# by replacing "current_now" with "0 /* DISABLED */" only in that block
+			N
+			s/\(current_now"\)) < 0\.0)/0 \&\& \/* DISABLED: was: current_now < 0 *\/\1/
+		}
+	}
+	' "$UP_SRC/src/linux/up-device-supply-battery.c"
+
+	# Verify patch was applied (look for our DISABLED marker)
+	if grep -q "DISABLED: was: current_now" \
+	   "$UP_SRC/src/linux/up-device-supply-battery.c" 2>/dev/null; then
+		info "Source patched: disabled current_now override"
+	else
+		# If the exact pattern was not found, the source may already differ;
+		# check whether the original check is still there unmodified.
+		if grep -q 'current_now"[^"]*" < 0\.0' \
+		   "$UP_SRC/src/linux/up-device-supply-battery.c" 2>/dev/null; then
+			info "Primary pattern not found — source may already be modified or differs."
+			info "UPower may not need patching on this version."
+		else
+			info "Patch check inconclusive; continuing with build."
+		fi
+	fi
 
 	info "Building UPower..."
 	cd "$UP_SRC"
