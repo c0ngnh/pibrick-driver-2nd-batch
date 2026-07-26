@@ -1104,7 +1104,7 @@ fix_upower() {
 		return 0
 	fi
 
-	if grep -q "piBrick: disabled" "$UPowerD" 2>/dev/null; then
+	if grep -q "piBrick\|DISABLED.*current_now" "$UPowerD" 2>/dev/null; then
 		success "UPower already patched."
 		restart_upower
 		return 0
@@ -1145,26 +1145,26 @@ fix_upower() {
 	cp "$UPowerD" "$BAK"
 	info "Backed up to: $BAK"
 
-		# Replace the current_now discharge detection check in source.
+	# Replace the current_now discharge detection check in source.
 	# UPower mis-detects BQ25895 charging as discharging when current_now is
 	# negative.
 	UP_FILE="$UP_SRC/src/linux/up-device-supply-battery.c"
 	python3 <<PY
-from pathlib import Path
-path = Path("$UP_FILE")
-content = path.read_text()
-needle = 'g_udev_device_get_sysfs_attr_as_double_uncached (native, "current_now") < 0.0'
-if needle in content:
-    content = content.replace(
-        needle,
-        '0 && /* DISABLED: was: current_now < 0 */ g_udev_device_get_sysfs_attr_as_double_uncached (native, "current_now") < 0.0',
-        1)
-    path.write_text(content)
-    print('Source patched: disabled current_now override')
-else:
-    print('Primary pattern not found — source may already be modified or differs.')
-    print('UPower may not need patching on this version.')
-PY
+	from pathlib import Path
+	path = Path("$UP_FILE")
+	content = path.read_text()
+	needle = 'g_udev_device_get_sysfs_attr_as_double_uncached (native, "current_now") < 0.0'
+	if needle in content:
+		content = content.replace(
+			needle,
+			'0 && /* DISABLED: was: current_now < 0 */ g_udev_device_get_sysfs_attr_as_double_uncached (native, "current_now") < 0.0',
+			1)
+		path.write_text(content)
+		print('Source patched: disabled current_now override')
+	else:
+		print('Primary pattern not found -- source may already be modified or differs.')
+		print('UPower may not need patching on this version.')
+	PY
 
 	# Verify patch was applied (look for our DISABLED marker)
 	if grep -q "DISABLED: was: current_now" \
@@ -1186,6 +1186,8 @@ PY
 	cd "$UP_SRC"
 
 	# Install build dependencies required by meson/ninja.
+	# meson and ninja are not available via apt on some Debian releases,
+	# so install them via pip as a fallback.
 	info "Installing UPower build dependencies..."
 	if ! apt-get install -y \
 			libglib2.0-dev \
@@ -1199,13 +1201,23 @@ PY
 			docbook-xsl \
 			gtk-doc-tools \
 			gettext 2>/dev/null; then
-		warn "Could not install all build deps — continuing anyway"
+		warn "Could not install all build deps -- continuing anyway"
 	fi
 
-	# Remove any stale build dir (may be owned by non-root from a previous run).
+	# Install meson/ninja via pip if not already available.
+	# --break-system-packages is needed on Debian/bookworm+ with externally-managed-env.
+	if ! command -v meson >/dev/null 2>&1; then
+		info "Installing meson and ninja via pip..."
+		if ! pip3 install --break-system-packages meson ninja 2>/dev/null; then
+			error "Failed to install meson/ninja."
+			return 1
+		fi
+	fi
+
+	# Remove any stale build dir (may be owned by root from a previous run).
 	# Recreate as root so meson/ninja can write without permission errors.
-	rm -rf build
-	mkdir -p build
+	sudo rm -rf "$UP_SRC/build"
+	sudo mkdir -p "$UP_SRC/build"
 
 	# Patch udev_dir into libudev.pc (Debian ships udev_dir as a shell variable,
 	# not a pkg-config variable, but UPower's meson.build expects pkg-config access).
