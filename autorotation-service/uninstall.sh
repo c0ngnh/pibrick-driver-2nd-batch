@@ -38,18 +38,19 @@ systemctl daemon-reload
 
 # Remove binaries
 info "Removing binaries..."
-rm -f /usr/local/bin/pibrick-autorotation.sh
-rm -f /usr/local/bin/pibrick-autorotation
-rm -f /usr/local/bin/pibrick-kscreen-helper.sh
-rm -f /usr/local/bin/pibrick-kscreen-rotate.py
-
-# Remove sudoers config
-info "Removing sudoers configuration..."
-rm -f /etc/sudoers.d/pibrick-kscreen
+rm -f /usr/lib/pibrick/autorotation-service/pibrick-autorotation.sh
+rm -f /usr/lib/pibrick/autorotation-service/pibrick-autorotation.sh.bak* 2>/dev/null || true
+rmdir /usr/lib/pibrick/autorotation-service 2>/dev/null || true
 
 # Remove action scripts
 info "Removing action scripts..."
 rm -f /etc/pibrick/actions/autorotation-lock.sh
+
+# Remove autostart desktop entry
+info "Removing autostart entry..."
+for home in /root /home/*; do
+    rm -f "$home/.config/autostart/pibrick-autorotation.desktop" 2>/dev/null || true
+done
 
 # Remove device tree overlay
 info "Removing device tree overlay..."

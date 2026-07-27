@@ -286,20 +286,7 @@ mkdir -p /var/lib/pibrick
 chmod 755 /var/lib/pibrick
 
 # Install main service script
-install -m 755 "$SCRIPT_DIR/pibrick-autorotation.sh" /usr/local/bin/pibrick-autorotation.sh
-install -m 755 "$SCRIPT_DIR/pibrick-autorotation.sh" /usr/local/bin/pibrick-autorotation  # Alias
-
-# Install kscreen helper script for KDE Plasma rotation (optional, for reference)
-cat > /usr/local/bin/pibrick-kscreen-helper.sh << 'HELPEREOF'
-#!/bin/bash
-# Wrapper for kscreen-doctor that preserves Wayland and D-Bus environment
-export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
-export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/1000}"
-export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/1000/bus}"
-export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-wayland}"
-exec kscreen-doctor "$@"
-HELPEREOF
-install -m 755 /usr/local/bin/pibrick-kscreen-helper.sh 2>/dev/null || chmod +x /usr/local/bin/pibrick-kscreen-helper.sh
+install -m 755 "$SCRIPT_DIR/pibrick-autorotation.sh" /usr/lib/pibrick/autorotation-service/pibrick-autorotation.sh
 
 # For KDE Plasma Mobile, create autostart entry (optional).
 # Resolve the real desktop user so the .desktop file lands in the correct home.
@@ -313,7 +300,7 @@ if mkdir -p "$autostart_home/.config/autostart" 2>/dev/null; then
 [Desktop Entry]
 Type=Application
 Name=piBrick Autorotation
-Exec=/usr/local/bin/pibrick-autorotation.sh
+Exec=/usr/lib/pibrick/autorotation-service/pibrick-autorotation.sh
 X-GNOME-Autostart-enabled=true
 AUTOSTARTEOF
     info "Created autostart entry for KDE Plasma Mobile"
@@ -325,6 +312,88 @@ install -m 755 "$SCRIPT_DIR/etc/pibrick/actions/autorotation-lock.sh" /etc/pibri
 
 # Install systemd service
 install -m 644 "$SCRIPT_DIR/pibrick-autorotation.service" /etc/systemd/system/pibrick-autorotation.service
+
+# ── Disable KWin built-in auto-rotation ────────────────────────────────────────
+# KWin has a built-in auto-rotation feature that uses iio-sensor-proxy and
+# competes with our custom autorotation service. Disable it to prevent conflicts.
+# This is safe to run on all systems — it only has an effect on KDE Plasma.
+
+disable_kwin_auto_rotation() {
+    info "Disabling KWin built-in auto-rotation..."
+
+    # Find the active user (the user who owns the Wayland session)
+    local active_user
+    active_user=$(loginctl list-sessions --no-legend 2>/dev/null | \
+        awk '$3 ~ /congn|ubuntu|pi|arman/ {print $3}' | head -1)
+    [ -z "$active_user" ] && active_user=$(who | awk '{print $1}' | head -1)
+    [ -z "$active_user" ] && active_user="congn"
+
+    local home_dir
+    home_dir=$(getent passwd "$active_user" 2>/dev/null | cut -d: -f6)
+    [ -z "$home_dir" ] && home_dir="/home/$active_user"
+
+    local kwin_config="$home_dir/.config/kwinoutputconfig.json"
+    local kwinrc="$home_dir/.config/kwinrc"
+
+    # Fix kwinoutputconfig.json: set autoRotation to "Never"
+    if [ -f "$kwin_config" ]; then
+        if grep -q '"autoRotation"' "$kwin_config" 2>/dev/null; then
+            if grep -q '"autoRotation": "Always"' "$kwin_config" 2>/dev/null; then
+                info "  Disabling autoRotation in kwinoutputconfig.json..."
+                sudo -u "$active_user" python3 -c "
+import json
+with open('$kwin_config', 'r') as f:
+    d = json.load(f)
+for section in d:
+    if section.get('name') == 'outputs':
+        for output in section.get('data', []):
+            output['autoRotation'] = 'Never'
+with open('$kwin_config', 'w') as f:
+    json.dump(d, f, indent=2)
+" && info "  autoRotation set to Never" || true
+            else
+                info "  autoRotation already disabled in kwinoutputconfig.json"
+            fi
+        else
+            info "  No autoRotation setting found in kwinoutputconfig.json"
+        fi
+    else
+        info "  kwinoutputconfig.json not found (may not be on KDE)"
+    fi
+
+    # Fix kwinrc: disable ScreenRotation
+    if [ -f "$kwinrc" ]; then
+        if grep -qi "ScreenRotation.*true" "$kwinrc" 2>/dev/null; then
+            info "  Disabling ScreenRotation in kwinrc..."
+            sudo -u "$active_user" WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" \
+                XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/1000}" \
+                kwriteconfig5 --file kwinrc --group Wayland --key ScreenRotation false 2>/dev/null || true
+            sudo -u "$active_user" WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" \
+                XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/1000}" \
+                kwriteconfig5 --file kwinrc --group Wayland --key AutoRotate false 2>/dev/null || true
+            info "  ScreenRotation disabled in kwinrc"
+        else
+            info "  ScreenRotation already disabled in kwinrc"
+        fi
+    fi
+
+    # CRITICAL: mask and stop iio-sensor-proxy.service to prevent KWin from using it
+    # for built-in auto-rotation.  This conflicts with our custom autorotation service.
+    # Without masking, KWin's auto-rotation causes random flicker rotations.
+    if systemctl is-active --quiet iio-sensor-proxy.service 2>/dev/null || \
+       systemctl is-enabled --quiet iio-sensor-proxy.service 2>/dev/null; then
+        info "  Stopping and masking iio-sensor-proxy.service..."
+        systemctl mask iio-sensor-proxy.service >/dev/null 2>&1 || true
+        systemctl stop iio-sensor-proxy.service >/dev/null 2>&1 || true
+        info "  iio-sensor-proxy.service stopped and masked"
+    else
+        info "  iio-sensor-proxy.service already disabled"
+    fi
+
+    info "  KWin auto-rotation disabled"
+}
+
+disable_kwin_auto_rotation
 
 # Reload systemd
 systemctl daemon-reload
@@ -339,7 +408,7 @@ if systemctl restart pibrick-autorotation.service; then
     success "Autorotation service started"
 else
     warn "Service failed to start - checking logs..."
-    journalctl -u pibrick-autorotation -n 5 --no-pager || true
+    journalctl -u pibrick-autorotation.service -n 5 --no-pager || true
 fi
 
 # ── Summary ────────────────────────────────────────────────────────────────────

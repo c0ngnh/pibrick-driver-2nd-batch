@@ -3,8 +3,7 @@ Description=piBrick MMA8451Q Autorotation Service
 After=graphical.target multi-user.target
 Wants=graphical.target
 
-# Allow the service to run even without a display manager (headless mode)
-# but prefer to run when a session is active
+# Prefer to run when a display session is active
 After=display-manager.service
 
 [Service]
@@ -15,29 +14,36 @@ RestartSec=5
 StandardOutput=journal
 StandardError=journal
 
-# Run as root to access IIO sysfs and perform rotation
-User=root
-Group=root
+# Run as the desktop user so kscreen-doctor has access to the Wayland session
+# without needing sudo/su.
+User=congn
+Group=congn
 
-# Environment
-Environment=HOME=/root
+# Environment variables — needed for kscreen-doctor to connect to the Wayland
+# compositor and the D-Bus session bus.  These are set explicitly here since
+# systemd's ImportEnvironment= is not available on this version.
+Environment=USER=congn
+Environment=HOME=/home/congn
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-Environment=WAYLAND_DISPLAY=wayland-0
 Environment=QT_QPA_PLATFORM=wayland
+Environment=EGL_PLATFORM=wayland
+Environment=WAYLAND_DISPLAY=wayland-0
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
 
 # Hardening
-NoNewPrivileges=false
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/var/lib/pibrick
-PrivateTmp=true
+# NOTE: PrivateTmp is intentionally NOT set — kscreen-doctor needs to access the
+# Wayland socket at /run/user/1000 which is blocked in an isolated /tmp.
 
-# Allow access to IIO devices
+# Allow access to IIO accelerometer sysfs (world-readable) and i2c bus
 DevicePolicy=auto
-DeviceAllow=/dev/iio:device* rw
+DeviceAllow=/sys/bus/iio/devices/iio:device* r
 DeviceAllow=/dev/i2c-* rw
 
-# Allow access to display
+# Grant access to the video group (for kscreen-doctor / DRM)
 SupplementaryGroups=video
 
 [Install]

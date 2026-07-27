@@ -386,25 +386,42 @@ rotate_gnome() {
 rotate_kde() {
     local orientation=$1
 
-    # KDE Plasma (including Plasma Mobile) on Wayland
-    # Use kscreen-doctor with proper environment
-    # Note: For KDE Plasma Mobile, run as user (not via sudo) to access Wayland session
-    
-    if command -v kscreen-doctor >/dev/null 2>&1; then
-        # Set environment and call kscreen-doctor directly
-        # This works better for user sessions than sudo
-        env WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" \
-            XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/1000}" \
-            QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-wayland}" \
-            DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/1000/bus" \
-            kscreen-doctor "output.1.rotation.$orientation" >/dev/null 2>&1 || true
+    # KDE Plasma (including Plasma Mobile) on Wayland.
+    # Uses kscreen-doctor to apply rotation.  kscreen-doctor may crash (SIGABRT)
+    # due to Qt/EGL environment issues in a systemd service context — but the
+    # rotation is applied by KWin *before* the crash, so it still takes effect.
+    # We catch the crash signal so the script doesn't treat it as failure.
 
-        log "Applied KDE rotation: $orientation"
-        return 0
+    if ! command -v kscreen-doctor >/dev/null 2>&1; then
+        warn "kscreen-doctor not found - cannot rotate KDE display"
+        return 1
     fi
 
-    warn "kscreen-doctor not found - cannot rotate KDE display"
-    return 1
+    # Catch SIGABRT (signal 6) from kscreen-doctor so we don't exit the script.
+    # The crash is cosmetic — the rotation was already applied by KWin.
+    trap 'exit_code=$?; [ $exit_code -eq 0 -o $exit_code -eq 134 ] && return 0 || return $exit_code' ERR
+
+    WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" \
+    XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/1000}" \
+    QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-wayland}" \
+    EGL_PLATFORM="${EGL_PLATFORM:-wayland}" \
+    DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/1000/bus}" \
+        kscreen-doctor "output.1.rotation.$orientation" || true
+
+    local exit_code=$?
+    trap - ERR
+
+    # Exit 0 = success. Exit 134 (SIGABRT) = kscreen-doctor crashed but KWin already
+    # processed the rotation. Treat both as success.
+    if [ "$exit_code" -eq 0 ]; then
+        log "Applied KDE rotation: $orientation"
+    elif [ "$exit_code" -eq 134 ]; then
+        log "Applied KDE rotation: $orientation (kscreen-doctor crashed — rotation was applied)"
+    else
+        warn "kscreen-doctor failed with exit code $exit_code"
+        return 1
+    fi
+    return 0
 }
 
 rotate_x11() {
@@ -467,6 +484,42 @@ rotate_wayland() {
     return 1
 }
 
+# ── Rotation Verification ───────────────────────────────────────────────────────
+
+# Query the current screen rotation state from KWin.
+# Returns: normal | left | right | inverted | unknown
+# Handles kscreen-doctor crashes gracefully (the crash itself means the call was
+# processed by KWin before the Qt crash).
+get_current_rotation() {
+    local rot
+    # kscreen-doctor -o output: "    Rotation: <ANSI>1<ANSI><newline>"
+    # The ANSI color codes appear before and after the digit.  We strip all
+    # ANSI escape sequences (ESC[...m) and then remove whitespace to get e.g.
+    # "Rotation:1".  The last digit is always the actual rotation value.
+    rot=$(
+        WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" \
+        XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/1000}" \
+        QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-wayland}" \
+        EGL_PLATFORM="${EGL_PLATFORM:-wayland}" \
+            kscreen-doctor -o 2>/dev/null | \
+            grep "Rotation:" | \
+            sed 's/'$'\033''\[[0-9;]*m//g' | \
+            tr -d ' \t' | \
+            grep -o '[0-9]$' || true
+    )
+    # Do NOT || return 1 — kscreen-doctor may SIGABRT but output is still produced.
+
+    case "$rot" in
+        1) echo "normal" ;;
+        2) echo "left" ;;
+        4) echo "inverted" ;;
+        8) echo "right" ;;
+        *) echo "unknown" ;;
+    esac
+}
+
+# ── Rotation Application ─────────────────────────────────────────────────────────
+
 apply_rotation() {
     local orientation=$1
 
@@ -505,14 +558,14 @@ main() {
     log "Starting pibrick-autorotation service"
     log "Based on piBrick AOSP17 V6 by Sconioo"
 
-    if [ "$(id -u)" != "0" ]; then
-        error "Must be run as root"
+    if [ "$(id -u)" != "0" ] && [ "$(id -u)" != "1000" ]; then
+        error "Must be run as root or user congn"
         exit 1
     fi
 
-    # Create state directory
+    # Create state directory (chmod is a no-op when not root)
     mkdir -p "$STATE_DIR"
-    chmod 755 "$STATE_DIR"
+    [ "$(id -u)" = "0" ] && chmod 755 "$STATE_DIR" 2>/dev/null || true
 
     # First, try to find kernel IIO driver
     if find_mma8452_device; then
@@ -572,6 +625,41 @@ main() {
     local pending_orientation=""
     local pending_timestamp=0
     local last_rotation_timestamp=0
+
+    # Startup sync: read actual screen rotation so we don't re-rotate unnecessarily.
+    # Try the get_current_rotation helper first; if it returns "unknown" (because
+    # get_current_rotation's pipeline may fail in the service environment due to
+    # set -e), fall back to calling kscreen-doctor directly here.
+    # Use timeout(1) to prevent hangs if kscreen-doctor blocks.
+    log "Reading current screen rotation..."
+    local initial_rot
+    initial_rot=$(
+        timeout 3 get_current_rotation 2>/dev/null || echo "unknown"
+    )
+    # Fallback: direct kscreen-doctor call if helper returned empty/unknown
+    if [ -z "$initial_rot" ] || [ "$initial_rot" = "unknown" ]; then
+        initial_rot=$(
+            WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" \
+            XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/1000}" \
+            QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-wayland}" \
+            EGL_PLATFORM="${EGL_PLATFORM:-wayland}" \
+                timeout 3 kscreen-doctor -o 2>/dev/null | \
+                grep "Rotation:" | \
+                sed 's/'$'\033''\[[0-9;]*m//g' | \
+                tr -d ' \t' | \
+                grep -o '[0-9]$' || echo ""
+        )
+    fi
+    if [ -n "$initial_rot" ] && [ "$initial_rot" != "unknown" ]; then
+        current_orientation="$initial_rot"
+        log "Startup: screen is at '$current_orientation' — will maintain"
+    else
+        log "Startup: could not determine screen rotation — will rotate as needed"
+    fi
+
+    # Orientation consistency buffer: require last 3 samples to agree before committing
+    local orient_buf=()
+    local orient_buf_size=3
 
     # Rolling variance filter: maintain a small buffer of recent X values
     # to detect vibration (walking). If variance is high, skip the sample.
@@ -641,49 +729,80 @@ main() {
         local new_orientation
         new_orientation=$(detect_orientation "$x" "$y" "$z")
 
-        # If detect_orientation returns empty (flat/ambiguous), hold current
+        # If detect_orientation returns empty (flat/ambiguous), reset the buffer
         if [ -z "$new_orientation" ]; then
             pending_orientation=""
+            orient_buf=()
             sleep 0.1
             continue
         fi
 
-        # Handle orientation change
+        # Add to consistency buffer
+        orient_buf+=("$new_orientation")
+        if [ "${#orient_buf[@]}" -gt "$orient_buf_size" ]; then
+            orient_buf=("${orient_buf[@]:1}")
+        fi
+
+        # ── Consistency check ─────────────────────────────────────────────────
+        # Require all ORIENTATION_CONSISTENCY (3) samples to agree.
+        # If they do, that's a stable orientation. Otherwise keep waiting.
+        local all_same=1
+        for o in "${orient_buf[@]}"; do
+            if [ "$o" != "$new_orientation" ]; then
+                all_same=0
+                break
+            fi
+        done
+
+        # If buffer not full yet, just keep accumulating
+        if [ "${#orient_buf[@]}" -lt "$orient_buf_size" ]; then
+            sleep 0.1
+            continue
+        fi
+
+        # Buffer is full and all agree
+        if [ "$all_same" -eq 0 ]; then
+            # Buffer disagrees — sensor noisy or transitioning; reset
+            pending_orientation=""
+            orient_buf=()
+            sleep 0.1
+            continue
+        fi
+
+        # All buffer entries agree: we have a confirmed new orientation
         if [ "$new_orientation" != "$current_orientation" ]; then
             if [ -z "$pending_orientation" ]; then
-                # First detection of change
-                pending_orientation="$new_orientation"
-                pending_timestamp=$(date +%s%3N)  # milliseconds
-            elif [ "$pending_orientation" = "$new_orientation" ]; then
-                # Same orientation - check if stable
-                local now elapsed
-                now=$(date +%s%3N)
-                elapsed=$((now - pending_timestamp))
-
-                if (( elapsed >= STABLE_DELAY_MS )); then
-                    # Check cooldown to avoid spamming kscreen-doctor
-                    local now_ms elapsed_since_rotation
-                    now_ms=$(date +%s%3N)
-                    elapsed_since_rotation=$((now_ms - last_rotation_timestamp))
-                    
-                    if (( elapsed_since_rotation >= ROTATION_COOLDOWN_MS )); then
-                        # Apply rotation
-                        if apply_rotation "$pending_orientation"; then
-                            current_orientation="$pending_orientation"
-                            last_rotation_timestamp=$(date +%s%3N)
-                            log "Orientation: $pending_orientation (x=$x y=$y z=$z)"
-                        fi
-                    fi
-                    pending_orientation=""
-                fi
-            else
-                # Different orientation - reset pending
+                # First confirmation of a new orientation
                 pending_orientation="$new_orientation"
                 pending_timestamp=$(date +%s%3N)
             fi
+
+            # Check stability time
+            local now elapsed
+            now=$(date +%s%3N)
+            elapsed=$((now - pending_timestamp))
+
+            if (( elapsed >= STABLE_DELAY_MS )); then
+                # Check cooldown to avoid spamming kscreen-doctor
+                local now_ms elapsed_since_rotation
+                now_ms=$(date +%s%3N)
+                elapsed_since_rotation=$((now_ms - last_rotation_timestamp))
+
+                if (( elapsed_since_rotation >= ROTATION_COOLDOWN_MS )); then
+                    # Apply rotation
+                    if apply_rotation "$pending_orientation"; then
+                        current_orientation="$pending_orientation"
+                        last_rotation_timestamp=$(date +%s%3N)
+                        log "Orientation: $pending_orientation (x=$x y=$y z=$z)"
+                    fi
+                fi
+                pending_orientation=""
+                orient_buf=()
+            fi
         else
-            # Same as current - cancel pending
+            # Same as current — clear pending
             pending_orientation=""
+            orient_buf=()
         fi
 
         sleep 0.1  # 100ms polling interval
