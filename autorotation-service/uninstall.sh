@@ -31,6 +31,17 @@ info "Stopping service..."
 systemctl stop pibrick-autorotation.service 2>/dev/null || true
 systemctl disable pibrick-autorotation.service 2>/dev/null || true
 
+# Unload kernel module if loaded
+KVER="$(uname -r)"
+KVER_DIR="/lib/modules/$KVER"
+if [ -f "$KVER_DIR/extra/mma8451q.ko" ]; then
+    if lsmod 2>/dev/null | grep -q mma8451q; then
+        modprobe -r mma8451q 2>/dev/null || true
+    fi
+    rm -f "$KVER_DIR/extra/mma8451q.ko"
+    depmod -a 2>/dev/null || true
+fi
+
 # Remove systemd unit
 info "Removing systemd service..."
 rm -f /etc/systemd/system/pibrick-autorotation.service
@@ -65,12 +76,4 @@ info "Removing state files..."
 rm -f /var/lib/pibrick/autorotation.lock
 rm -f /var/lib/pibrick/autorotation.lock.type
 
-# Optionally unload driver
-if lsmod 2>/dev/null | grep -q mma845; then
-    warn "MMA8452 driver is still loaded"
-    warn "To unload: sudo modprobe -r mma8452"
-fi
-
 info "Autorotation service uninstalled."
-echo ""
-echo "Note: Reboot recommended to fully remove the MMA8451Q device tree overlay."

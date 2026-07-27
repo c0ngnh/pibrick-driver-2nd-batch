@@ -307,17 +307,28 @@ battery_config() {
 		return $?
 	fi
 
-	# Non-interactive path: build command using string concat (preserves args with spaces)
-	local cmd="python3 $battery_set"
-	for a in "${extra_args[@]}"; do
-		cmd="$cmd \"$a\""
-	done
-	[ -n "$persist_flag" ] && cmd="$cmd --persist"
-	[ -n "$force_flag" ] && cmd="$cmd --force"
+	# Non-interactive path: join split "<value> <unit>" into "<value><unit>"
+	# e.g. "charge_full_uah" "3800" "mAh" → "charge_full_uah" "3800mAh"
+	if [ "${#extra_args[@]}" -ge 3 ]; then
+		case "${extra_args[2]}" in
+			mAh|Ah|uAh|mA|A|uA|mV|V|uV|mΩ|Ω|uΩ|%|s|samples)
+				extra_args[1]="${extra_args[1]}${extra_args[2]}"
+				unset 'extra_args[2]'
+				local merged=()
+				for a in "${extra_args[@]}"; do
+					[ -n "$a" ] && merged+=("$a")
+				done
+				extra_args=("${merged[@]}")
+				;;
+		esac
+	fi
 
-	info "Running: $cmd"
-	# shellcheck disable=SC2086
-	eval $cmd
+	local cmd=(python3 "$battery_set" "${extra_args[@]}")
+	[ -n "$persist_flag" ] && cmd+=("--persist")
+	[ -n "$force_flag" ] && cmd+=("--force")
+
+	info "Running: ${cmd[*]}"
+	"${cmd[@]}"
 }
 
 # ── Usage ──────────────────────────────────────────────────────────────────────
@@ -436,13 +447,14 @@ do_uninstall() {
 	local missing=""
 	for comp in $targets; do
 		case "$comp" in
-		display)    panel_artifact >/dev/null 2>&1 || { [ ! -f /etc/pibrick.panel ] && [ ! -f /etc/systemd/system/pibrick.service ] && missing="$missing display"; } ;;
-		battery)    { lsmod 2>/dev/null | grep -q bq25890_battery || [ ! -f /etc/modprobe.d/pibrick-battery.conf ]; } && missing="$missing battery" ;;
+		display)    panel_artifact >/dev/null 2>&1 && missing="$missing display" ;;
+		battery)    { ! lsmod 2>/dev/null | grep -q bq25890_battery && [ ! -f /etc/modprobe.d/pibrick-battery.conf ] && [ ! -f /etc/systemd/system/pibrick-battery-load-soc.service ]; } && missing="$missing battery" ;;
 		calibration) [ ! -f /etc/systemd/system/pibrick-battery-calibration.service ] && missing="$missing calibration" ;;
 		upower)     { [ ! -f /usr/libexec/upowerd ] && [ ! -f /usr/lib/upower/upowerd ]; } && missing="$missing upower" ;;
-		kde-mobile-desktop)  [ ! -f "$HOME/.config/systemd/user/plasma-kwin_wayland.service.d/pi-kwin-recent-fix.conf" ] && missing="$missing kde-mobile-desktop" ;;
+		kde-mobile-desktop)  { [ ! -f /etc/sddm.conf.d/kde-plasma-mobile.conf ] && [ ! -f "$HOME/.config/systemd/user/plasma-kwin_wayland.service.d/pi-kwin-recent-fix.conf" ]; } && missing="$missing kde-mobile-desktop" ;;
 		button)     { [ ! -f /usr/local/bin/pibrickbtn ] && [ ! -f /etc/systemd/system/pibrickbtn.service ]; } && missing="$missing button" ;;
-		autorotation) { [ ! -f /usr/local/bin/pibrick-autorotation.sh ] && [ ! -f /etc/systemd/system/pibrick-autorotation.service ]; } && missing="$missing autorotation" ;;
+		autorotation) { [ ! -f /usr/lib/pibrick/autorotation-service/pibrick-autorotation.sh ] && [ ! -f /usr/local/bin/pibrick-autorotation.sh ] && [ ! -f /etc/systemd/system/pibrick-autorotation.service ]; } && missing="$missing autorotation" ;;
+		plasma-mobile-black-recent-fix) [ ! -d "$HOME/.config/systemd/user/plasma-kwin_wayland.service.d" ] && missing="$missing plasma-mobile-black-recent-fix" ;;
 		wrapper)    [ ! -f /usr/local/bin/pibrick-tools ] && missing="$missing wrapper" ;;
 		esac
 	done
@@ -480,13 +492,18 @@ do_uninstall() {
 	echo
 
 	# Uninstall in dependency order regardless of the order the user typed.
-	local ordered="calibration battery display upower kde-mobile-desktop button autorotation wrapper"
+	local ordered="calibration battery display upower kde-mobile-desktop plasma-mobile-black-recent-fix button autorotation wrapper"
 	for comp in $ordered; do
 		case " $targets " in
 		*" $comp "*)
 			echo
 			echo -e "${BOLD}--- Removing $comp ---${RESET}"
-			uninstall_"$comp" || warn "Failed to remove $comp (continuing)"
+			# Hyphenated component names must map to underscored function names.
+			case "$comp" in
+				kde-mobile-desktop)  uninstall_kde_mobile_desktop || warn "Failed to remove $comp (continuing)" ;;
+				plasma-mobile-black-recent-fix) uninstall_plasma_mobile || warn "Failed to remove $comp (continuing)" ;;
+				*) uninstall_"$comp" || warn "Failed to remove $comp (continuing)" ;;
+			esac
 			;;
 		esac
 	done
@@ -750,11 +767,10 @@ while [ $# -gt 0 ]; do
 				INSTALL_DISPLAY=1
 				INSTALL_EXPLICIT=1
 				;;
-			display-hyn)
-				INSTALL_DISPLAY=1
-				INSTALL_BATTERY_ORIGINAL=1
-				INSTALL_EXPLICIT=1
-				;;
+		display-hyn)
+			INSTALL_DISPLAY=1
+			INSTALL_EXPLICIT=1
+			;;
 			battery-new)
 				INSTALL_BATTERY_NEW=1
 				INSTALL_EXPLICIT=1
@@ -805,7 +821,7 @@ while [ $# -gt 0 ]; do
 		for comp in $(echo "$1" | tr ',' ' '); do
 			case "$comp" in
 		all)
-			UNINSTALL_TARGETS="$UNINSTALL_TARGETS display battery calibration upower button autorotation plasma-mobile-black-recent-fix wrapper"
+			UNINSTALL_TARGETS="$UNINSTALL_TARGETS display battery calibration upower kde-mobile-desktop plasma-mobile-black-recent-fix button autorotation wrapper"
 			;;
 		display|battery|calibration|upower|kde-mobile-desktop|button|autorotation|plasma-mobile-black-recent-fix|wrapper)
 			UNINSTALL_TARGETS="$UNINSTALL_TARGETS $comp"
@@ -861,20 +877,26 @@ while [ $# -gt 0 ]; do
 		success "Rotation locked to: $ORIENT"
 		# Apply immediately if service is running
 		if systemctl is-active --quiet pibrick-autorotation.service 2>/dev/null; then
-			sudo -n /usr/local/bin/pibrick-autorotation.sh --status >/dev/null 2>&1 || true
+			systemctl reload-or-restart pibrick-autorotation.service 2>/dev/null || true
 		fi
 		exit 0
 		;;
 	--autorotation-unlock)
 		STATE_DIR="/var/lib/pibrick"
-		rm -f "$STATE_DIR/autorotation.lock"
+		rm -f "$STATE_DIR/autorotation.lock" "$STATE_DIR/autorotation.lock.type"
+		if systemctl is-active --quiet pibrick-autorotation.service 2>/dev/null; then
+			systemctl reload-or-restart pibrick-autorotation.service 2>/dev/null || true
+		fi
 		success "Auto-rotation resumed"
 		exit 0
 		;;
 	--autorotation-status)
-		/usr/local/bin/pibrick-autorotation.sh --status 2>/dev/null || {
-			error "Autorotation service not installed or not found"
-			exit 1
+		/usr/lib/pibrick/autorotation-service/pibrick-autorotation.sh --status 2>/dev/null || {
+			# Fallback to /usr/local/bin/ for older installs
+			/usr/local/bin/pibrick-autorotation.sh --status 2>/dev/null || {
+				error "Autorotation service not installed or not found"
+				exit 1
+			}
 		}
 		exit 0
 		;;
@@ -884,7 +906,8 @@ while [ $# -gt 0 ]; do
 			error "battery-auto-calibrator.py not found at $calibrator"
 			exit 1
 		fi
-		exec python3 "$calibrator" --check
+		shift 2>/dev/null || true
+		exec python3 "$calibrator" --check "$@"
 		;;
 	--enable-calibration)
 		systemctl enable pibrick-battery-calibration.service 2>/dev/null || true
@@ -1382,6 +1405,9 @@ fix_plasma_mobile() {
 	# --install plasma-mobile-black-recent-fix also works.
 
 	local zink_flag="${ZINK_FALLBACK:-0}"
+	local desk_home
+	desk_home=$(getent passwd "$desk_user" | cut -d: -f6)
+	desk_home="${desk_home:-/home/$desk_user}"
 	local drop_in_dir="$desk_home/.config/systemd/user/plasma-kwin_wayland.service.d"
 	local fix_conf="$drop_in_dir/pi-kwin-recent-fix.conf"
 	local zink_conf="$drop_in_dir/pi-kwin-zink-fallback.conf"
@@ -2148,11 +2174,21 @@ uninstall_autorotation() {
 		systemctl stop pibrick-autorotation.service 2>/dev/null || true
 		systemctl disable pibrick-autorotation.service 2>/dev/null || true
 		rm -f /etc/systemd/system/pibrick-autorotation.service
+		# Unload kernel module if loaded
+		if lsmod 2>/dev/null | grep -q mma8451q; then
+			modprobe -r mma8451q 2>/dev/null || true
+		fi
+		rm -f "/lib/modules/$(uname -r)/extra/mma8451q.ko"
+		depmod -a 2>/dev/null || true
+		# Remove the service-installed binary (primary path) and legacy /usr/local/bin path
+		rm -f /usr/lib/pibrick/autorotation-service/pibrick-autorotation.sh
 		rm -f /usr/local/bin/pibrick-autorotation.sh
 		rm -f /usr/local/bin/pibrick-autorotation
 		rm -f /etc/pibrick/actions/autorotation-lock.sh
 		rm -f /var/lib/pibrick/autorotation.lock
 		rm -f /var/lib/pibrick/autorotation.lock.type
+		rmdir /usr/lib/pibrick/autorotation-service 2>/dev/null || true
+		rm -f /boot/firmware/overlays/pibrick-mma8451q.dtbo 2>/dev/null || true
 		systemctl daemon-reload
 	fi
 
@@ -2277,8 +2313,11 @@ main() {
 	[ -n "$INSTALL_BATTERY_NEW" ] && echo "  - Battery driver (bq25895 + INA228 auto-detect)"
 	[ -n "$INSTALL_BATTERY_ORIGINAL" ] && echo "  - Battery driver (bq25895 + INA228 auto-detect)"
 	[ -n "$INSTALL_CALIBRATION" ] && echo "  - Calibration tools (logger + auto-calibrator)"
+	[ -n "$INSTALL_UPower" ] && echo "  - UPower KDE charging-state fix"
 	[ -n "$INSTALL_KDE_MOBILE_DESKTOP" ] && echo "  - KDE Mobile Desktop (SDDM + Plasma Mobile, default session)"
+	[ -n "$INSTALL_PLASMA_MOBILE" ] && echo "  - Plasma Mobile KWin fix"
 	[ -n "$INSTALL_BUTTON" ] && echo "  - Button service"
+	[ -n "$INSTALL_AUTOROTATION" ] && echo "  - Autorotation service (MMA8451Q accelerometer)"
 	echo
 	echo "Use \`pibrick-tools\` for everything from now on:"
 	echo "  sudo pibrick-tools --battery-status"
@@ -2286,7 +2325,7 @@ main() {
 	echo "  sudo pibrick-tools --enable-calibration"
 	echo "  sudo pibrick-tools --disable-calibration"
 	echo "  sudo pibrick-tools --apply-calibration"
-	echo "  sudo pibrick-tools --battery-config charge_full_uah 3800 mAh --persist"
+	echo "  sudo pibrick-tools --battery-config charge_full_uah 3800mAh --persist"
 	echo "  sudo pibrick-tools --install <component>"
 	echo "  sudo pibrick-tools --uninstall <component|all>   # reverse an install"
 	echo

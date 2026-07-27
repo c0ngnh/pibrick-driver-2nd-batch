@@ -74,15 +74,14 @@ sudo pibrick-tools --help                    # Full command reference
 The `--install` flag takes any combination of components:
 
 ```bash
-sudo pibrick-tools --install all                # Everything
-sudo pibrick-tools --install display            # Display + interactive panel selection
+sudo pibrick-tools --install all                # Core components (display, battery-new, calibration, button)
+sudo pibrick-tools --install display            # Display + touch (uses saved panel or defaults to 9203)
 sudo pibrick-tools --install battery-new        # Battery driver (bq25895 + INA228 auto-detect)
 sudo pibrick-tools --install calibration        # Calibration logger + auto-calibrator
 sudo pibrick-tools --install upower             # UPower KDE charging-state fix
 sudo pibrick-tools --install button             # GPIO button service
 sudo pibrick-tools --install autorotation       # MMA8451Q accelerometer autorotation
 sudo pibrick-tools --install kde-mobile-desktop         # Install + enable KDE Plasma + SDDM (run first)
-sudo pibrick-tools --install upower             # UPower charging state fix (requires kde-mobile-desktop)
 sudo pibrick-tools --install plasma-mobile-black-recent-fix      # KWin black-screen fix (requires kde-mobile-desktop)
 sudo pibrick-tools --install battery-new,calibration   # Comma-separated, multiple at once
 ```
@@ -116,8 +115,8 @@ sudo pibrick-tools --uninstall all
 
 Components are removed in dependency order regardless of the order you
 type: `calibration` → `battery` → `display` → `upower` → `kde-mobile-desktop` →
-`button` → `autorotation` → `wrapper`. The UPower fix is restored from the most recent
-`/usr/libexec/upowerd.bak-pibrick-*` backup (created at install time), so
+`plasma-mobile-black-recent-fix` → `button` → `autorotation` → `wrapper`. The UPower fix is restored from the most recent
+`/usr/libexec/upowerd.bak-pibrick-*` (beside whichever binary was detected) backup (created at install time), so
 the stock UPower from your distro comes back. If no backup exists the
 patched binary is left in place and you'll be told to run
 `sudo apt reinstall upower`.
@@ -132,18 +131,15 @@ end of the run is your cue.
 
 | Component | What it removes |
 |---|---|
-| `display` | `pibrick.service`, `/lib/modules/.../panel/panel-pibrick.ko`, all three known overlays, `dtoverlay=…` lines in `/boot/firmware/config.txt`, `/etc/pibrick.panel`, `/etc/pibrick.display-refresh`, `/etc/udev/rules.d/99-pibrick-display.rules` |
-| `battery` | `bq25890_battery.ko`, `/etc/modprobe.d/pibrick-battery.conf`, `/var/lib/bq25890_battery/soc_persist`, `/etc/cron.d/pibrick-battery-soc`, `pibrick-battery-{calibration,load-soc,soc-persist}.service` units, `$PIBRICK_TOOLS_DIR/pibrick-battery-load-soc.sh` |
+| `display` | `pibrick.service`, `/lib/modules/<kernel>/kernel/drivers/gpu/drm/panel/panel-pibrick.ko`, all three known overlays, `dtoverlay=…` lines in `/boot/firmware/config.txt`, `/etc/pibrick.panel`, `/etc/pibrick.display-refresh`, `/etc/udev/rules.d/99-pibrick-display.rules` |
+| `battery` | `bq25890_battery.ko`, `/etc/modprobe.d/pibrick-battery.conf`, `/var/lib/bq25890_battery/soc_persist`, `/etc/cron.d/pibrick-battery-soc`, `pibrick-battery-{load-soc,soc-persist}.service` units, `/usr/lib/pibrick/battery/pibrick-battery-load-soc.sh`. `pibrick-battery-calibration.service` is removed by the `calibration` component |
 | `calibration` | `pibrick-battery-calibration.service`, the entire `/var/log/bq25890_battery/` directory (CSV, logs, `suggested_ocv_table.h`, `calibration_status.json`), `battery-calibration-logger.py`, `battery-auto-calibrator.py`. `battery_set.py` / `battery-soc-persist.py` are **kept** as they are useful diagnostics even with no driver loaded |
 | `upower` | Restores `/usr/libexec/upowerd` from the most recent `.bak-pibrick-*` backup |
 | `kde-mobile-desktop` | SDDM config, `/etc/sddm.conf.d/kde-plasma-mobile.conf`, KWin drop-ins; `kde-standard`/`sddm` packages left in place |
 | `button` | `pibrickbtn.service`, `/usr/local/bin/pibrickbtn`, `/etc/pibrick/` |
 | `wrapper` | `/usr/local/bin/pibrick-tools`, bash completion files |
 
-> **Note.** The uninstaller does **not** touch `/usr/lib/pibrick/` itself
-> (the source tree copy). It's regenerated on every `--install` run, and
-> keeping it around lets you re-run the installer without first cloning
-> the repo. To nuke it too, run `sudo rm -rf /usr/lib/pibrick` manually.
+> **Note.** The uninstaller removes individual files it installed inside `/usr/lib/pibrick/` (e.g. the battery helpers, autorotation service) but leaves the tree itself intact. The tree is regenerated on every `--install` run, and keeping it around lets you re-run the installer without first cloning the repo. To remove it, run `sudo rm -rf /usr/lib/pibrick` manually.
 
 Each panel has its **matching touch driver**:
 - **9203 / 9202 / 5inch** → Hynitron CST66xx (`hyn,66xx`)
@@ -169,7 +165,7 @@ The installer always installs to **system-wide** locations:
 | Path | Contents |
 |------|----------|
 | `/usr/lib/pibrick/` | Source tree: kernel modules, Python helpers, service files |
-| `/usr/lib/pibrick/battery-tools/` | Battery Python helpers (`battery_set.py`, `battery-auto-calibrator.py`, ...) |
+| `/usr/lib/pibrick/battery/` | Battery Python helpers (`battery_set.py`, `battery-auto-calibrator.py`, ...) |
 | `/usr/local/bin/pibrick-tools` | Global wrapper — `pibrick-tools` from any directory |
 | `/etc/modprobe.d/pibrick-battery.conf` | Battery driver parameters persisted across reboots |
 | `/etc/systemd/system/pibrick-battery-*.service` | Battery services (load-SOC, persist-SOC, calibration) |
@@ -177,13 +173,12 @@ The installer always installs to **system-wide** locations:
 The wrapper at `/usr/local/bin/pibrick-tools` is a thin shim that forwards
 every argument to `/usr/lib/pibrick/install.sh`. You never need to call
 `install.sh` directly — `sudo pibrick-tools <command>` always works.
-```
 
 **Persistent override** (system-wide): Create `/etc/pibrick.conf` with:
 
 ```bash
 # /etc/pibrick.conf
-PIBRICK_USER_HOME=/home/alice/battery-tools
+PIBRICK_USER_HOME=/home/alice/battery
 ```
 
 When `sudo` runs `install.sh`, `$HOME` becomes `/root`. The installer detects
@@ -282,7 +277,7 @@ sudo pibrick-tools --status-calibration
 sudo pibrick-tools --check --no-ina228
 
 # 4. Apply the calibrated OCV table
-sudo pibrick-tools --apply --no-ina228 --yes
+sudo pibrick-tools --apply-calibration --yes
 ```
 
 What `--no-ina228` changes internally:
@@ -320,24 +315,24 @@ The auto-detect only applies when `fg_v_ocv_tau_sec_override` is left at -1
 
 `pibrick-tools` is the recommended way to drive calibration. If you need
 direct access to the Python helpers (e.g. for scripting), they live under
-`/usr/lib/pibrick/battery-tools/`:
+`/usr/lib/pibrick/battery/`:
 
 ```bash
 # Direct call to the auto-calibrator (system-wide install)
-sudo python3 /usr/lib/pibrick/battery-tools/battery-auto-calibrator.py --status
+sudo python3 /usr/lib/pibrick/battery/battery-auto-calibrator.py --status
 
 # Same, via the wrapper:
 sudo pibrick-tools --status-calibration
 
 # Generate OCV table from existing data (dry run - shows what would be applied)
-sudo python3 /usr/lib/pibrick/battery-tools/battery-auto-calibrator.py --check
+sudo python3 /usr/lib/pibrick/battery/battery-auto-calibrator.py --check
 
 # Apply the OCV table to the driver (works with both INA228 and non-INA228 builds)
-sudo python3 /usr/lib/pibrick/battery-tools/battery-auto-calibrator.py --apply
+sudo python3 /usr/lib/pibrick/battery/battery-auto-calibrator.py --apply
 
 # Without INA228 (uses the stricter thresholds and filters described above):
-sudo python3 /usr/lib/pibrick/battery-tools/battery-auto-calibrator.py --check --no-ina228
-sudo python3 /usr/lib/pibrick/battery-tools/battery-auto-calibrator.py --apply --no-ina228 --yes
+sudo python3 /usr/lib/pibrick/battery/battery-auto-calibrator.py --check --no-ina228
+sudo python3 /usr/lib/pibrick/battery/battery-auto-calibrator.py --apply --no-ina228 --yes
 ```
 
 **Note**: The `--apply-calibration` step works correctly **regardless of whether INA228 is present**. The OCV table affects the driver's voltage-to-SOC lookup, which is independent of the INA228 current sensor. The calibration data uses BQ25895's `voltage_now` (always available) — INA228 is only used for more accurate current measurements during data collection.
@@ -376,18 +371,18 @@ Set a single value directly:
 
 ```bash
 # Set battery capacity to 3800 mAh (non-persistent, until reboot)
-sudo pibrick-tools --battery-config charge_full_uah 3800000
+sudo pibrick-tools --battery-config charge_full_uah 3800
 
 # Set and persist (saves to /etc/modprobe.d/ + reloads driver)
-sudo pibrick-tools --battery-config charge_full_uah 3800 mAh --persist
+sudo pibrick-tools --battery-config charge_full_uah 3800mAh --persist
 
 # Set INA228 shunt for 15 mΩ resistor, persist it
-sudo pibrick-tools --battery-config ina228_shunt_uohm 15 mΩ --persist
+sudo pibrick-tools --battery-config ina228_shunt_uohm 15mΩ --persist
 
 # Set fuel-gauge discharge profile (700 mA idle, 40% under load, 2200 mA ceiling)
-sudo pibrick-tools --battery-config discharge_avg_ua 700 mA --persist
+sudo pibrick-tools --battery-config discharge_avg_ua 700mA --persist
 sudo pibrick-tools --battery-config discharge_load_factor_pct 40 --persist
-sudo pibrick-tools --battery-config discharge_max_ua 2200 mA --persist
+sudo pibrick-tools --battery-config discharge_max_ua 2200mA --persist
 
 # Show all values
 sudo pibrick-tools --battery-config --show
@@ -400,7 +395,7 @@ sudo pibrick-tools --battery-config --list
 
 | Parameter | Unit | Default | Purpose |
 |-----------|------|---------|---------|
-| `charge_full_uah` | mAh | 5000 | Battery design capacity (e.g. 3800 for 3800 mAh pack) |
+| `charge_full_uah` | mAh | 3800 | Battery design capacity (e.g. 3800 for 3800 mAh pack) |
 | `ina228_shunt_uohm` | mΩ | 15 | INA228 shunt resistor value (must match hardware) |
 | `ina228_max_current_ua` | mA | 6400 | INA228 max current range |
 | `ina228_enabled` | bool | 1 | Use INA228 when present; set 0 to force proxy |
@@ -408,11 +403,11 @@ sudo pibrick-tools --battery-config --list
 | `batt_ir_mohm` | mΩ | 180 | Battery internal resistance (charge-time OCV estimate) |
 | `discharge_avg_ua` | mA | 700 | Nominal idle discharge (set 0 to disable) |
 | `discharge_load_factor_pct` | % | 40 | Extra % added under sustained load |
-| `discharge_max_ua` | mA | 1500 | Hard ceiling for SOC integrator proxy current |
+| `discharge_max_ua` | mA | 2200 | Hard ceiling for SOC integrator proxy current |
 | `rest_min_sec` | s | 300 | Seconds of quiet required for DISCHARGING_RESTING |
 | `low_v_persistent_count` | samples | 5 | Consecutive low-V samples before SOC→critical |
 | `fg_v_ocv_tau_sec_override` | s | -1 | OCV tracker time constant. -1 = auto (60 with INA228, 120 without). Use 60-180. |
-| `coulomb_uah` | mAh | — | **LIVE** — remaining capacity; fuel gauge overwrites |
+| `coulomb_uah` | uAh | — | **LIVE** — remaining capacity; fuel gauge overwrites |
 
 #### Persistence Behavior
 
@@ -422,7 +417,7 @@ sudo pibrick-tools --battery-config --list
 | `--persist` | Save to `/etc/modprobe.d/pibrick-battery.conf` **AND** automatically reload driver so value takes effect immediately. Survives reboot. |
 | `--force` | Bypass safety checks (for `coulomb_uah` writes below 10% capacity — DANGEROUS, can trigger UPower shutdown). |
 
-**Important**: `--persist` makes the change survive reboot. Without it, the change is "live" — visible immediately but lost on next driver reload or reboot. See [Persisting Settings Across Reboots](#persisting-settings-across-reboots).
+**Important**: `--persist` makes the change survive reboot. Without it, the change is "live" — visible immediately but lost on next driver reload or reboot.
 
 #### Calibration Log Files
 
@@ -441,7 +436,7 @@ sudo pibrick-tools --battery-config --list
 
 The new **interactive installer** provides a user-friendly menu for selecting components:
 
-- **Display Driver Selection**: Choose between NEW (with INA228) or OLD (original Hyn)
+- **Display Driver Selection**: Choose between new (bq25895 + INA228 auto-detect) or original (bq25895 only, no INA228) battery driver. Both use the same panel drivers.
 - **Battery Driver**: Full battery fuel gauge with INA228 integration
 - **Calibration Tools**: Automatic voltage-SOC data collection and OCV table generation
 - **UPower KDE Fix**: Correct charging state display in KDE Plasma Mobile
@@ -451,12 +446,12 @@ The new **interactive installer** provides a user-friendly menu for selecting co
 
 | Option | Description |
 |--------|-------------|
-| `--install all` | Install all components |
-| `--install display-new` | Display with INA228 integration |
-| `--install display-old` | Original Hyn display driver |
-| `--install battery` | Battery driver (bq25895 + INA228) |
+| `--install all` | Install core components (display, battery-new, calibration, button) |
+| `--install display` | Display + touch (uses saved panel or defaults to 9203) |
+| `--install display-hyn` | Display with Hynitron CST66xx touch (no INA228 dependency) |
+| `--install battery` | Battery driver (bq25895 + INA228, alias for battery-new) |
 | `--install calibration` | Calibration logger + auto-calibrator |
-| `--install upower` | UPower KDE fix |
+| `--install upower` | UPower KDE charging-state fix |
 | `--install button` | Button service |
 | `--install autorotation` | MMA8451Q accelerometer autorotation |
 | `--enable-calibration` | Start calibration logging |
@@ -574,13 +569,13 @@ SOC levels: [1, 2, 3, 4, 5, ... 92, 93, 94]
 sudo pibrick-tools --status-calibration
 
 # Same, direct call to the auto-calibrator:
-sudo python3 /usr/lib/pibrick/battery-tools/battery-auto-calibrator.py --status
+sudo python3 /usr/lib/pibrick/battery/battery-auto-calibrator.py --status
 
 # Analyze existing data
 sudo pibrick-tools --apply-calibration --no-rebuild   # dry run, just analyze
 
 # Generate OCV table from data
-sudo python3 /usr/lib/pibrick/battery-tools/battery-calibration-logger.py --generate-ocv-table
+sudo python3 /usr/lib/pibrick/battery/battery-calibration-logger.py --generate-ocv-table
 
 # Apply the calibrated OCV table (rebuilds + reloads driver)
 sudo pibrick-tools --apply-calibration
@@ -593,8 +588,13 @@ The wrapper passes these flags through to `battery-auto-calibrator.py`:
 | Flag | Effect |
 |------|--------|
 | `--yes`, `-y` | Skip the `Continue? (yes/no):` confirmation prompt. Implied automatically when no TTY is attached (e.g. running from a script or CI). When the prompt is shown it accepts `y`, `Y`, `yes`, or `YES`. |
-| `--no-rebuild` | Patch the driver source but skip the `make` + `modprobe` step. Useful as a dry-run to preview the new table without rebooting or disrupting the live module. |
-| `--no-ina228` | Tighten the sample filter (restricts `fg_mode` to resting, `|current_now| ≤ 10 mA`, lowers the min samples per bucket). Use this on boards without the TI INA228 current sensor — the raw logger dump tends to be noisier and the tighter filter prevents spurious low-SOC samples from polluting the OCV curve. |
+| `--no-rebuild` | Patch the driver source but skip the `make` + `modprobe` step. Useful to preview the new table without rebooting or disrupting the live module. |
+
+#### `pibrick-tools --check` flags
+
+| Flag | Effect |
+|------|--------|
+| `--no-ina228` | Tighten the sample filter for boards without the TI INA228 sensor (restricts `fg_mode` to resting, `|current_now| ≤ 10 mA`, lowers min samples per bucket). |
 
 Examples:
 
@@ -605,8 +605,8 @@ sudo pibrick-tools --apply-calibration --yes
 # Preview the new table without rebuilding/reloading
 sudo pibrick-tools --apply-calibration --no-rebuild --yes
 
-# No INA228 board
-sudo pibrick-tools --apply-calibration --yes --no-ina228
+# No INA228 board: run analysis with no-INA228 thresholds first
+sudo pibrick-tools --check --no-ina228
 ```
 
 > **Note on table ordering.** The driver's `bq25890_calc_lipo_percentage()`
@@ -663,20 +663,20 @@ sudo pibrick-tools --apply-calibration --yes --no-ina228
 
 - `desktop/pibrick-battery-indicator.py` taskbar battery indicator with autostart.
 - `tools/pibrick-display-settings.sh`, `tools/gnome-display-rate.py`, `tools/ocv-calibrate.py`.
-- Calibration tools: `battery-calibration-logger.py`, `battery-auto-calibrator.py`, `fix-ocv-table.py`
+- Calibration tools: `battery-calibration-logger.py`, `battery-auto-calibrator.py`, `update-ocv-table.py`
 
 ---
 
 ## UPower KDE Fix
 
-On **KDE Plasma Mobile**, the battery indicator may show "Discharging" even while plugged in and charging. This is caused by a bug in UPower (all versions since ~0.99.x) where it overrides the battery state to `Discharging` whenever `current_now < 0` in sysfs — contradicting the actual `status` attribute.
+On **KDE Plasma Mobile**, the battery indicator may show "Discharging" even while plugged in and charging. This is caused by a bug in UPower (all versions since ~0.99.x) where it ignores the battery `status` attribute and forces `Discharging` whenever `current_now < 0` in sysfs — the BQ25895 driver uses the standard `power_supply` convention where negative current means the battery is accepting charge.
 
-The BQ25895 driver follows the Linux `power_supply` convention where **negative current = charging**. The fix rebuilds UPower from source with this override disabled.
+The fix rebuilds UPower from source with this override disabled.
 
 **Requires KDE Plasma to be installed first.** Apply after `sudo pibrick-tools --install kde-mobile-desktop`.
 
 ```bash
-sudo bash ./install.sh --install kde-mobile-desktop  # Install + enable KDE first
+sudo pibrick-tools --install kde-mobile-desktop  # Install + enable KDE first
 sudo pibrick-tools --install upower
 ```
 
@@ -717,7 +717,7 @@ Power does **not** pull line 23 low; only the user button does. The daemon decod
 | Gesture | Action |
 |---------|--------|
 | **User short** | Toggle display (`display-on-off.sh`) |
-| **User long** | Empty stub (customize `user-long.sh`) |
+| **User long** | Brightness up (`pibrick-brightness up`; customize `user-long.sh`) |
 | **Power short** | Native desktop power menu (GNOME, KDE, XFCE, Pi OS `pishutdown`, …) |
 | **Power long** | Hold `KEY_POWER` for 2 s, release on button up (Pi-style shutdown) |
 
@@ -867,7 +867,7 @@ Edit scripts under `/etc/pibrick/` (copied from `button-service/etc/pibrick/`):
 | Hook | Default |
 |------|---------|
 | `user-short.sh` | Display on/off |
-| `user-long.sh` | No-op (add your command) |
+| `user-long.sh` | Brightness up (`pibrick-brightness up` by default; customize here) |
 | `power-short.sh` | Desktop power menu (`power-menu.sh`) |
 | Power long | Handled in `pibrickbtn.c` (uinput `KEY_POWER` hold) |
 
