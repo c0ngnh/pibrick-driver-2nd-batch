@@ -43,7 +43,7 @@ ROTATION_COOLDOWN_MS=1200    # ms - minimum time between rotation commands
 
 # Variance filter: reject noisy samples (walking, vibration)
 VARIANCE_WINDOW=8            # number of samples in rolling window
-VARIANCE_THRESHOLD=800       # max allowed variance (12-bit ADC range ≈ 4096)
+VARIANCE_THRESHOLD=5000       # max allowed variance (12-bit ADC range ≈ 4096); raise to 5000 to allow normal sensor noise while still blocking walking/vibration
 FLAT_Z_MAG=3500              # |Z| above this → device is flat (ignore auto-rotate)
 FLAT_XY_MAX=2200             # when flat, |X| and |Y| must both be below this
 
@@ -251,8 +251,12 @@ detect_orientation() {
     local abs_y=${y#-}
     local abs_z=${z#-}
 
-    # Tolerance / minimum tilt to register a real orientation change
-    local tilt_threshold=3000
+    # Tolerance / minimum tilt to register a real orientation change.
+    # This is the minimum difference between the dominant axis and the second-largest.
+    # Portrait-tilted: X=-11856, Y=10376 → diff=1480, needs ≤1500
+    # Phone stand: X≈700, Y≈-12000 → diff=1000, X<1200 → still FLAT ✓
+    # Walking: X≈5000, Y≈-11000 → passes with 3-sample consistency buffer
+    local tilt_threshold=1500
 
     # Find the dominant axis and how much it dominates the next largest.
     # This cleanly handles the phone-stand case where Y≈Z (nearly tied)
@@ -387,41 +391,75 @@ rotate_kde() {
     local orientation=$1
 
     # KDE Plasma (including Plasma Mobile) on Wayland.
-    # Uses kscreen-doctor to apply rotation.  kscreen-doctor may crash (SIGABRT)
-    # due to Qt/EGL environment issues in a systemd service context — but the
-    # rotation is applied by KWin *before* the crash, so it still takes effect.
-    # We catch the crash signal so the script doesn't treat it as failure.
+    # Uses kscreen-doctor to apply rotation.  kscreen-doctor can be unreliable
+    # (may crash, may silently fail to connect to Wayland) so we retry up to
+    # MAX_RETRIES times and verify via kwinoutputconfig.json (not kscreen-doctor
+    # which crashes in service context).
 
     if ! command -v kscreen-doctor >/dev/null 2>&1; then
         warn "kscreen-doctor not found - cannot rotate KDE display"
         return 1
     fi
 
-    # Catch SIGABRT (signal 6) from kscreen-doctor so we don't exit the script.
-    # The crash is cosmetic — the rotation was already applied by KWin.
-    trap 'exit_code=$?; [ $exit_code -eq 0 -o $exit_code -eq 134 ] && return 0 || return $exit_code' ERR
+    # Map orientation names to kwinoutputconfig transform values
+    local transform_val
+    case "$orientation" in
+        normal)   transform_val="Normal" ;;
+        left)     transform_val="Rotated270" ;;
+        right)    transform_val="Rotated90" ;;
+        inverted) transform_val="Rotated180" ;;
+        *)        warn "Unknown orientation: $orientation"; return 1 ;;
+    esac
 
-    WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" \
-    XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/1000}" \
-    QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-wayland}" \
-    EGL_PLATFORM="${EGL_PLATFORM:-wayland}" \
-    DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/1000/bus}" \
-        kscreen-doctor "output.1.rotation.$orientation" || true
+    local max_retries=5
+    local retry_delay=0.5
 
-    local exit_code=$?
-    trap - ERR
+    for attempt in $(seq 1 $max_retries); do
+        # Run kscreen-doctor; it may crash (SIGABRT) but rotation may still apply.
+        # Suppress all output to stderr/stdout to reduce noise.
+        WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" \
+        XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/1000}" \
+        QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-wayland}" \
+        EGL_PLATFORM="${EGL_PLATFORM:-wayland}" \
+        DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/1000/bus}" \
+            kscreen-doctor "output.1.rotation.$orientation" 2>/dev/null
+        local exit_code=$?
+        trap - ERR
 
-    # Exit 0 = success. Exit 134 (SIGABRT) = kscreen-doctor crashed but KWin already
-    # processed the rotation. Treat both as success.
-    if [ "$exit_code" -eq 0 ]; then
-        log "Applied KDE rotation: $orientation"
-    elif [ "$exit_code" -eq 134 ]; then
-        log "Applied KDE rotation: $orientation (kscreen-doctor crashed — rotation was applied)"
-    else
-        warn "kscreen-doctor failed with exit code $exit_code"
-        return 1
-    fi
-    return 0
+        # Check if kwinoutputconfig.json reflects the new rotation
+        sleep 0.2
+        local current_transform
+        current_transform=$(
+            python3 -c "
+import json, os
+path = os.path.expanduser('~/.config/kwinoutputconfig.json')
+try:
+    with open(path) as f:
+        data = json.load(f)
+    for section in data:
+        if section.get('name') == 'outputs':
+            for out in section.get('data', []):
+                if 'transform' in out:
+                    print(out['transform'])
+                    break
+except: pass
+" 2>/dev/null || echo ""
+        )
+
+        if [ "$current_transform" = "$transform_val" ]; then
+            log "Applied KDE rotation: $orientation (attempt $attempt)"
+            return 0
+        fi
+
+        # Not yet applied — retry
+        if [ "$attempt" -lt $max_retries ]; then
+            log "kscreen-doctor attempt $attempt (exit $exit_code) not yet applied (transform=$current_transform), retrying..."
+            sleep "$retry_delay"
+        fi
+    done
+
+    warn "Failed to rotate KDE display after $max_retries attempts (transform=$current_transform, expected=$transform_val)"
+    return 1
 }
 
 rotate_x11() {
@@ -626,30 +664,31 @@ main() {
     local pending_timestamp=0
     local last_rotation_timestamp=0
 
-    # Startup sync: read actual screen rotation so we don't re-rotate unnecessarily.
-    # Try the get_current_rotation helper first; if it returns "unknown" (because
-    # get_current_rotation's pipeline may fail in the service environment due to
-    # set -e), fall back to calling kscreen-doctor directly here.
-    # Use timeout(1) to prevent hangs if kscreen-doctor blocks.
+    # Startup sync: read actual screen rotation from kwinoutputconfig.json so we don't
+    # re-rotate unnecessarily. kscreen-doctor is unreliable in the service context.
     log "Reading current screen rotation..."
     local initial_rot
     initial_rot=$(
-        timeout 3 get_current_rotation 2>/dev/null || echo "unknown"
+        python3 -c "
+import json, os, sys
+path = os.path.expanduser('~/.config/kwinoutputconfig.json')
+try:
+    with open(path) as f:
+        data = json.load(f)
+    for section in data:
+        if section.get('name') == 'outputs':
+            for out in section.get('data', []):
+                if 'transform' in out:
+                    t = out['transform']
+                    if t == 'Normal': print('normal')
+                    elif t == 'Rotated90': print('right')
+                    elif t == 'Rotated180': print('inverted')
+                    elif t == 'Rotated270': print('left')
+                    else: print('unknown')
+                    break
+except: print('unknown')
+" 2>/dev/null || echo "unknown"
     )
-    # Fallback: direct kscreen-doctor call if helper returned empty/unknown
-    if [ -z "$initial_rot" ] || [ "$initial_rot" = "unknown" ]; then
-        initial_rot=$(
-            WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" \
-            XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/1000}" \
-            QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-wayland}" \
-            EGL_PLATFORM="${EGL_PLATFORM:-wayland}" \
-                timeout 3 kscreen-doctor -o 2>/dev/null | \
-                grep "Rotation:" | \
-                sed 's/'$'\033''\[[0-9;]*m//g' | \
-                tr -d ' \t' | \
-                grep -o '[0-9]$' || echo ""
-        )
-    fi
     if [ -n "$initial_rot" ] && [ "$initial_rot" != "unknown" ]; then
         current_orientation="$initial_rot"
         log "Startup: screen is at '$current_orientation' — will maintain"

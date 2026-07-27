@@ -310,6 +310,10 @@ fi
 mkdir -p /etc/pibrick/actions
 install -m 755 "$SCRIPT_DIR/etc/pibrick/actions/autorotation-lock.sh" /etc/pibrick/actions/autorotation-lock.sh
 
+# Create /var/lib/pibrick — needed for rotation state tracking and debug logs
+mkdir -p /var/lib/pibrick
+chown congn:congn /var/lib/pibrick
+
 # Install systemd service
 install -m 644 "$SCRIPT_DIR/pibrick-autorotation.service" /etc/systemd/system/pibrick-autorotation.service
 
