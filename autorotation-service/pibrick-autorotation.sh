@@ -246,57 +246,52 @@ read_accel_raw() {
 detect_orientation() {
     local x=$1 y=$2 z=$3
 
-    # Get absolute values for comparison
+    # Get absolute values
     local abs_x=${x#-}
     local abs_y=${y#-}
     local abs_z=${z#-}
 
-    # Thresholds for orientation detection
-    # Raised from 3000 → 5000 to reduce false rotations on minor tilts
-    local tilt_threshold=5000
+    # Tolerance / minimum tilt to register a real orientation change
+    local tilt_threshold=3000
 
-    # piBrick hardware axis mapping:
-    # - y dominant → portrait (standing up)
-    # - x dominant → landscape (turned sideways)
-    # - z dominant → flat (lying down / phone stand)
-    #
-    # Sign determines rotation direction within each mode
+    # Find the dominant axis and how much it dominates the next largest.
+    # This cleanly handles the phone-stand case where Y≈Z (nearly tied)
+    # and the axes are roughly equal — correctly returns flat instead of portrait.
+    local dom=0 dval=0 second=0
 
-    # Check if device is roughly level - ambiguous, maintain current
-    if (( abs_x < tilt_threshold && abs_y < tilt_threshold && abs_z < tilt_threshold )); then
-        # Device is roughly level - ambiguous, return empty
+    if (( abs_x >= abs_y )) && (( abs_x >= abs_z )); then
+        dom=0; dval=abs_x
+        second=$(( abs_y > abs_z ? abs_y : abs_z ))
+    elif (( abs_y >= abs_x )) && (( abs_y >= abs_z )); then
+        dom=1; dval=abs_y
+        second=$(( abs_x > abs_z ? abs_x : abs_z ))
+    else
+        dom=2; dval=abs_z
+        second=$(( abs_x > abs_y ? abs_x : abs_y ))
+    fi
+
+    # If dominant axis does not clearly exceed the next largest, treat as flat/neutral
+    if (( dval - second < tilt_threshold )); then
         return
     fi
 
-    # Z dominant = flat (device lying flat or on phone stand)
-    # Hold current orientation instead of switching
-    if (( abs_z > abs_x + tilt_threshold && abs_z > abs_y + tilt_threshold )); then
-        # Return empty — caller will keep current orientation
+    # Also reject purely level (all axes small)
+    if (( dval < tilt_threshold )); then
         return
     fi
 
-    # Y dominant = portrait (device standing up)
-    if (( abs_y > abs_x + tilt_threshold && abs_y > abs_z + tilt_threshold )); then
-        if (( y < 0 )); then
-            echo "normal"      # Normal portrait
-        else
-            echo "inverted"   # Inverted portrait
-        fi
-        return
-    fi
-
-    # X dominant = landscape (device turned sideways)
-    if (( abs_x > abs_y + tilt_threshold && abs_x > abs_z + tilt_threshold )); then
-        if (( x > 0 )); then
-            echo "left"       # Tilting left = landscape left
-        else
-            echo "right"      # Tilting right = landscape right
-        fi
-        return
-    fi
-
-    # No clear dominant axis - return empty (keep current)
-    return
+    # Classify based on dominant axis
+    case $dom in
+        1) # Y dominant = portrait
+            (( y < 0 )) && echo "normal" || echo "inverted"
+            ;;
+        0) # X dominant = landscape
+            (( x > 0 )) && echo "left" || echo "right"
+            ;;
+        2) # Z dominant = flat
+            return
+            ;;
+    esac
 }
 
 # ── Desktop Integration ─────────────────────────────────────────────────────────
