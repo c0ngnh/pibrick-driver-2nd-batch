@@ -37,13 +37,14 @@ I2CSET="sudo /usr/sbin/i2cset"   # Full path for i2c-tools with sudo
 # Ensure PATH is set (systemd may have limited PATH)
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
-# Thresholds for orientation detection
-STABLE_DELAY_MS=2000         # ms - delay before committing to new orientation (2 seconds)
-ROTATION_COOLDOWN_MS=1200    # ms - minimum time between rotation commands
+STABLE_DELAY_MS=50           # ms - delay before committing to new orientation
+ROTATION_COOLDOWN_MS=200    # ms - minimum time between rotation commands
 
-# Variance filter: reject noisy samples (walking, vibration)
-VARIANCE_WINDOW=8            # number of samples in rolling window
-VARIANCE_THRESHOLD=5000       # max allowed variance (12-bit ADC range ≈ 4096); raise to 5000 to allow normal sensor noise while still blocking walking/vibration
+# Variance filter: DISABLED for maximum responsiveness.
+# To re-enable anti-walking filter, set VARIANCE_WINDOW > 1 and
+# set VARIANCE_THRESHOLD appropriately for your sensor noise level.
+VARIANCE_WINDOW=1           # 1 = disabled (no variance filtering)
+VARIANCE_THRESHOLD=5000     # max allowed variance
 FLAT_Z_MAG=3500              # |Z| above this → device is flat (ignore auto-rotate)
 FLAT_XY_MAX=2200             # when flat, |X| and |Y| must both be below this
 
@@ -411,8 +412,8 @@ rotate_kde() {
         *)        warn "Unknown orientation: $orientation"; return 1 ;;
     esac
 
-    local max_retries=5
-    local retry_delay=0.5
+        local max_retries=5
+    local retry_delay=0.1
 
     for attempt in $(seq 1 $max_retries); do
         # Run kscreen-doctor; it may crash (SIGABRT) but rotation may still apply.
@@ -427,7 +428,7 @@ rotate_kde() {
         trap - ERR
 
         # Check if kwinoutputconfig.json reflects the new rotation
-        sleep 0.2
+        sleep 0.1
         local current_transform
         current_transform=$(
             python3 -c "
@@ -696,9 +697,8 @@ except: print('unknown')
         log "Startup: could not determine screen rotation — will rotate as needed"
     fi
 
-    # Orientation consistency buffer: require last 3 samples to agree before committing
-    local orient_buf=()
-    local orient_buf_size=3
+    # orient_buf_size=1 → instant single-sample detection
+    local orient_buf_size=1
 
     # Rolling variance filter: maintain a small buffer of recent X values
     # to detect vibration (walking). If variance is high, skip the sample.
@@ -718,14 +718,14 @@ except: print('unknown')
                 apply_rotation "$locked_orient"
                 current_orientation="$locked_orient"
             fi
-            sleep 1
+            sleep 0.2
             continue
         fi
 
         # Read accelerometer
         local accel_data x y z
         accel_data=$(read_accel_raw) || {
-            sleep 0.2
+            sleep 0.02
             continue
         }
 
@@ -733,7 +733,7 @@ except: print('unknown')
 
         # Skip if all zeros (no new data)
         if [ "$x" = "0" ] && [ "$y" = "0" ] && [ "$z" = "0" ]; then
-            sleep 0.1
+            sleep 0.02
             continue
         fi
 
@@ -759,7 +759,7 @@ except: print('unknown')
             if [ "$var_n" -gt "$VARIANCE_THRESHOLD" ]; then
                 # High variance → walking / vibration noise; hold orientation
                 pending_orientation=""
-                sleep 0.1
+                sleep 0.02
                 continue
             fi
         fi
@@ -772,7 +772,7 @@ except: print('unknown')
         if [ -z "$new_orientation" ]; then
             pending_orientation=""
             orient_buf=()
-            sleep 0.1
+            sleep 0.02
             continue
         fi
 
@@ -795,7 +795,7 @@ except: print('unknown')
 
         # If buffer not full yet, just keep accumulating
         if [ "${#orient_buf[@]}" -lt "$orient_buf_size" ]; then
-            sleep 0.1
+            sleep 0.02
             continue
         fi
 
@@ -804,7 +804,7 @@ except: print('unknown')
             # Buffer disagrees — sensor noisy or transitioning; reset
             pending_orientation=""
             orient_buf=()
-            sleep 0.1
+            sleep 0.02
             continue
         fi
 
@@ -844,7 +844,7 @@ except: print('unknown')
             orient_buf=()
         fi
 
-        sleep 0.1  # 100ms polling interval
+        sleep 0.02  # 20ms polling interval — snappy responsiveness
     done
 }
 
