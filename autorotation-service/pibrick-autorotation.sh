@@ -38,8 +38,14 @@ I2CSET="sudo /usr/sbin/i2cset"   # Full path for i2c-tools with sudo
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 # Thresholds for orientation detection
-STABLE_DELAY_MS=1000         # ms - delay before committing to new orientation (1 second stability)
+STABLE_DELAY_MS=2000         # ms - delay before committing to new orientation (2 seconds)
 ROTATION_COOLDOWN_MS=1200    # ms - minimum time between rotation commands
+
+# Variance filter: reject noisy samples (walking, vibration)
+VARIANCE_WINDOW=8            # number of samples in rolling window
+VARIANCE_THRESHOLD=800       # max allowed variance (12-bit ADC range ≈ 4096)
+FLAT_Z_MAG=3500              # |Z| above this → device is flat (ignore auto-rotate)
+FLAT_XY_MAX=2200             # when flat, |X| and |Y| must both be below this
 
 # MMA8451Q registers
 MMA8451_STATUS=0x00
@@ -246,18 +252,26 @@ detect_orientation() {
     local abs_z=${z#-}
 
     # Thresholds for orientation detection
-    local tilt_threshold=3000  # Minimum difference between axes
+    # Raised from 3000 → 5000 to reduce false rotations on minor tilts
+    local tilt_threshold=5000
 
     # piBrick hardware axis mapping:
     # - y dominant → portrait (standing up)
     # - x dominant → landscape (turned sideways)
-    # - z dominant → flat (lying down)
+    # - z dominant → flat (lying down / phone stand)
     #
     # Sign determines rotation direction within each mode
 
-    # Check if device is tilted enough
+    # Check if device is roughly level - ambiguous, maintain current
     if (( abs_x < tilt_threshold && abs_y < tilt_threshold && abs_z < tilt_threshold )); then
-        # Device is roughly level - ambiguous, maintain current or default to normal
+        # Device is roughly level - ambiguous, return empty
+        return
+    fi
+
+    # Z dominant = flat (device lying flat or on phone stand)
+    # Hold current orientation instead of switching
+    if (( abs_z > abs_x + tilt_threshold && abs_z > abs_y + tilt_threshold )); then
+        # Return empty — caller will keep current orientation
         return
     fi
 
@@ -281,29 +295,8 @@ detect_orientation() {
         return
     fi
 
-    # Z dominant = flat (device lying flat)
-    if (( abs_z > abs_x + tilt_threshold && abs_z > abs_y + tilt_threshold )); then
-        if (( x > tilt_threshold )); then
-            echo "left"
-        elif (( x < -tilt_threshold )); then
-            echo "right"
-        else
-            # Flat with x near zero - use y
-            if (( y > 0 )); then
-                echo "inverted"
-            else
-                echo "normal"
-            fi
-        fi
-        return
-    fi
-
-    # No clear dominant axis - use y for portrait determination
-    if (( y > 0 )); then
-        echo "inverted"
-    else
-        echo "normal"
-    fi
+    # No clear dominant axis - return empty (keep current)
+    return
 }
 
 # ── Desktop Integration ─────────────────────────────────────────────────────────
@@ -585,6 +578,13 @@ main() {
     local pending_timestamp=0
     local last_rotation_timestamp=0
 
+    # Rolling variance filter: maintain a small buffer of recent X values
+    # to detect vibration (walking). If variance is high, skip the sample.
+    local var_x=()
+    local var_y=()
+    local var_z=()
+    local flat_count=0
+
     log "Monitoring orientation changes..."
 
     while true; do
@@ -603,7 +603,7 @@ main() {
         # Read accelerometer
         local accel_data x y z
         accel_data=$(read_accel_raw) || {
-            sleep 1
+            sleep 0.2
             continue
         }
 
@@ -615,9 +615,43 @@ main() {
             continue
         fi
 
+        # Rolling variance filter: detect walking / vibration
+        # If standard deviation of recent X readings is too high, skip sample
+        var_x+=("$x")
+        var_y+=("$y")
+        var_z+=("$z")
+        if [ "${#var_x[@]}" -gt "$VARIANCE_WINDOW" ]; then
+            var_x=("${var_x[@]:1}")
+            var_y=("${var_y[@]:1}")
+            var_z=("${var_z[@]:1}")
+        fi
+
+        if [ "${#var_x[@]}" -ge "$VARIANCE_WINDOW" ]; then
+            local sum_x=0 sum_x2=0
+            for v in "${var_x[@]}"; do
+                sum_x=$((sum_x + v))
+                sum_x2=$((sum_x2 + v * v))
+            done
+            local mean_x=$((sum_x / VARIANCE_WINDOW))
+            local var_n=$((sum_x2 / VARIANCE_WINDOW - mean_x * mean_x))
+            if [ "$var_n" -gt "$VARIANCE_THRESHOLD" ]; then
+                # High variance → walking / vibration noise; hold orientation
+                pending_orientation=""
+                sleep 0.1
+                continue
+            fi
+        fi
+
         # Detect orientation
         local new_orientation
         new_orientation=$(detect_orientation "$x" "$y" "$z")
+
+        # If detect_orientation returns empty (flat/ambiguous), hold current
+        if [ -z "$new_orientation" ]; then
+            pending_orientation=""
+            sleep 0.1
+            continue
+        fi
 
         # Handle orientation change
         if [ "$new_orientation" != "$current_orientation" ]; then
