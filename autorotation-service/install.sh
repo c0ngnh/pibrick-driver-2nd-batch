@@ -32,6 +32,17 @@ success() {
     echo -e "\033[0;32m[OK]\033[0m $*"
 }
 
+# Copy src to dst only when they differ (avoids "same file" errors from cp/install).
+# Preserves permissions and ownership like cp -p.
+safe_cp() {
+    local src="$1" dst="$2"
+    [ -f "$src" ] || { error "safe_cp: source not found: $src"; return 1; }
+    if [ -f "$dst" ] && cmp -s "$src" "$dst"; then
+        return 0
+    fi
+    cp -p "$src" "$dst"
+}
+
 # Check for root
 if [ "$(id -u)" != "0" ]; then
     error "This script must be run as root (sudo)"
@@ -286,7 +297,7 @@ mkdir -p /var/lib/pibrick
 chmod 755 /var/lib/pibrick
 
 # Install main service script
-cp -p "$SCRIPT_DIR/pibrick-autorotation.sh" /usr/lib/pibrick/autorotation-service/pibrick-autorotation.sh
+safe_cp "$SCRIPT_DIR/pibrick-autorotation.sh" /usr/lib/pibrick/autorotation-service/pibrick-autorotation.sh
 
 # For KDE Plasma Mobile, create autostart entry (optional).
 # Resolve the real desktop user so the .desktop file lands in the correct home.
@@ -308,14 +319,14 @@ fi
 
 # Install action scripts
 mkdir -p /etc/pibrick/actions
-cp -p "$SCRIPT_DIR/etc/pibrick/actions/autorotation-lock.sh" /etc/pibrick/actions/autorotation-lock.sh
+safe_cp "$SCRIPT_DIR/etc/pibrick/actions/autorotation-lock.sh" /etc/pibrick/actions/autorotation-lock.sh
 
 # Create /var/lib/pibrick — needed for rotation state tracking and debug logs
 mkdir -p /var/lib/pibrick
 chown congn:congn /var/lib/pibrick
 
 # Install systemd service
-cp "$SCRIPT_DIR/pibrick-autorotation.service" /etc/systemd/system/pibrick-autorotation.service
+safe_cp "$SCRIPT_DIR/pibrick-autorotation.service" /etc/systemd/system/pibrick-autorotation.service
 
 # ── Disable KWin built-in auto-rotation ────────────────────────────────────────
 # KWin has a built-in auto-rotation feature that uses iio-sensor-proxy and

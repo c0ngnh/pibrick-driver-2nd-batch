@@ -23,6 +23,17 @@ success() { echo -e "${GREEN}[OK]${RESET} $*"; }
 warn()    { echo -e "${YELLOW}[WARN]${RESET} $*"; }
 error()   { echo -e "${RED}[ERROR]${RESET} $*" >&2; }
 
+# Copy src to dst only when they differ (avoids "same file" errors from cp/install).
+# Preserves permissions and ownership like cp -p.
+safe_cp() {
+    local src="$1" dst="$2"
+    [ -f "$src" ] || { error "safe_cp: source not found: $src"; return 1; }
+    if [ -f "$dst" ] && cmp -s "$src" "$dst"; then
+        return 0
+    fi
+    cp -p "$src" "$dst"
+}
+
 # ── Config paths ───────────────────────────────────────────────────────────────
 PANEL_CONFIG=/etc/pibrick.panel
 DISPLAY_REFRESH_CONFIG=/etc/pibrick.display-refresh
@@ -1322,7 +1333,7 @@ PYEOF
 		return 1
 	fi
 
-	install -m 0755 "$UP_SRC/build/src/upowerd" "$UPowerD"
+	safe_cp "$UP_SRC/build/src/upowerd" "$UPowerD"
 	cd /
 
 	success "UPower rebuilt successfully."
@@ -1918,7 +1929,7 @@ install_battery() {
 					/etc/modprobe.d/pibrick-battery.conf
 			fi
 		fi
-		install -m 644 "$PIBRICK_LIB/battery/pibrick-battery.conf" \
+		safe_cp "$PIBRICK_LIB/battery/pibrick-battery.conf" \
 			/etc/modprobe.d/pibrick-battery.conf
 	fi
 
@@ -1947,7 +1958,7 @@ install_battery() {
 		if [ "$PIBRICK_LIB/battery/pibrick-battery-load-soc.sh" -ef "$PIBRICK_TOOLS_DIR/pibrick-battery-load-soc.sh" ]; then
 			: # already in place
 		else
-			install -m 755 "$PIBRICK_LIB/battery/pibrick-battery-load-soc.sh" \
+			safe_cp "$PIBRICK_LIB/battery/pibrick-battery-load-soc.sh" \
 				"$PIBRICK_TOOLS_DIR/pibrick-battery-load-soc.sh"
 		fi
 	fi
@@ -2007,7 +2018,7 @@ install_battery_original() {
 					/etc/modprobe.d/pibrick-battery.conf
 			fi
 		fi
-		install -m 644 "$PIBRICK_LIB/battery/pibrick-battery.conf" \
+		safe_cp "$PIBRICK_LIB/battery/pibrick-battery.conf" \
 			/etc/modprobe.d/pibrick-battery.conf
 	fi
 
@@ -2036,7 +2047,7 @@ install_battery_original() {
 		if [ "$PIBRICK_LIB/battery/pibrick-battery-load-soc.sh" -ef "$PIBRICK_TOOLS_DIR/pibrick-battery-load-soc.sh" ]; then
 			: # already in place
 		else
-			install -m 755 "$PIBRICK_LIB/battery/pibrick-battery-load-soc.sh" \
+			safe_cp "$PIBRICK_LIB/battery/pibrick-battery-load-soc.sh" \
 				"$PIBRICK_TOOLS_DIR/pibrick-battery-load-soc.sh"
 		fi
 	fi
@@ -2219,7 +2230,7 @@ install_pibrick_wrapper() {
 		return 0
 	fi
 	info "Installing pibrick-tools wrapper at $PIBRICK_WRAPPER..."
-	install -m 0755 "$PIBRICK_SRC/tools/pibrick-tools.sh" "$PIBRICK_WRAPPER"
+	safe_cp "$PIBRICK_SRC/tools/pibrick-tools.sh" "$PIBRICK_WRAPPER"
 	success "Wrapper installed: $PIBRICK_WRAPPER"
 }
 
@@ -2241,7 +2252,7 @@ install_bash_completion() {
 		return 0
 	fi
 	info "Installing bash completion to $dest_dir/pibrick-tools..."
-	install -m 0644 "$src_completion" "$dest_dir/pibrick-tools"
+	safe_cp "$src_completion" "$dest_dir/pibrick-tools"
 	success "Bash completion installed (restart shell or 'source' it manually)"
 }
 
