@@ -286,7 +286,7 @@ mkdir -p /var/lib/pibrick
 chmod 755 /var/lib/pibrick
 
 # Install main service script
-install -m 755 "$SCRIPT_DIR/pibrick-autorotation.sh" /usr/lib/pibrick/autorotation-service/pibrick-autorotation.sh
+cp -p "$SCRIPT_DIR/pibrick-autorotation.sh" /usr/lib/pibrick/autorotation-service/pibrick-autorotation.sh
 
 # For KDE Plasma Mobile, create autostart entry (optional).
 # Resolve the real desktop user so the .desktop file lands in the correct home.
@@ -308,14 +308,14 @@ fi
 
 # Install action scripts
 mkdir -p /etc/pibrick/actions
-install -m 755 "$SCRIPT_DIR/etc/pibrick/actions/autorotation-lock.sh" /etc/pibrick/actions/autorotation-lock.sh
+cp -p "$SCRIPT_DIR/etc/pibrick/actions/autorotation-lock.sh" /etc/pibrick/actions/autorotation-lock.sh
 
 # Create /var/lib/pibrick — needed for rotation state tracking and debug logs
 mkdir -p /var/lib/pibrick
 chown congn:congn /var/lib/pibrick
 
 # Install systemd service
-install -m 644 "$SCRIPT_DIR/pibrick-autorotation.service" /etc/systemd/system/pibrick-autorotation.service
+cp "$SCRIPT_DIR/pibrick-autorotation.service" /etc/systemd/system/pibrick-autorotation.service
 
 # ── Disable KWin built-in auto-rotation ────────────────────────────────────────
 # KWin has a built-in auto-rotation feature that uses iio-sensor-proxy and
