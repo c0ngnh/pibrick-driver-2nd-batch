@@ -1128,6 +1128,16 @@ fix_upower() {
 
 	info "Applying UPower KDE fix..."
 
+	# Always unmask first — handles the case where a previous interrupted run
+	# left the service masked. Then set the trap to clean up if WE mask it.
+	unmask_upower
+
+	# Set a trap so unmask runs on exit, error, or interrupt — prevents the
+	# service from being left masked if the function is interrupted.
+	trap unmask_upower EXIT
+	trap 'unmask_upower; exit 130' INT
+	trap 'unmask_upower; exit 143' TERM
+
 	# Require KDE desktop (UPower belongs to the desktop session, not system services).
 	if ! kde_packages_available; then
 		error "KDE Plasma packages not installed."
@@ -1340,30 +1350,38 @@ PYEOF
 	restart_upower "$UPowerD"
 }
 
+unmask_upower() {
+	# Unmask so systemd can manage the service normally.
+	# Call this in a trap to guarantee the service is restored even on error.
+	systemctl unmask upower 2>/dev/null || true
+	systemctl --user unmask upower 2>/dev/null || true
+}
+
 stop_upower() {
-	# MASK the service FIRST so systemd can't auto-restart it while we work
+	# MASK the service FIRST so systemd can't auto-restart it while we work.
+	# A trap in fix_upower guarantees we unmask even on error.
 	systemctl mask upower 2>/dev/null || true
 	systemctl --user mask upower 2>/dev/null || true
-	
+
 	# Stop all upower-related services
 	systemctl stop upower 2>/dev/null || true
 	systemctl --user stop upower 2>/dev/null || true
-	
+
 	# Kill any running daemons forcefully
 	pkill -9 upowerd 2>/dev/null || true
-	
+
 	# Wait for daemon to fully release the file
 	sleep 3
-	
+
 	# Verify the daemon stopped
 	if pgrep -x upowerd >/dev/null 2>&1; then
 		warn "UPower daemon still running, retrying..."
 		pkill -9 upowerd 2>/dev/null || true
 		sleep 2
 	fi
-	
-	# If binary is still busy (ETXTBSY), the daemon didn't release it
-	# Try to ensure it's completely gone
+
+	# If binary is still busy (ETXTBSY), the daemon didn't release it.
+	# Try to ensure it's completely gone.
 	if [ -f /usr/libexec/upowerd ]; then
 		local pid
 		pid=$(pgrep -x upowerd 2>/dev/null || true)
@@ -1385,9 +1403,7 @@ restart_upower() {
 
 	info "Restarting UPower daemon..."
 	stop_upower
-	# Unmask so we can start it
-	systemctl unmask upower 2>/dev/null || true
-	systemctl --user unmask upower 2>/dev/null || true
+	unmask_upower
 	systemctl start upower 2>/dev/null || "$upowerd_path" &
 	sleep 4
 
