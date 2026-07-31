@@ -745,13 +745,19 @@ build_quicksetting_plugin() {
         return 1
     }
 
-    # Compile & link. -fPIC + -shared. We deliberately do not link against
-    # Qt6Widgets / Qt6Quick / Qt6Svg — only Core + Qml are needed.
+    # ── 4. Compile & link. -fPIC + -shared. We deliberately do not link ─────
+    # against Qt6Widgets / Qt6Quick / Qt6Svg — only Core + Qml are needed.
     # -I"$build_dir" lets the .cpp files `#include "moc_*.cpp"` to pull in
     # the MOC-generated code, since moc output lives in the build dir rather
     # than the source dir. We deliberately do NOT pass moc_*.cpp as a
     # separate compile input — that would cause ODR violations with the
     # `#include "moc_*.cpp"` at the bottom of each .cpp file.
+    #
+    # The linker needs the destination directory to exist before it can
+    # create the .so there. Otherwise /usr/bin/ld exits with
+    # 'cannot open output file ...: No such file or directory' even though
+    # the compile succeeded.
+    mkdir -p "$qml_install_root"
     if ! "$cxx" -fPIC -shared -std=c++17 \
         -fvisibility=hidden \
         -I"$build_dir" \
@@ -768,7 +774,6 @@ build_quicksetting_plugin() {
     fi
 
     # ── 5. Install qmldir + .so into the QML module dir ────────────────────
-    mkdir -p "$qml_install_root"
     safe_cp "$src_dir/qmldir" "$qml_install_root/qmldir"
     chmod 644 "$out_so"
     success "  QML plugin installed: $out_so"
