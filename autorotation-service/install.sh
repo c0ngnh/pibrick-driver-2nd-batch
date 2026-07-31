@@ -571,8 +571,35 @@ else
     chown root:root /var/lib/pibrick
 fi
 
-# Install systemd service
-safe_cp "$SCRIPT_DIR/pibrick-autorotation.service" /etc/systemd/system/pibrick-autorotation.service
+# Install systemd service with user/policy substituted
+# Resolve the real desktop user so the service runs as the correct UID.
+local autorot_user=""
+if [ -n "${SUDO_USER:-}" ] && [ "$(id -un)" = "root" ]; then
+    autorot_user="$SUDO_USER"
+else
+    autorot_user=$(loginctl list-sessions --no-legend 2>/dev/null | \
+        awk 'NR>1 && $3 != "root" {print $3; exit}')
+    [ -z "$autorot_user" ] && autorot_user=$(who 2>/dev/null | awk '{print $1}' | grep -v '^root$' | head -1)
+fi
+[ -z "$autorot_user" ] && autorot_user="root"
+
+local autorot_uid
+autorot_uid=$(id -u "$autorot_user" 2>/dev/null || echo "1000")
+local autorot_home
+autorot_home=$(getent passwd "$autorot_user" 2>/dev/null | cut -d: -f6)
+autorot_home="${autorot_home:-/home/$autorot_user}"
+
+# Substitute User, Group, HOME, USER, and UID-specific paths in the service file
+sed -e "s|^User=congn$|User=$autorot_user|" \
+    -e "s|^Group=congn$|Group=$autorot_user|" \
+    -e "s|Environment=USER=congn$|Environment=USER=$autorot_user|" \
+    -e "s|Environment=HOME=/home/congn$|Environment=HOME=$autorot_home|" \
+    -e "s|Environment=XDG_RUNTIME_DIR=/run/user/1000$|Environment=XDG_RUNTIME_DIR=/run/user/$autorot_uid|" \
+    -e "s|Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus$|Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$autorot_uid/bus|" \
+    "$SCRIPT_DIR/pibrick-autorotation.service" \
+    > /etc/systemd/system/pibrick-autorotation.service
+chmod 644 /etc/systemd/system/pibrick-autorotation.service
+info "  pibrick-autorotation.service installed (user=$autorot_user uid=$autorot_uid)"
 
 # ── Disable KWin built-in auto-rotation ────────────────────────────────────────
 disable_kwin_auto_rotation() {
