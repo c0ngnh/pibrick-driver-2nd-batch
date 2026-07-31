@@ -514,74 +514,18 @@ install_system_plasmoid() {
 }
 install_system_plasmoid
 
-# ── Install Quick Drawer entry (Plasma Mobile top-pull panel) ───────────────────
-# Drops a GenericQML KPackage at /usr/share/plasma/quicksettings/ so the tile
-# appears in the Quick Drawer (top-pull panel) alongside the built-in entries.
-# Idempotent: re-running replaces the package in place.
-install_quicksetting() {
-    info "Installing Quick Drawer entry..."
-
-    # Ensure the entry is in the user's enabled-quick-settings list. The
-    # shell only renders tiles that are both (a) discoverable on disk
-    # AND (b) listed in enabledQuickSettings. We add it implicitly if
-    # the user already has a list set (so we don't drop their other
-    # customizations), and skip otherwise — the user can enable it via
-    # Settings → Shell → Action Drawer → Quick Settings.
-    if [ -n "${SUDO_USER:-}" ]; then
-        local user_home
-        user_home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
-        local pmrc="${user_home:-$HOME}/.config/plasmamobilerc"
-        if [ -f "$pmrc" ] && grep -q '^enabledQuickSettings=' "$pmrc" 2>/dev/null; then
-            if ! grep -q 'pibrick-autorotation' "$pmrc"; then
-                info "  Adding pibrick-autorotation to enabledQuickSettings in $pmrc"
-                # Append to the comma-separated list without disturbing order.
-                sed -i 's|^enabledQuickSettings=\(.*\)$|\1,org.kde.plasma.quicksetting.pibrick-autorotation|' \
-                    "$pmrc"
-            fi
-        fi
-    fi
-
-    if [ ! -d "$SCRIPT_DIR/quicksetting" ]; then
-        warn "  quicksetting package source missing; skipping"
-        return 0
-    fi
-    local qs_id
-    qs_id=$(grep -o '"Id": *"[^"]*"' "$SCRIPT_DIR/quicksetting/package/metadata.json" \
-            | head -1 | sed 's/.*"\(org\.kde\.plasma\.quicksetting\.[^"]*\)".*/\1/')
-    if [ -z "$qs_id" ]; then
-        warn "  could not read quicksetting Id from metadata.json; skipping"
-        return 0
-    fi
-    local qs_dir="/usr/share/plasma/quicksettings/$qs_id"
-    rm -rf "$qs_dir" 2>/dev/null || true
-    cp -r "$SCRIPT_DIR/quicksetting/package" "$qs_dir"
-    info "  Quick Drawer entry installed: $qs_id"
-
-    # Build and install the matching QML extension plugin so the tile
-    # gets a bindable state property. Without it, the tile would always
-    # appear "on" because pure QML in this sandbox has no way to read
-    # the auto-rotation state. See plugin-src/README-style comments in
-    # pibrick-autorotation-util.h for the rationale.
-    if build_quicksetting_plugin "$qs_id"; then
-        info "  Tile state is now live (auto / locked)."
-    else
-        warn "  QML plugin build failed — the tile will still appear,"
-        warn "  but its 'enabled' state will be stale (always On)."
-        warn "  See install log above for the build error."
-    fi
-
-    info "  Sign out and back in once; the 'Auto-rotate' tile will then appear in the"
-    info "  top-pull Quick Drawer. (The shell scans quicksettings/ at session start;"
-    info "  there is no user-level plasmashell unit on this image to restart instead.)"
-}
-install_quicksetting
-
 # ── Build & install the piBrick Quick-Setting QML extension plugin ───────────────
+# Defined BEFORE install_quicksetting() below so the helper is visible in the
+# function table when install_quicksetting() runs. (Bash resolves function
+# names at call time from the table as-built by the parser; a forward
+# reference to a function defined later in the file is a "command not found"
+# error.)
+#
 # Compiles plugin-src/{plugin.cpp,util.h,util.cpp} into a Qt6 QML plugin shared
 # library and drops it next to a qmldir at
-#   /usr/lib/qt6/qml/org/kde/plasma/quicksetting.<id>/
-# so the tile's QML can `import org.kde.plasma.quicksetting.<id> 1.0` and get
-# a bindable PibrickAutorotationUtil singleton.
+#   /usr/lib/qt6/qml/<qml-uri>/
+# so the tile's QML can `import <qml-uri> 1.0` and get a bindable
+# PibrickAutorotationUtil singleton.
 #
 # Args: $1 = quicksetting plugin id (e.g. org.kde.plasma.quicksetting.pibrick-autorotation)
 # Returns 0 on success (built or skipped because already up-to-date), 1 on failure.
@@ -742,7 +686,6 @@ Build cmd: $cxx -fPIC -shared -std=c++17 -fvisibility=hidden \\
     $qt_cflags \\
     pibrick-autorotation-plugin.cpp \\
     pibrick-autorotation-util.cpp \\
-    moc_pibrick-autorotation-util.cpp \\
     -o $out_so \\
     $qt_libs
 EOF
@@ -750,6 +693,85 @@ EOF
     rm -rf "$build_dir"
     return 0
 }
+
+# ── Install Quick Drawer entry (Plasma Mobile top-pull panel) ───────────────────
+# Drops a GenericQML KPackage at /usr/share/plasma/quicksettings/ so the tile
+# appears in the Quick Drawer (top-pull panel) alongside the built-in entries.
+# Idempotent: re-running replaces the package in place.
+install_quicksetting() {
+    info "Installing Quick Drawer entry..."
+
+    # Ensure the entry is in the user's enabled-quick-settings list. The
+    # shell only renders tiles that are both (a) discoverable on disk
+    # AND (b) listed in enabledQuickSettings. We add it implicitly if
+    # the user already has a list set (so we don't drop their other
+    # customizations), and skip otherwise — the user can enable it via
+    # Settings → Shell → Action Drawer → Quick Settings.
+    if [ -n "${SUDO_USER:-}" ]; then
+        local user_home
+        user_home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+        local pmrc="${user_home:-$HOME}/.config/plasmamobilerc"
+        if [ -f "$pmrc" ] && grep -q '^enabledQuickSettings=' "$pmrc" 2>/dev/null; then
+            if ! grep -q 'pibrick-autorotation' "$pmrc"; then
+                info "  Adding pibrick-autorotation to enabledQuickSettings in $pmrc"
+                # Append to the comma-separated list without disturbing order.
+                sed -i 's|^enabledQuickSettings=\(.*\)$|\1,org.kde.plasma.quicksetting.pibrick-autorotation|' \
+                    "$pmrc"
+            fi
+        fi
+    fi
+
+    if [ ! -d "$SCRIPT_DIR/quicksetting" ]; then
+        warn "  quicksetting package source missing; skipping"
+        return 0
+    fi
+    local qs_id
+    qs_id=$(grep -o '"Id": *"[^"]*"' "$SCRIPT_DIR/quicksetting/package/metadata.json" \
+            | head -1 | sed 's/.*"\(org\.kde\.plasma\.quicksetting\.[^"]*\)".*/\1/')
+    if [ -z "$qs_id" ]; then
+        warn "  could not read quicksetting Id from metadata.json; skipping"
+        return 0
+    fi
+    local qs_dir="/usr/share/plasma/quicksettings/$qs_id"
+    rm -rf "$qs_dir" 2>/dev/null || true
+    cp -r "$SCRIPT_DIR/quicksetting/package" "$qs_dir"
+    # The default QML imports a QML module installed by the C++ plugin
+    # built below. We stage it as main.qml temporarily; after the plugin
+    # build we either keep it (plugin OK) or replace it with main-fallback.qml
+    # (plugin failed — missing the import would otherwise drop the tile).
+    local qml_uri="${qs_id//-/_}"
+    local plugin_so="/usr/lib/qt6/qml/$qml_uri/libpibrick-autorotation-plugin.so"
+
+    info "  Quick Drawer entry installed: $qs_id"
+
+    # Build and install the matching QML extension plugin so the tile
+    # gets a bindable state property. Without it, the tile would always
+    # appear "on" because pure QML in this sandbox has no way to read
+    # the auto-rotation state. See plugin-src/README-style comments in
+    # pibrick-autorotation-util.h for the rationale.
+    if build_quicksetting_plugin "$qs_id"; then
+        info "  Tile state is now live (auto / locked)."
+    else
+        warn "  QML plugin build failed — falling back to a static tile."
+        warn "  The 'Auto-rotate' tile will still appear, but it will not"
+        warn "  reflect the current rotation state. To get live state,"
+        warn "  install Qt6 dev headers and rerun:"
+        warn "    sudo apt install g++ qt6-base-dev qt6-declarative-dev"
+        if [ -f "$qs_dir/contents/ui/main-fallback.qml" ]; then
+            mv "$qs_dir/contents/ui/main.qml" "$qs_dir/contents/ui/main.qml.disabled"
+            mv "$qs_dir/contents/ui/main-fallback.qml" "$qs_dir/contents/ui/main.qml"
+            info "  Replaced main.qml with the no-plugin fallback."
+        else
+            warn "  No main-fallback.qml found; leaving the stateful main.qml"
+            warn "  in place — it will fail to load and the tile will be hidden."
+        fi
+    fi
+
+    info "  Sign out and back in once; the 'Auto-rotate' tile will then appear in the"
+    info "  top-pull Quick Drawer. (The shell scans quicksettings/ at session start;"
+    info "  there is no user-level plasmashell unit on this image to restart instead.)"
+}
+install_quicksetting
 
 # ── Add Plasmoid to Panel Configuration ─────────────────────────────────────────
 add_plasmoid_to_panel() {
