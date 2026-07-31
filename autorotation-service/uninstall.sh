@@ -91,4 +91,12 @@ for home in /home/*; do
     rm -f "$home/.config/systemd/user/pibrick-rotation-ui.service" 2>/dev/null || true
 done
 
+# Remove Quick Drawer entry (Plasma Mobile top-pull panel tile)
+info "Removing Quick Drawer entry..."
+rm -rf /usr/share/plasma/quicksettings/org.kde.plasma.quicksetting.pibrick-autorotation 2>/dev/null || true
+# Also remove any user-level copy
+for home in /home/*; do
+    rm -rf "$home/.local/share/plasma/quicksettings/org.kde.plasma.quicksetting.pibrick-autorotation" 2>/dev/null || true
+done
+
 info "Autorotation service uninstalled."

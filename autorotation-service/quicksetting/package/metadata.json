@@ -1,0 +1,20 @@
+{
+    "KPackageStructure": "KPackage/GenericQML",
+    "KPlugin": {
+        "Authors": [
+            {
+                "Name": "piBrick Project",
+                "Email": ""
+            }
+        ],
+        "Category": "Hardware",
+        "Description": "Toggle auto-rotation for piBrick CM5 handheld",
+        "Description[vi]": "Bật / tắt tự xoay màn hình cho thiết bị cầm tay piBrick CM5",
+        "Icon": "object-rotate-right-symbolic",
+        "Id": "org.kde.plasma.quicksetting.pibrick-autorotation",
+        "License": "GPL-3.0+",
+        "Name": "piBrick Auto-rotate",
+        "Name[vi]": "piBrick Tự Xoay",
+        "Website": "https://github.com/c0ngnh/pibrick-driver-2nd-batch"
+    }
+}

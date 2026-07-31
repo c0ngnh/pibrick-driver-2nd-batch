@@ -94,6 +94,16 @@ case "${1:-}" in
         log "Locked to: $1"
         ;;
 
+    lock-current)
+        # Detect the orientation the screen is currently in and lock to it.
+        # Used by the Plasma Mobile Quick Drawer entry so a single tap leaves
+        # the screen exactly where the user is looking at it.
+        current_ori=$(/usr/lib/pibrick/autorotation-service/pibrick-autorotation.sh \
+            --current-orientation 2>/dev/null || echo "normal")
+        # Recurse with the detected orientation.
+        "$0" "$current_ori"
+        ;;
+
     auto|"")
         # 1. Re-enable KWin auto-rotation (native quick setting → "InTabletMode")
         set_auto_rotation "InTabletMode"
@@ -119,11 +129,11 @@ case "${1:-}" in
         ;;
 
     --help|-h)
-        echo "Usage: autorotation-lock [normal|left|right|inverted|auto|--status]"
+        echo "Usage: autorotation-lock [normal|left|right|inverted|lock-current|auto|--status]"
         ;;
     *)
         echo "autorotation-lock: unknown argument: $1" >&2
-        echo "Valid: normal left right inverted auto --status" >&2
+        echo "Valid: normal left right inverted lock-current auto --status" >&2
         exit 1
         ;;
 esac

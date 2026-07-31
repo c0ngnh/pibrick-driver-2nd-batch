@@ -547,6 +547,60 @@ get_current_rotation() {
 
 # ── Rotation Application ─────────────────────────────────────────────────────────
 
+# Print the orientation the screen is currently in: normal | left | right | inverted
+# Falls back to "normal" if no supported desktop tool is available.
+get_current_orientation() {
+    # Try kscreen-doctor -j (KDE Plasma / Plasma Mobile).
+    if command -v kscreen-doctor >/dev/null 2>&1; then
+        local json
+        json=$(WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" \
+               XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/1000}" \
+               kscreen-doctor -j 2>/dev/null) || true
+        if [ -n "$json" ] && command -v python3 >/dev/null 2>&1; then
+            python3 - "$json" <<'PY' 2>/dev/null && return
+import json, sys
+try:
+    d = json.loads(sys.argv[1])
+except Exception:
+    sys.exit(1)
+outputs = d.get("outputs", [])
+# Prefer the enabled primary output.
+primary = next((o for o in outputs if o.get("primary")), None) or \
+          next((o for o in outputs if o.get("enabled")), None) or \
+          (outputs[0] if outputs else None)
+if not primary:
+    sys.exit(1)
+r = primary.get("rotation", 1)
+# kscreen uses 0=0°, 1=90° (normal on a portrait panel), 2=180°, 3=270°
+name = {0: "normal", 1: "normal", 2: "inverted", 3: "left"}
+# Our orientation names assume a 90°-rotated portrait panel:
+#   normal = 1, right = 1+90° rotated in our terms = ks 0/2, etc.
+# kscreen-doctor's output.<name>.rotation.<orientation> mapping is:
+#   "normal" -> 1, "right" -> 0, "inverted" -> 3, "left" -> 2
+# So invert that mapping here:
+inv = {1: "normal", 0: "right", 3: "inverted", 2: "left"}
+print(inv.get(r, "normal"))
+sys.exit(0)
+PY
+        fi
+    fi
+    # Fallback: wlr-randr (labwc/sway).
+    if command -v wlr-randr >/dev/null 2>&1; then
+        local rot
+        rot=$(WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" \
+              XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/1000}" \
+              wlr-randr 2>/dev/null | awk '/Transform:/ {print $2; exit}')
+        case "$rot" in
+            normal|0)   echo "normal"   ; return ;;
+            90|right)   echo "right"    ; return ;;
+            180|inverted) echo "inverted" ; return ;;
+            270|left)   echo "left"     ; return ;;
+        esac
+    fi
+    # Final fallback: assume portrait.
+    echo "normal"
+}
+
 apply_rotation() {
     local orientation=$1
 
@@ -909,13 +963,21 @@ case "${1:-}" in
     --status)
         show_status
         ;;
+    --current-orientation)
+        # Used by autorotation-lock lock-current to figure out what the
+        # screen is currently displaying so a tap on the Plasma Mobile
+        # Quick Drawer tile can lock the orientation without rotating.
+        get_current_orientation
+        ;;
     --help|-h)
         echo "pibrick-autorotation - Automatic screen rotation service"
         echo ""
         echo "Usage:"
-        echo "  pibrick-autorotation          Start the rotation service"
-        echo "  pibrick-autorotation --status Show service status"
-        echo "  pibrick-autorotation --help   Show this help"
+        echo "  pibrick-autorotation               Start the rotation service"
+        echo "  pibrick-autorotation --apply-rotation <ori>   Apply rotation immediately"
+        echo "  pibrick-autorotation --current-orientation    Print the current orientation"
+        echo "  pibrick-autorotation --status      Show service status"
+        echo "  pibrick-autorotation --help        Show this help"
         ;;
     *)
         main

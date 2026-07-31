@@ -986,6 +986,17 @@ The plasmoid shows the current lock state and provides one-tap buttons for each 
 
 The plasmoid communicates with `pibrick-autorotation.service` via `/usr/bin/autorotation-lock` (installed alongside the service). No D-Bus required — the lock state is stored in `/var/lib/pibrick/autorotation.lock` which both the service and plasmoid read/write.
 
+### Quick Drawer (top-pull panel) entry
+
+Pulling down from the top of the screen on Plasma Mobile opens the native Quick Drawer. After installing the autorotation service you will see a new **"Auto-rotate"** tile alongside the built-in entries (Wi-Fi, Bluetooth, brightness, etc.).
+
+- **Tile lit** → auto-rotation is enabled, the screen follows the accelerometer
+- **Tile dim** → rotation is locked at whatever orientation the screen was in when you tapped it
+
+Tapping the tile flips the state by calling `/usr/bin/autorotation-lock auto` / `normal` under the hood — the same mechanism the panel plasmoid uses, so the two stay in sync. State is sourced from `/var/lib/pibrick/autorotation.lock` and refreshed every second.
+
+If you don't see the tile after install, sign out and back in (or `systemctl --user restart plasma-mobile-shell` if you have it as a separate service) — the shell scans for Quick Settings packages at startup.
+
 ### Bounce-back Fix
 
 Rotating from landscape to portrait (or vice versa) previously caused the screen to briefly flip back once before stabilizing. This has been fixed with three changes:

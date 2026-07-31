@@ -514,6 +514,32 @@ install_system_plasmoid() {
 }
 install_system_plasmoid
 
+# ── Install Quick Drawer entry (Plasma Mobile top-pull panel) ───────────────────
+# Drops a GenericQML KPackage at /usr/share/plasma/quicksettings/ so the tile
+# appears in the Quick Drawer (top-pull panel) alongside the built-in entries.
+# Idempotent: re-running replaces the package in place. The shell hot-reloads
+# it; no Plasma restart needed in most sessions.
+install_quicksetting() {
+    info "Installing Quick Drawer entry..."
+    if [ ! -d "$SCRIPT_DIR/quicksetting" ]; then
+        warn "  quicksetting package source missing; skipping"
+        return 0
+    fi
+    local qs_id
+    qs_id=$(grep -o '"Id": *"[^"]*"' "$SCRIPT_DIR/quicksetting/package/metadata.json" \
+            | head -1 | sed 's/.*"\(org\.kde\.plasma\.quicksetting\.[^"]*\)".*/\1/')
+    if [ -z "$qs_id" ]; then
+        warn "  could not read quicksetting Id from metadata.json; skipping"
+        return 0
+    fi
+    local qs_dir="/usr/share/plasma/quicksettings/$qs_id"
+    rm -rf "$qs_dir" 2>/dev/null || true
+    cp -r "$SCRIPT_DIR/quicksetting/package" "$qs_dir"
+    info "  Quick Drawer entry installed: $qs_id"
+    info "  Pull down from the top of the screen; the 'Auto-rotate' tile will appear."
+}
+install_quicksetting
+
 # ── Add Plasmoid to Panel Configuration ─────────────────────────────────────────
 add_plasmoid_to_panel() {
     local user_home=""
