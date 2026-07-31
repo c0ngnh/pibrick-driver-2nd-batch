@@ -517,10 +517,30 @@ install_system_plasmoid
 # ── Install Quick Drawer entry (Plasma Mobile top-pull panel) ───────────────────
 # Drops a GenericQML KPackage at /usr/share/plasma/quicksettings/ so the tile
 # appears in the Quick Drawer (top-pull panel) alongside the built-in entries.
-# Idempotent: re-running replaces the package in place. The shell hot-reloads
-# it; no Plasma restart needed in most sessions.
+# Idempotent: re-running replaces the package in place.
 install_quicksetting() {
     info "Installing Quick Drawer entry..."
+
+    # Ensure the entry is in the user's enabled-quick-settings list. The
+    # shell only renders tiles that are both (a) discoverable on disk
+    # AND (b) listed in enabledQuickSettings. We add it implicitly if
+    # the user already has a list set (so we don't drop their other
+    # customizations), and skip otherwise — the user can enable it via
+    # Settings → Shell → Action Drawer → Quick Settings.
+    if [ -n "${SUDO_USER:-}" ]; then
+        local user_home
+        user_home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+        local pmrc="${user_home:-$HOME}/.config/plasmamobilerc"
+        if [ -f "$pmrc" ] && grep -q '^enabledQuickSettings=' "$pmrc" 2>/dev/null; then
+            if ! grep -q 'pibrick-autorotation' "$pmrc"; then
+                info "  Adding pibrick-autorotation to enabledQuickSettings in $pmrc"
+                # Append to the comma-separated list without disturbing order.
+                sed -i 's|^enabledQuickSettings=\(.*\)$|\1,org.kde.plasma.quicksetting.pibrick-autorotation|' \
+                    "$pmrc"
+            fi
+        fi
+    fi
+
     if [ ! -d "$SCRIPT_DIR/quicksetting" ]; then
         warn "  quicksetting package source missing; skipping"
         return 0
@@ -536,7 +556,9 @@ install_quicksetting() {
     rm -rf "$qs_dir" 2>/dev/null || true
     cp -r "$SCRIPT_DIR/quicksetting/package" "$qs_dir"
     info "  Quick Drawer entry installed: $qs_id"
-    info "  Pull down from the top of the screen; the 'Auto-rotate' tile will appear."
+    info "  Sign out and back in once; the 'Auto-rotate' tile will then appear in the"
+    info "  top-pull Quick Drawer. (The shell scans quicksettings/ at session start;"
+    info "  there is no user-level plasmashell unit on this image to restart instead.)"
 }
 install_quicksetting
 

@@ -1050,9 +1050,17 @@ Pulling down from the top of the screen on Plasma Mobile opens the native Quick 
 - **Tile lit** → auto-rotation is enabled, the screen follows the accelerometer
 - **Tile dim** → rotation is locked at whatever orientation the screen was in when you tapped it
 
-Tapping the tile flips the state by calling `/usr/bin/autorotation-lock auto` / `normal` under the hood — the same mechanism the panel plasmoid uses, so the two stay in sync. State is sourced from `/var/lib/pibrick/autorotation.lock` and refreshed every second.
+Tapping the tile flips the state by calling `/usr/bin/autorotation-lock auto` / `lock-current` under the hood — the same mechanism the panel plasmoid uses, so the two stay in sync. State is sourced from `/var/lib/pibrick/autorotation.lock` and refreshed every second.
 
-If you don't see the tile after install, sign out and back in (or `systemctl --user restart plasma-mobile-shell` if you have it as a separate service) — the shell scans for Quick Settings packages at startup.
+#### Activating the tile
+
+The shell scans `/usr/share/plasma/quicksettings/` and reads `enabledQuickSettings` from `~/.config/plasmamobilerc` **at session start**. The installer adds the entry to that list automatically, but:
+
+- **Sign out and back in once** after the first install. Plasmashell on this image is launched by SDDM as a system service rather than a user systemd unit, so `systemctl --user restart plasma-mobile-shell` does not exist.
+- If the tile is still missing after sign-out/in, check `~/.config/plasmamobilerc` — the entry `org.kde.plasma.quicksetting.pibrick-autorotation` must appear in `enabledQuickSettings`.
+- If entries in the KCM (`Settings → Shell → Action Drawer → Quick Settings`) keep un-checking themselves, the most common cause is a stale `plasma-discover` cache: `rm -rf ~/.cache/plasma-discover/ && sign out → in`.
+
+Do **not** run `loginctl terminate-user "$USER"` to "restart" the shell — it kills the entire user session (KWin + plasmashell + SSH) and leaves you with a black screen at SDDM. A clean sign-out from the session menu is the same effect, but recoverable.
 
 ### Bounce-back Fix
 
