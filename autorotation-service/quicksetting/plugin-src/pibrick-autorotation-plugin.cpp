@@ -27,7 +27,7 @@ public:
     void registerTypes(const char *uri) override
     {
         Q_ASSERT(QLatin1String(uri)
-                 == QLatin1String("org.kde.plasma.quicksetting.pibrick-autorotation"));
+                 == QLatin1String("org.kde.plasma.quicksetting.pibrickautorotation"));
         qmlRegisterSingletonType<PibrickAutorotationUtil>(
             uri, 1, 0, "PibrickAutorotationUtil",
             [](QQmlEngine *, QJSEngine *) -> QObject * {

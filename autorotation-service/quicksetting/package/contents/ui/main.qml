@@ -28,7 +28,7 @@ import QtQuick
 
 import org.kde.plasma.private.mobileshell as MobileShell
 import org.kde.plasma.private.mobileshell.quicksettingsplugin as QS
-import org.kde.plasma.quicksetting.pibrick-autorotation 1.0
+import org.kde.plasma.quicksetting.pibrickautorotation 1.0
 
 QS.QuickSetting {
     id: root

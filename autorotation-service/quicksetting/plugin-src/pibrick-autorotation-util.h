@@ -56,7 +56,7 @@ private:
     bool readAutoRotationFromConfig() const;
 
     QString m_helperPath { QStringLiteral("/usr/bin/autorotation-lock") };
-    QString m_kwinConfigPath;          // resolved lazily on first read
+    QString m_kwinConfigPath;          // resolved in ctor from $HOME
     mutable bool m_cachedEnabled { true };
     mutable bool m_cacheValid { false };
 };

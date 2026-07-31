@@ -588,7 +588,13 @@ install_quicksetting
 build_quicksetting_plugin() {
     local qs_id="$1"
     local src_dir="$SCRIPT_DIR/quicksetting/plugin-src"
-    local qml_install_root="/usr/lib/qt6/qml/$qs_id"
+
+    # QML module URIs may not contain hyphens (Qt's QML grammar restricts
+    # identifiers to [A-Za-z0-9_.]). The KPackage Id above may have a hyphen
+    # because it is just a directory name; the QML URI we register and import
+    # must replace it with an underscore.
+    local qml_uri="${qs_id//-/_}"
+    local qml_install_root="/usr/lib/qt6/qml/$qml_uri"
     local out_so="$qml_install_root/libpibrick-autorotation-plugin.so"
 
     if [ ! -d "$src_dir" ]; then
@@ -683,7 +689,7 @@ build_quicksetting_plugin() {
     local build_dir
     build_dir=$(mktemp -d /tmp/pibrick-qs-plugin-XXXXXX)
     info "  Building QML plugin in $build_dir (this takes ~5s the first time)..."
-    info "  cxx=$cxx  moc=$moc"
+    info "  qml_uri=$qml_uri  cxx=$cxx  moc=$moc"
 
     # Run moc on both headers; outputs are moc_<hdr>.cpp files. We include
     # those moc_*.cpp outputs at the bottom of the matching .cpp file.
@@ -702,12 +708,17 @@ build_quicksetting_plugin() {
 
     # Compile & link. -fPIC + -shared. We deliberately do not link against
     # Qt6Widgets / Qt6Quick / Qt6Svg — only Core + Qml are needed.
+    # -I"$build_dir" lets the .cpp files `#include "moc_*.cpp"` to pull in
+    # the MOC-generated code, since moc output lives in the build dir rather
+    # than the source dir. We deliberately do NOT pass moc_*.cpp as a
+    # separate compile input — that would cause ODR violations with the
+    # `#include "moc_*.cpp"` at the bottom of each .cpp file.
     if ! "$cxx" -fPIC -shared -std=c++17 \
         -fvisibility=hidden \
+        -I"$build_dir" \
         $qt_cflags \
         "$src_dir/pibrick-autorotation-plugin.cpp" \
         "$src_dir/pibrick-autorotation-util.cpp" \
-        "$build_dir/moc_pibrick-autorotation-util.cpp" \
         -o "$out_so" \
         $qt_libs \
         2>"$build_dir/build.log"; then

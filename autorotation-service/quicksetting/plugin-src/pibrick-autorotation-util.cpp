@@ -10,6 +10,7 @@
 #include <QProcess>
 #include <QStandardPaths>
 #include <QTimer>
+#include <QtGlobal>
 
 namespace {
 
@@ -69,6 +70,15 @@ constexpr int kResyncDelayMs = 350;
 PibrickAutorotationUtil::PibrickAutorotationUtil(QObject *parent)
     : QObject(parent)
 {
+    // Resolve the kwin config path eagerly from $HOME so the const
+    // autoRotationEnabled() / readAutoRotationFromConfig() methods can
+    // remain const. If HOME is unset (rare; e.g. system services), fall
+    // back to /root — we'll still gracefully report "enabled" when the
+    // file isn't present.
+    const QString home = qEnvironmentVariable("HOME");
+    m_kwinConfigPath = (home.isEmpty() ? QStringLiteral("/root")
+                                       : home)
+                       + QStringLiteral("/.config/kwinoutputconfig.json");
 }
 
 bool PibrickAutorotationUtil::autoRotationEnabled() const
@@ -138,16 +148,9 @@ void PibrickAutorotationUtil::refreshFromConfig()
 
 bool PibrickAutorotationUtil::readAutoRotationFromConfig() const
 {
-    if (m_kwinConfigPath.isEmpty()) {
-        // Resolve lazily so that HOME-changing tests / cross-user setups
-        // get a fresh path on first use.
-        const QString home = qEnvironmentVariable("HOME");
-        if (home.isEmpty()) {
-            return true; // best-effort: assume enabled when we cannot tell
-        }
-        m_kwinConfigPath = home + QStringLiteral("/.config/kwinoutputconfig.json");
-    }
-
+    // m_kwinConfigPath is resolved in the constructor (non-const); this
+    // method stays const so we can call it from autoRotationEnabled()
+    // which is const.
     const QString value = readAutoRotationField(m_kwinConfigPath);
     if (value.isEmpty()) {
         // Missing or unreadable: be conservative and report "enabled" so
