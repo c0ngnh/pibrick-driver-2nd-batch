@@ -609,11 +609,39 @@ build_quicksetting_plugin() {
         qt_libs=$(pkg-config --libs Qt6Core Qt6Qml 2>/dev/null || true)
     fi
     if [ -z "$qt_cflags" ] || [ -z "$qt_libs" ]; then
-        # Fallback: assume standard Debian layout.
-        qt_cflags="-I/usr/include/x86_64-linux-gnu/qt6 -I/usr/include/x86_64-linux-gnu/qt6/QtCore -I/usr/include/x86_64-linux-gnu/qt6/QtQml"
-        qt_libs="-lQt6Core -lQt6Qml"
-        warn "  pkg-config for Qt6 not available; falling back to hard-coded paths."
-        warn "  If the build fails, install qt6-base-dev and rerun."
+        # Fallback: resolve Qt6 headers and libraries via the multiarch
+        # include directory. We need this because Qt6 doesn't ship
+        # pkg-config .pc files on Debian (only on Fedora/Arch etc.), and
+        # the multiarch path varies by architecture (aarch64-linux-gnu,
+        # x86_64-linux-gnu, armhf-linux-gnueabihf, ...). moc and g++ both
+        # need this path or they fail to find <QObject>.
+        local multiarch=""
+        if command -v gcc >/dev/null 2>&1; then
+            multiarch=$(gcc -print-multiarch 2>/dev/null || true)
+        fi
+        if [ -z "$multiarch" ] && command -v dpkg >/dev/null 2>&1; then
+            local dpkg_arch
+            dpkg_arch=$(dpkg --print-architecture 2>/dev/null || true)
+            [ -n "$dpkg_arch" ] && multiarch="${dpkg_arch}-linux-gnu"
+        fi
+        # Last resort: scan /usr/include/*/qt6 (covers Arch, exotic arches).
+        if [ -z "$multiarch" ] || [ ! -d "/usr/include/${multiarch}/qt6" ]; then
+            local found
+            found=$(find /usr/include -maxdepth 2 -type d -name qt6 2>/dev/null | head -1)
+            if [ -n "$found" ]; then
+                multiarch=$(basename "$(dirname "$found")")
+            fi
+        fi
+        if [ -n "$multiarch" ] && [ -d "/usr/include/${multiarch}/qt6" ]; then
+            qt_cflags="-I/usr/include/${multiarch}/qt6 -I/usr/include/${multiarch}/qt6/QtCore -I/usr/include/${multiarch}/qt6/QtQml"
+            qt_libs="-lQt6Core -lQt6Qml"
+            info "  pkg-config not available; using multiarch path /usr/include/${multiarch}/qt6"
+        else
+            warn "  pkg-config for Qt6 not available and multiarch Qt6 headers not found."
+            warn "  Tried systems: gcc -print-multiarch, dpkg --print-architecture, and /usr/include/*/qt6"
+            warn "  Install with: sudo apt install qt6-base-dev qt6-declarative-dev"
+            return 1
+        fi
     fi
 
     # ── 3. Skip if up-to-date (idempotent) ──────────────────────────────────
@@ -637,15 +665,28 @@ build_quicksetting_plugin() {
 
     # Run moc on both headers; outputs are moc_<hdr>.cpp files. We include
     # those moc_*.cpp outputs at the bottom of the matching .cpp file.
-    "$moc" -o "$build_dir/moc_pibrick-autorotation-util.cpp" \
-        "$src_dir/pibrick-autorotation-util.h" >/dev/null 2>&1 || {
-        warn "  moc failed for pibrick-autorotation-util.h"
+    # We surface moc's stderr because silent moc failures are a common
+    # mistake when the moc binary is the wrong Qt version, or the input
+    # isn't a recognized MOC input.
+    #
+    # moc also needs the include paths so it can resolve <QObject> etc.
+    # inside the headers it scans. Without these flags moc emits
+    # "fatal error: 'QObject': No such file or directory" and exits 1.
+    "$moc" $qt_cflags -o "$build_dir/moc_pibrick-autorotation-util.cpp" \
+        "$src_dir/pibrick-autorotation-util.h" \
+        >"$build_dir/moc-util.log" 2>&1 || {
+        warn "  moc failed for pibrick-autorotation-util.h. moc stderr:"
+        sed 's/^/      /' "$build_dir/moc-util.log" >&2
+        warn "  (moc=$moc, moc --version: $($moc --version 2>&1 | head -1))"
         rm -rf "$build_dir"
         return 1
     }
-    "$moc" -o "$build_dir/pibrick-autorotation-plugin.moc" \
-        "$src_dir/pibrick-autorotation-plugin.cpp" >/dev/null 2>&1 || {
-        warn "  moc failed for pibrick-autorotation-plugin.cpp"
+    "$moc" $qt_cflags -o "$build_dir/pibrick-autorotation-plugin.moc" \
+        "$src_dir/pibrick-autorotation-plugin.cpp" \
+        >"$build_dir/moc-plugin.log" 2>&1 || {
+        warn "  moc failed for pibrick-autorotation-plugin.cpp. moc stderr:"
+        sed 's/^/      /' "$build_dir/moc-plugin.log" >&2
+        warn "  (moc=$moc, moc --version: $($moc --version 2>&1 | head -1))"
         rm -rf "$build_dir"
         return 1
     }
