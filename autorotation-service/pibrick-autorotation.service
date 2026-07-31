@@ -27,10 +27,10 @@ Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
 # the Python script that reads ~/.config/kwinoutputconfig.json for rotation verification.
 ReadWritePaths=/var/lib/pibrick
 
-DevicePolicy=auto
-DeviceAllow=/sys/bus/iio/devices/iio:device* r
-DeviceAllow=/dev/i2c-* rw
-SupplementaryGroups=video
+# Delegate a proper cgroup subtree so the service gets its own device controller.
+Delegate=devices
+DevicePolicy=closed
+DeviceAllow=/dev/i2c-1 rw
 
 [Install]
 WantedBy=multi-user.target

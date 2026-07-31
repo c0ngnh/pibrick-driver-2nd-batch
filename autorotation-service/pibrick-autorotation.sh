@@ -82,14 +82,10 @@ i2c_read() {
         return 1
     fi
 
-    # Use i2c-tools with full path
-    if [ -x "$I2CGET" ]; then
-        value=$("$I2CGET" -y "$I2C_BUS" "$I2C_ADDR" "$reg" 2>/dev/null || echo "0x00")
-        # Convert hex string to decimal number
-        value=$((value))
-        echo "$value"
-    elif command -v python3 >/dev/null 2>&1; then
-        # Fallback: use python3 with smbus2
+    # Prefer Python/smbus2 (works in more constrained environments than i2c-tools).
+    # i2c-tools may fail with "Operation not permitted" in systemd/cgroup-isolated
+    # contexts even when the user is in the i2c group or has CAP_SYS_RAWIO.
+    if command -v python3 >/dev/null 2>&1 && python3 -c "import smbus2" 2>/dev/null; then
         value=$(python3 -c "
 import smbus2
 try:
@@ -99,6 +95,12 @@ try:
 except:
     print(0)
 " 2>/dev/null || echo "0")
+        echo "$value"
+    elif [ -x "$I2CGET" ]; then
+        # Fallback: use i2c-tools with full path
+        value=$("$I2CGET" -y "$I2C_BUS" "$I2C_ADDR" "$reg" 2>/dev/null || echo "0x00")
+        # Convert hex string to decimal number
+        value=$((value))
         echo "$value"
     else
         return 1
@@ -624,7 +626,6 @@ main() {
     if [ "$USE_I2C_FALLBACK" = "1" ]; then
         log "Attempting userspace I2C fallback..."
         log "  I2C_BUS=$I2C_BUS, I2C_ADDR=$I2C_ADDR"
-        log "  I2CGET=$I2CGET"
 
         # Check if I2C device is available
         if [ ! -e "/dev/i2c-$I2C_BUS" ]; then
@@ -634,18 +635,34 @@ main() {
         fi
         log "  /dev/i2c-$I2C_BUS exists"
 
-        # Check if i2cget exists and is executable
-        local cmd_path
-        cmd_path=$(echo "$I2CGET" | awk '{print $1}')  # Get first word (sudo)
-        if [ ! -x "$cmd_path" ]; then
-            error "i2cget not found at $I2CGET"
+        # Prefer Python/smbus2 (works in more constrained environments).
+        # Check availability first.
+        local i2c_backend="i2c-tools"
+        if command -v python3 >/dev/null 2>&1 && python3 -c "import smbus2" 2>/dev/null; then
+            i2c_backend="python-smbus2"
+            log "  Using Python/smbus2 for I2C access"
+        elif [ -x "$I2CGET" ]; then
+            log "  i2cget found: $I2CGET"
+        else
+            error "Neither Python smbus2 nor i2c-tools found"
             exit 1
         fi
-        log "  i2cget found at $I2CGET"
 
         # Test I2C access
         local whoami_test
-        whoami_test=$("$I2CGET" -y "$I2C_BUS" "$I2C_ADDR" 0x0D 2>&1) || whoami_test="ERROR"
+        if [ "$i2c_backend" = "python-smbus2" ]; then
+            whoami_test=$(python3 -c "
+import smbus2
+try:
+    bus = smbus2.SMBus($I2C_BUS)
+    print(hex(bus.read_byte_data($I2C_ADDR, 0x0D)))
+    bus.close()
+except Exception as e:
+    print('ERROR:' + str(e))
+" 2>/dev/null || echo "ERROR")
+        else
+            whoami_test=$("$I2CGET" -y "$I2C_BUS" "$I2C_ADDR" 0x0D 2>&1) || whoami_test="ERROR"
+        fi
         log "  WHO_AM_I test: $whoami_test"
 
         # Try to detect MMA8451Q
