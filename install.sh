@@ -1169,9 +1169,22 @@ fix_upower() {
 	stop_upower
 
 	info "Patching UPower (rebuild from source)..."
-	local UPVER
-	# Capture upower version; tolerate empty/upstream-format changes (pipefail-safe).
+	local UPVER=""
+	# Try to read the daemon version in order of preference:
+	#   1. upower --version     (CLI; works when package is installed)
+	#   2. upowerd -v           (the daemon itself, may print version)
+	#   3. dpkg-query           (package version as a stable fallback)
+	# The CLI under sudo can fail for a few reasons (PATH, secure_path,
+	# masked service in some setups), so chain fallbacks. With pipefail,
+	# append || true on each command substitution so an empty result is
+	# never treated as a script-fatal error.
 	UPVER=$(upower --version 2>/dev/null | grep '^UPower daemon' | awk '{print $NF}' | tr -d '\n' || true)
+	if [ -z "$UPVER" ] && [ -x "$UPowerD" ]; then
+		UPVER=$("$UPowerD" --version 2>/dev/null | head -1 | tr -d '\n' || true)
+	fi
+	if [ -z "$UPVER" ]; then
+		UPVER=$(dpkg-query -W -f='${Version}' upower 2>/dev/null | tr -d '\n' || true)
+	fi
 	[ -z "$UPVER" ] && UPVER="unknown"
 	info "UPower daemon version: $UPVER"
 
@@ -1183,22 +1196,37 @@ fix_upower() {
 
 	local UP_SRC=/tmp/upower-pibrick-src
 	if [ ! -d "$UP_SRC/.git" ]; then
-		info "Cloning UPower source (tag v$UPVER) — this may take a few minutes..."
 		rm -rf "$UP_SRC"
-		# Capture stderr (progress) to filter out noise; exit code is git's.
-		{ git clone --depth=1 --branch="v$UPVER" \
-			https://gitlab.freedesktop.org/upower/upower.git "$UP_SRC" \
-			2>&1 | grep -vE '^(Cloning|Receiving|Resolving|Updating|Checking|Enumerating|warning:|fatal:|error:)'; } \
-		&& git_ok=1 || git_ok=0
-		if [ "$git_ok" -eq 0 ]; then
-			info "Tag v$UPVER not found — trying main branch..."
-			{ git clone --depth=1 \
-				https://gitlab.freedesktop.org/upower/upower.git "$UP_SRC" \
-				2>&1 | grep -vE '^(Cloning|Receiving|Resolving|Updating|Checking|Enumerating|warning:|fatal:|error:)'; } \
-			&& git_ok=1 || git_ok=0
+		# If we have a version, try the matching tag first. 'unknown' or an
+		# empty UPVER skips directly to main. The previous behavior of always
+		# trying "v<garbage>" first wasted a round-trip on every unknown case.
+		local git_ok=0
+		if [ -n "$UPVER" ] && [ "$UPVER" != "unknown" ]; then
+			info "Cloning UPower source (tag v$UPVER) — this may take a few minutes..."
+			git clone --depth=1 --branch="v$UPVER" \
+				https://gitlab.freedesktop.org/upower/upower.git "$UP_SRC" 2>&1 \
+				| grep -vE '^(Cloning|Receiving|Resolving|Updating|Checking|Enumerating|warning:)' \
+				|| true
+			if [ -d "$UP_SRC/.git" ]; then
+				git_ok=1
+			else
+				info "Tag v$UPVER not found in upstream."
+			fi
 		fi
 		if [ "$git_ok" -eq 0 ]; then
-			error "Failed to clone UPower source."
+			info "Cloning UPower source (main branch) — this may take a few minutes..."
+			# Capture full stderr so we can show a real error if it fails.
+			local git_err
+			git_err=$(git clone --depth=1 \
+				https://gitlab.freedesktop.org/upower/upower.git "$UP_SRC" 2>&1 \
+				| grep -vE '^(Cloning|Receiving|Resolving|Updating|Checking|Enumerating)' \
+				|| true)
+			echo "$git_err" | grep -E '(error|fatal|Could not|unable)' | head -3 | sed 's/^/    /'
+			[ -d "$UP_SRC/.git" ] && git_ok=1
+		fi
+		if [ "$git_ok" -eq 0 ]; then
+			error "Failed to clone UPower source from gitlab.freedesktop.org."
+			error "Check network:  curl -I https://gitlab.freedesktop.org/upower/upower.git"
 			return 1
 		fi
 		info "UPower source ready."
