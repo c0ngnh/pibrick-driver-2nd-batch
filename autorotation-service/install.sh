@@ -576,25 +576,101 @@ build_quicksetting_plugin() {
     fi
 
     local moc=""
-    for candidate in moc-qt6 moc; do
-        if command -v "$candidate" >/dev/null 2>&1; then
+    # On Debian, moc lives at /usr/lib/qt6/libexec/moc but is NOT on PATH
+    # (no /usr/bin/moc-qt6 symlink). Check PATH first, then fall back to
+    # the known Debian layout, then look up the path via dpkg.
+    for candidate in moc-qt6 moc "/usr/lib/qt6/libexec/moc"; do
+        if [ -x "$candidate" ]; then
             moc="$candidate"
             break
         fi
+        if command -v "$candidate" >/dev/null 2>&1; then
+            moc="$(command -v "$candidate")"
+            break
+        fi
     done
+    if [ -z "$moc" ] && command -v dpkg >/dev/null 2>&1; then
+        local dpkg_moc
+        dpkg_moc=$(dpkg -L qt6-base-dev-tools 2>/dev/null | grep -E '/moc$' | head -1 || true)
+        if [ -x "$dpkg_moc" ]; then
+            moc="$dpkg_moc"
+        fi
+    fi
     if [ -z "$moc" ]; then
-        warn "  Qt6 moc not found. Attempting apt-get install qt6-base-dev..."
+        warn "  Qt6 moc not found. Attempting apt-get install qt6-base-dev qt6-declarative-dev..."
         if command -v apt-get >/dev/null 2>&1; then
             DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
                 qt6-base-dev \
+                qt6-declarative-dev \
                 >/dev/null 2>&1 || {
-                warn "  Could not install qt6-base-dev. Aborting plugin build."
+                warn "  Could not install qt6-base-dev / qt6-declarative-dev. Aborting plugin build."
                 return 1
             }
-            moc=moc-qt6
+            # After install, re-scan: Debian package may install moc-qt6
+            # and/or drop moc into /usr/lib/qt6/libexec/.
+            for candidate in moc-qt6 moc "/usr/lib/qt6/libexec/moc"; do
+                if [ -x "$candidate" ]; then
+                    moc="$candidate"
+                    break
+                fi
+                if command -v "$candidate" >/dev/null 2>&1; then
+                    moc="$(command -v "$candidate")"
+                    break
+                fi
+            done
         else
             warn "  No Qt6 moc available. Aborting plugin build."
             return 1
+        fi
+    fi
+    if [ -z "$moc" ]; then
+        warn "  Qt6 moc still not found after install. Aborting plugin build."
+        return 1
+    fi
+
+    # Resolve the multiarch path once, up front. We need it for both the
+    # QtQml-headers check below and the include flags later.
+    local multiarch=""
+    if command -v gcc >/dev/null 2>&1; then
+        multiarch=$(gcc -print-multiarch 2>/dev/null || true)
+    fi
+    if [ -z "$multiarch" ] && command -v dpkg >/dev/null 2>&1; then
+        local dpkg_arch
+        dpkg_arch=$(dpkg --print-architecture 2>/dev/null || true)
+        [ -n "$dpkg_arch" ] && multiarch="${dpkg_arch}-linux-gnu"
+    fi
+    # Last resort: scan /usr/include/*/qt6 — covers Arch, NixOS, layouts we
+    # don't know about in advance.
+    local qt6_root=""
+    if [ -n "$multiarch" ] && [ -d "/usr/include/${multiarch}/qt6" ]; then
+        qt6_root="/usr/include/${multiarch}/qt6"
+    else
+        local found
+        found=$(find /usr/include -maxdepth 2 -type d -name qt6 2>/dev/null | head -1)
+        if [ -n "$found" ]; then
+            qt6_root="$found"
+            multiarch=$(basename "$(dirname "$found")")
+        fi
+    fi
+
+    # Also make sure the QtQml headers are present. qt6-base-dev alone is
+    # not sufficient — we need qt6-declarative-dev for QQmlEngine /
+    # QQmlExtensionPlugin.
+    if [ -z "$qt6_root" ] || [ ! -d "${qt6_root}/QtQml" ]; then
+        warn "  QtQml headers missing. Attempting apt-get install qt6-declarative-dev..."
+        if command -v apt-get >/dev/null 2>&1; then
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+                qt6-declarative-dev \
+                >/dev/null 2>&1 || {
+                warn "  Could not install qt6-declarative-dev. Aborting plugin build."
+                return 1
+            }
+            # Re-resolve qt6_root after the install.
+            if [ -n "$multiarch" ] && [ -d "/usr/include/${multiarch}/qt6" ]; then
+                qt6_root="/usr/include/${multiarch}/qt6"
+            elif [ -d /usr/include/qt6 ]; then
+                qt6_root=/usr/include/qt6
+            fi
         fi
     fi
 
@@ -609,39 +685,17 @@ build_quicksetting_plugin() {
         qt_libs=$(pkg-config --libs Qt6Core Qt6Qml 2>/dev/null || true)
     fi
     if [ -z "$qt_cflags" ] || [ -z "$qt_libs" ]; then
-        # Fallback: resolve Qt6 headers and libraries via the multiarch
-        # include directory. We need this because Qt6 doesn't ship
-        # pkg-config .pc files on Debian (only on Fedora/Arch etc.), and
-        # the multiarch path varies by architecture (aarch64-linux-gnu,
-        # x86_64-linux-gnu, armhf-linux-gnueabihf, ...). moc and g++ both
-        # need this path or they fail to find <QObject>.
-        local multiarch=""
-        if command -v gcc >/dev/null 2>&1; then
-            multiarch=$(gcc -print-multiarch 2>/dev/null || true)
-        fi
-        if [ -z "$multiarch" ] && command -v dpkg >/dev/null 2>&1; then
-            local dpkg_arch
-            dpkg_arch=$(dpkg --print-architecture 2>/dev/null || true)
-            [ -n "$dpkg_arch" ] && multiarch="${dpkg_arch}-linux-gnu"
-        fi
-        # Last resort: scan /usr/include/*/qt6 (covers Arch, exotic arches).
-        if [ -z "$multiarch" ] || [ ! -d "/usr/include/${multiarch}/qt6" ]; then
-            local found
-            found=$(find /usr/include -maxdepth 2 -type d -name qt6 2>/dev/null | head -1)
-            if [ -n "$found" ]; then
-                multiarch=$(basename "$(dirname "$found")")
-            fi
-        fi
-        if [ -n "$multiarch" ] && [ -d "/usr/include/${multiarch}/qt6" ]; then
-            qt_cflags="-I/usr/include/${multiarch}/qt6 -I/usr/include/${multiarch}/qt6/QtCore -I/usr/include/${multiarch}/qt6/QtQml"
-            qt_libs="-lQt6Core -lQt6Qml"
-            info "  pkg-config not available; using multiarch path /usr/include/${multiarch}/qt6"
-        else
+        # Fallback: use the qt6_root we resolved earlier. Qt6 doesn't ship
+        # pkg-config .pc files on Debian (only on Fedora/Arch etc.), so we
+        # fall back to the multiarch include path we already located.
+        if [ -z "$qt6_root" ] || [ ! -d "$qt6_root" ]; then
             warn "  pkg-config for Qt6 not available and multiarch Qt6 headers not found."
-            warn "  Tried systems: gcc -print-multiarch, dpkg --print-architecture, and /usr/include/*/qt6"
             warn "  Install with: sudo apt install qt6-base-dev qt6-declarative-dev"
             return 1
         fi
+        qt_cflags="-I${qt6_root} -I${qt6_root}/QtCore -I${qt6_root}/QtQml"
+        qt_libs="-lQt6Core -lQt6Qml"
+        info "  pkg-config not available; using multiarch path ${qt6_root}"
     fi
 
     # ── 3. Skip if up-to-date (idempotent) ──────────────────────────────────
