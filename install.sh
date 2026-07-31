@@ -1341,10 +1341,34 @@ PYEOF
 }
 
 stop_upower() {
-	sudo -n systemctl stop upower 2>/dev/null || \
-		sudo -n systemctl --user stop upower 2>/dev/null || \
-		killall -9 upowerd 2>/dev/null || true
-	sleep 2
+	# Stop all upower-related services
+	systemctl stop upower 2>/dev/null || true
+	systemctl --user stop upower 2>/dev/null || true
+	
+	# Kill any running daemons forcefully
+	pkill -9 upowerd 2>/dev/null || true
+	
+	# Wait for daemon to fully release the file
+	sleep 3
+	
+	# Verify the daemon stopped
+	if pgrep -x upowerd >/dev/null 2>&1; then
+		warn "UPower daemon still running, retrying..."
+		pkill -9 upowerd 2>/dev/null || true
+		sleep 2
+	fi
+	
+	# If binary is still busy (ETXTBSY), the daemon didn't release it
+	# Try to ensure it's completely gone
+	if [ -f /usr/libexec/upowerd ]; then
+		local pid
+		pid=$(pgrep -x upowerd 2>/dev/null || true)
+		if [ -n "$pid" ]; then
+			warn "UPower daemon (PID $pid) still holding binary"
+			kill -9 "$pid" 2>/dev/null || true
+			sleep 2
+		fi
+	fi
 }
 
 restart_upower() {
@@ -1618,11 +1642,49 @@ install_kde_mobile_desktop() {
 Session=$plasma_mobile_session.desktop
 
 [Autologin]
-# piBrick: do not auto-login; let SDDM greeter prompt for user selection
+# piBrick: disable auto-login; let SDDM greeter prompt for user selection
 User=
 Session=
 SDDMEOF
 		success "SDDM configured: Plasma Mobile ($plasma_mobile_session) is the default session."
+		
+		# ── Disable OS-level auto-login ────────────────────────────────────────────
+		# Raspbian/piOS images may have auto-login configured in lightdm.conf
+		# or via raspi-config. Remove any such settings.
+		info "Disabling OS-level auto-login settings..."
+		
+		# Remove lightdm autologin if it exists (Raspbian default)
+		if [ -f /etc/lightdm/lightdm.conf ]; then
+			if grep -q "^autologin-user=" /etc/lightdm/lightdm.conf 2>/dev/null; then
+				sed -i 's/^autologin-user=.*/autologin-user=/' /etc/lightdm/lightdm.conf
+				info "Disabled autologin in lightdm.conf"
+			fi
+		fi
+		
+		# Disable raspi-config autologin if it was enabled
+		if command -v raspi-config >/dev/null 2>&1; then
+			# raspi-config stores boot behavior in /boot/cmdline.txt or via systemctl
+			# Check if auto-login is enabled via getty
+			if systemctl is-enabled getty@tty1.service 2>/dev/null | grep -q "enabled"; then
+				# Check for autologin getty
+				if systemctl is-enabled autologin@tty1.service 2>/dev/null | grep -q "enabled"; then
+					systemctl disable autologin@tty1.service 2>/dev/null || true
+					systemctl enable getty@tty1.service 2>/dev/null || true
+					info "Disabled console autologin (using standard getty)"
+				fi
+			fi
+		fi
+		
+		# Ensure no other sddm configs have autologin
+		for conf in /etc/sddm.conf /etc/sddm.conf.d/*.conf; do
+			[ -f "$conf" ] || continue
+			[ "$conf" = "$sddm_conf" ] && continue
+			if grep -qi "^autologin-user=" "$conf" 2>/dev/null; then
+				sed -i 's/^autologin-user=.*/autologin-user=/i' "$conf"
+				sed -i 's/^autologin-session=.*/autologin-session=/i' "$conf"
+				info "Cleared autologin in $conf"
+			fi
+		done
 	else
 		warn "Could not detect Plasma Mobile session files."
 		warn "You may need to manually select the Plasma Mobile session in SDDM."
