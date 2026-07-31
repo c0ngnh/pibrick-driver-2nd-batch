@@ -338,9 +338,17 @@ is_x11() {
 }
 
 get_active_user() {
-    # Get the user of the active session
-    loginctl show-session "$(loginctl | grep -E '^\s*c[0-9]+' | head -1 | awk '{print $1}' 2>/dev/null || echo 'c1')" -p User --value 2>/dev/null || \
-    who | head -1 | awk '{print $1}'
+    # Get the user of the active graphical session.
+    # loginctl list-sessions columns: SESSION UID USER SEAT PID TYPE TTY REMOTE ACTIVE
+    # Skip the 'manager' session (no user) and any root session; pick the first user session.
+    local session
+    session=$(loginctl list-sessions --no-legend 2>/dev/null | \
+        awk '$3 != "" && $3 != "root" && $6 != "manager" {print $1; exit}')
+    if [ -n "$session" ]; then
+        loginctl show-session "$session" -p User --value 2>/dev/null && return 0
+    fi
+    # Fallback: first non-root user from who(1)
+    who 2>/dev/null | awk '$1 != "root" {print $1; exit}'
 }
 
 run_as_user() {

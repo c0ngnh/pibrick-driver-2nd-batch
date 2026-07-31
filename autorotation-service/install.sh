@@ -394,7 +394,9 @@ install_user_services() {
     cat > "$user_systemd_dir/pibrick-rotation-ui.service" << 'EOF'
 [Unit]
 Description=piBrick Rotation Lock UI daemon
-After=network.target
+PartOf=graphical-session.target
+After=graphical-session.target
+BindsTo=graphical-session.target
 
 [Service]
 Type=simple
@@ -404,7 +406,7 @@ RestartSec=2
 Environment=DISPLAY=:0
 
 [Install]
-WantedBy=default.target
+WantedBy=graphical-session.target
 EOF
     
     chmod 644 "$user_systemd_dir/pibrick-rotation-ui.service"

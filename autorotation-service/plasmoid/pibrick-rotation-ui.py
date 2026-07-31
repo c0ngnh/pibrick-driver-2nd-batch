@@ -20,7 +20,9 @@ import sys
 PORT = 9876
 LOCK_FILE = "/var/lib/pibrick/autorotation.lock"
 HELPER = "/usr/bin/autorotation-lock"
-PIDFILE = "/run/user/1000/pibrick-rotation-ui.pid"
+# Use the real runtime dir for this user (resolved at start so multi-UID systems work)
+RUNTIME_DIR = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+PIDFILE = os.path.join(RUNTIME_DIR, "pibrick-rotation-ui.pid")
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -31,7 +33,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/state":
             try:
-                state = open(LOCK_FILE).read().strip()
+                with open(LOCK_FILE) as f:
+                    state = f.read().strip()
             except (IOError, OSError):
                 state = ""
             self.send_response(200)
@@ -85,7 +88,8 @@ if __name__ == "__main__":
     # Single-instance: check pidfile
     if os.path.exists(PIDFILE):
         try:
-            old = int(open(PIDFILE).read().strip())
+            with open(PIDFILE) as f:
+                old = int(f.read().strip())
             os.kill(old, 0)  # still alive?
             print(f"[pibrick-rotation-ui] Already running as PID {old}. Exiting.")
             sys.exit(0)
@@ -93,7 +97,7 @@ if __name__ == "__main__":
             pass  # stale pidfile, proceed
 
     write_pid(PIDFILE, os.getpid())
-    print(f"[pibrick-rotation-ui] Starting on port {PORT}")
+    print(f"[pibrick-rotation-ui] Starting on port {PORT} (pidfile={PIDFILE})")
 
     server = http.server.HTTPServer(("127.0.0.1", PORT), Handler)
     server.serve_forever()
