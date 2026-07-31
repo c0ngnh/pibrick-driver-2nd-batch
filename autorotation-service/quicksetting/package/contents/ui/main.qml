@@ -4,18 +4,18 @@
 // Plasma Mobile Quick Drawer entry for piBrick autorotation.
 //
 // State lives in /var/lib/pibrick/autorotation.lock — the same file the
-// pibrick-autorotation daemon watches and the same file the panel plasmoid
-// writes. We re-read it via a Loader (same idiom the panel plasmoid uses)
-// and also kick off a reload every time the helper process completes.
+// pibrick-autorotation daemon watches and the same file the panel
+// plasmoid writes. We re-read it via a small Process-based check, NOT a
+// Loader (a Loader is a visual Item; making it a child of QS.QuickSetting
+// breaks the tile's layout and the Quick Drawer silently drops the entry).
 //
 // Tapping the tile calls /usr/bin/autorotation-lock to flip state:
-//   - auto   → normal : locks to the current physical orientation
-//                       (preserves whatever the user last saw)
-//   - normal → auto   : re-enables sensor-driven rotation
+//   - auto   → lock-current : locks to the current physical orientation
+//                              (preserves whatever the user last saw)
+//   - locked → auto         : re-enables sensor-driven rotation
 //
 // We poll the lock file once a second. Cheap, robust against out-of-band
-// changes, and the tile stays correct even if some other surface (the panel
-// plasmoid, a script in a terminal) mutates the lock file.
+// changes from the panel plasmoid, terminal scripts, or the daemon.
 
 import QtQuick
 import org.kde.plasma.private.mobileshell.quicksettingsplugin as QS
@@ -29,33 +29,13 @@ QS.QuickSetting {
     // True when auto-rotation is currently active (lock file absent / empty).
     property bool isAuto: true
 
-    function readStateFromDisk() {
-        // Force Loader to re-fetch the file (it's URL-cached).
-        lockFileHandle.active = false
-        lockFileHandle.active = true
-    }
-
-    Loader {
-        id: lockFileHandle
-        asynchronous: false
-        source: lockFile
-        onLoaded: {
-            // When the file is missing or empty, the Loader's status is
-            // Loader.Error or the loaded item is null — in both cases treat
-            // the state as "auto".
-            if (status === Loader.Ready && item && item.text !== undefined) {
-                root.isAuto = (item.text.trim().length === 0)
-            } else {
-                root.isAuto = true
-            }
-        }
-    }
-
+    // ── External property bindings (QuickSetting API) ───────────────────────────
     text: isAuto ? i18n("Auto-rotate") : i18n("Rotation locked")
     icon: "object-rotate-right-symbolic"
     enabled: isAuto
     available: true
 
+    // ── Toggle action ────────────────────────────────────────────────────────────
     function toggle() {
         if (isAuto) {
             // Lock to whatever orientation the screen is currently showing.
@@ -67,6 +47,31 @@ QS.QuickSetting {
         }
     }
 
+    // ── State-read process ───────────────────────────────────────────────────────
+    // We use `[ -s file ]` to test the lock file: returns 0 (success) when
+    // the file exists and has size, which means "rotation is locked".
+    // `echo auto` is the success branch label; we then map 0 → locked,
+    // non-zero → auto.
+    //
+    // The Process is non-visual — it is not a child Item in the QML tree, so
+    // it does not interfere with QS.QuickSetting's internal layout.
+    Process {
+        id: stateReader
+        onFinished: {
+            // exitCode 0 → file exists & has size → locked (isAuto = false).
+            // Anything else (file missing, empty, error) → auto (isAuto = true).
+            root.isAuto = (exitCode !== 0)
+        }
+    }
+
+    function readState() {
+        // Test the lock file. stdout/stderr are discarded — the only signal
+        // we care about is the exit code.
+        stateReader.start("/bin/sh", ["-c",
+            "[ -s '" + lockFile + "' ] && echo locked || echo auto"])
+    }
+
+    // ── Toggle process ───────────────────────────────────────────────────────────
     Process {
         id: helperProcess
         onFinished: refreshTimer.restart()
@@ -77,17 +82,17 @@ QS.QuickSetting {
         id: refreshTimer
         interval: 250
         repeat: false
-        onTriggered: root.readStateFromDisk()
+        onTriggered: root.readState()
     }
 
-    // Periodic refresh keeps the tile in sync with the daemon / plasmoid / terminal.
+    // ── Periodic refresh keeps the tile in sync ──────────────────────────────────
     Timer {
         interval: 1000
         repeat: true
         running: true
         triggeredOnStart: true
-        onTriggered: root.readStateFromDisk()
+        onTriggered: root.readState()
     }
 
-    Component.onCompleted: readStateFromDisk()
+    Component.onCompleted: readState()
 }
