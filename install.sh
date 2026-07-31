@@ -2196,9 +2196,15 @@ uninstall_autorotation() {
 		rm -f /usr/local/bin/pibrick-autorotation.sh
 		rm -f /usr/local/bin/pibrick-autorotation
 		rm -f /etc/pibrick/actions/autorotation-lock.sh
+		rm -f /usr/bin/autorotation-lock
+		rm -f /usr/bin/pibrick-autorotation-ctl
+		rm -f /usr/lib/pibrick/autorotation-service/pibrick-autorotation-dbus.py
 		rm -f /var/lib/pibrick/autorotation.lock
 		rm -f /var/lib/pibrick/autorotation.lock.type
 		rmdir /usr/lib/pibrick/autorotation-service 2>/dev/null || true
+		# Remove plasmoid
+		rm -rf "$HOME/.local/share/kservices5/pibrick-rotation-lock" 2>/dev/null || true
+		rm -f "$HOME/.local/share/dbus-1/services/com.pibrick.Autorotation.service" 2>/dev/null || true
 		rm -f /boot/firmware/overlays/pibrick-mma8451q.dtbo 2>/dev/null || true
 		systemctl daemon-reload
 	fi

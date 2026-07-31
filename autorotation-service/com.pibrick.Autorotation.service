@@ -1,0 +1,5 @@
+[D-BUS Service]
+Name=com.pibrick.Autorotation
+Exec=/usr/bin/python3 /usr/lib/pibrick/autorotation-service/pibrick-autorotation-dbus.py
+User=%u
+SystemdService=pibrick-autorotation-dbus.service

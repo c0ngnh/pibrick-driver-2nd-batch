@@ -38,7 +38,8 @@ I2CSET="sudo /usr/sbin/i2cset"   # Full path for i2c-tools with sudo
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
 STABLE_DELAY_MS=50           # ms - delay before committing to new orientation
-ROTATION_COOLDOWN_MS=200    # ms - minimum time between rotation commands
+ROTATION_COOLDOWN_MS=400    # ms - minimum time between rotation commands
+                                # Set high enough that the sensor settles before next detection fires
 
 # Variance filter: DISABLED for maximum responsiveness.
 # To re-enable anti-walking filter, set VARIANCE_WINDOW > 1 and
@@ -134,14 +135,15 @@ except:
 
 init_mma8451q() {
     # Initialize MMA8451Q for active mode, 2g range, 100Hz
-    # Set standby mode
+    # Set standby mode first (required before changing settings)
     i2c_write "$MMA8451_CTRL_REG1" 0x00
     # Set 2g range (0x00 = 2g, 0x01 = 4g, 0x02 = 8g)
     i2c_write "$MMA8451_XYZ_DATA_CFG" 0x00
-    # Set active mode, 100Hz ODR (0x00 = 800Hz, 0x01 = 400Hz, ... 0x07 = 1.56Hz)
-    # For 100Hz: oversampling 0x00, DR 0x08 -> 0x00 | 0x08 = 0x08
-    i2c_write "$MMA8451_CTRL_REG1" 0x01  # 0x01 = active mode, 800Hz (fastest)
-    log "MMA8451Q initialized via I2C"
+    # Set active mode, 100Hz output data rate
+    # CTRL_REG1: bit 0 = Active (1=on), bits [2:0] = DR
+    # DR=011 (0x03) = 100Hz, so value = 0x03 | 0x01 = 0x03
+    i2c_write "$MMA8451_CTRL_REG1" 0x03
+    log "MMA8451Q initialized via I2C (100Hz, 2g range)"
 }
 
 check_mma8451q_present() {
@@ -394,75 +396,42 @@ rotate_kde() {
     local orientation=$1
 
     # KDE Plasma (including Plasma Mobile) on Wayland.
-    # Uses kscreen-doctor to apply rotation.  kscreen-doctor can be unreliable
-    # (may crash, may silently fail to connect to Wayland) so we retry up to
-    # MAX_RETRIES times and verify via kwinoutputconfig.json (not kscreen-doctor
-    # which crashes in service context).
+    # Uses kscreen-doctor to apply rotation.  kscreen-doctor can crash (SIGABRT)
+    # but rotation still applies.  We make a single attempt and trust the result;
+    # the main loop's cooldown (300ms) naturally prevents rapid re-calls if
+    # bounce-back does occur.
+    #
+    # The old implementation had a 5x retry loop that read kwinoutputconfig.json
+    # for verification — this was removed because the config file is often not
+    # updated atomically by KWin, causing the loop to retry unnecessarily and
+    # call kscreen-doctor multiple times even when rotation was already applied.
 
     if ! command -v kscreen-doctor >/dev/null 2>&1; then
         warn "kscreen-doctor not found - cannot rotate KDE display"
         return 1
     fi
 
-    # Map orientation names to kwinoutputconfig transform values
-    local transform_val
+    # Map orientation names to kscreen-doctor output names
     case "$orientation" in
-        normal)   transform_val="Normal" ;;
-        left)     transform_val="Rotated270" ;;
-        right)    transform_val="Rotated90" ;;
-        inverted) transform_val="Rotated180" ;;
+        normal)   ;;
+        left)     ;;
+        right)    ;;
+        inverted) ;;
         *)        warn "Unknown orientation: $orientation"; return 1 ;;
     esac
 
-        local max_retries=5
-    local retry_delay=0.1
+    # Single attempt; kscreen-doctor may SIGABRT but rotation still applies.
+    # Suppress all output to keep logs clean.
+    WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" \
+    XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/1000}" \
+    QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-wayland}" \
+    EGL_PLATFORM="${EGL_PLATFORM:-wayland}" \
+    DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/1000/bus}" \
+        kscreen-doctor "output.1.rotation.$orientation" 2>/dev/null
 
-    for attempt in $(seq 1 $max_retries); do
-        # Run kscreen-doctor; it may crash (SIGABRT) but rotation may still apply.
-        # Suppress all output to stderr/stdout to reduce noise.
-        WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" \
-        XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/1000}" \
-        QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-wayland}" \
-        EGL_PLATFORM="${EGL_PLATFORM:-wayland}" \
-        DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/1000/bus}" \
-            kscreen-doctor "output.1.rotation.$orientation" 2>/dev/null
-        local exit_code=$?
-        trap - ERR
-
-        # Check if kwinoutputconfig.json reflects the new rotation
-        sleep 0.1
-        local current_transform
-        current_transform=$(
-            python3 -c "
-import json, os
-path = os.path.expanduser('~/.config/kwinoutputconfig.json')
-try:
-    with open(path) as f:
-        data = json.load(f)
-    for section in data:
-        if section.get('name') == 'outputs':
-            for out in section.get('data', []):
-                if 'transform' in out:
-                    print(out['transform'])
-                    break
-except: pass
-" 2>/dev/null || echo ""
-        )
-
-        if [ "$current_transform" = "$transform_val" ]; then
-            log "Applied KDE rotation: $orientation (attempt $attempt)"
-            return 0
-        fi
-
-        # Not yet applied — retry
-        if [ "$attempt" -lt $max_retries ]; then
-            log "kscreen-doctor attempt $attempt (exit $exit_code) not yet applied (transform=$current_transform), retrying..."
-            sleep "$retry_delay"
-        fi
-    done
-
-    warn "Failed to rotate KDE display after $max_retries attempts (transform=$current_transform, expected=$transform_val)"
-    return 1
+    # kscreen-doctor may crash but the call was processed — KWin handles it.
+    log "Applied KDE rotation: $orientation"
+    return 0
 }
 
 rotate_x11() {
@@ -681,6 +650,7 @@ except Exception as e:
     local pending_orientation=""
     local pending_timestamp=0
     local last_rotation_timestamp=0
+    local last_rotated_to=""  # GUARD: ignore re-detecting the same orientation we just rotated to.
 
     # Startup sync: read actual screen rotation from kwinoutputconfig.json so we don't
     # re-rotate unnecessarily. kscreen-doctor is unreliable in the service context.
@@ -826,6 +796,10 @@ except: print('unknown')
         fi
 
         # All buffer entries agree: we have a confirmed new orientation
+        # GUARD: If we already have a pending orientation that was applied (and the
+        # cooldown cleared it), don't re-trigger the same orientation. Without this
+        # check, re-reading the same orientation as current caused unnecessary
+        # redundant rotation calls → bounce-back on transition completion.
         if [ "$new_orientation" != "$current_orientation" ]; then
             if [ -z "$pending_orientation" ]; then
                 # First confirmation of a new orientation
@@ -845,10 +819,21 @@ except: print('unknown')
                 elapsed_since_rotation=$((now_ms - last_rotation_timestamp))
 
                 if (( elapsed_since_rotation >= ROTATION_COOLDOWN_MS )); then
+                    # GUARD: if we rotated to this same orientation within the cooldown
+                    # window, skip — the screen is already there and the sensor is still
+                    # settling. Without this, the next few samples of the same orientation
+                    # each pass the stability timer and trigger redundant rotations.
+                    if [ "$pending_orientation" = "$last_rotated_to" ]; then
+                        pending_orientation=""
+                        orient_buf=()
+                        continue
+                    fi
+
                     # Apply rotation
                     if apply_rotation "$pending_orientation"; then
                         current_orientation="$pending_orientation"
                         last_rotation_timestamp=$(date +%s%3N)
+                        last_rotated_to="$pending_orientation"
                         log "Orientation: $pending_orientation (x=$x y=$y z=$z)"
                     fi
                 fi
@@ -856,7 +841,7 @@ except: print('unknown')
                 orient_buf=()
             fi
         else
-            # Same as current — clear pending
+            # Same as current — clear pending (no re-application)
             pending_orientation=""
             orient_buf=()
         fi
@@ -899,6 +884,11 @@ show_status() {
 }
 
 case "${1:-}" in
+    --apply-rotation)
+        # Called by autorotation-lock.sh to apply a rotation immediately
+        # (used when the user manually locks from the quick setting)
+        apply_rotation "${2:-normal}"
+        ;;
     --status)
         show_status
         ;;

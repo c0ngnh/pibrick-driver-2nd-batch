@@ -148,145 +148,97 @@ build_kernel_module() {
             # Update module dependencies
             depmod -a
             
-            # Load the module
-            info "Loading module..."
-            if modprobe -v "${MODULE_NAME}" 2>&1; then
-                success "MMA8451Q kernel module loaded successfully"
-                
-                # Verify IIO device appeared
-                sleep 1
-                if ls /sys/bus/iio/devices/ 2>/dev/null | grep -q .; then
-                    info "IIO devices available:"
-                    for dev in /sys/bus/iio/devices/iio:device*; do
-                        [ -f "$dev/name" ] && info "  - $dev: $(cat "$dev/name")"
-                    done
-                fi
-                return 0
-            else
-                warn "Module loaded but may have issues. Check dmesg."
-                return 0  # Still consider it a success
-            fi
+            success "Kernel module installed: $KVER_DIR/extra/${MODULE_NAME}.ko"
+            return 0
         else
-            error "Module file not created after build"
+            warn "Build completed but .ko file not found"
             return 1
         fi
     else
-        error "Kernel module build failed"
-        info "Check the output above for errors"
+        warn "Failed to compile kernel module"
         return 1
     fi
 }
 
-# ── Check/Build Kernel Module ────────────────────────────────────────────────────
+# ── Check for MMA8451Q driver ─────────────────────────────────────────────────
 
-check_and_build_module() {
+check_mma8451q_driver() {
     info "Checking for MMA8451Q kernel driver..."
     
-    local driver_found=0
-    
-    # Method 1: Check if already loaded
-    if lsmod 2>/dev/null | grep -q "mma845"; then
-        info "  mma845 driver is already loaded"
-        driver_found=1
+    # Check if built-in driver exists
+    if [ -f "$KVER_DIR/extra/mma8451q.ko" ]; then
+        info "  Custom mma8451q module found, loading..."
+        modprobe mma8451q 2>/dev/null && info "  Custom module loaded successfully" || warn "  Could not load custom module"
+        return 0
     fi
     
-    # Method 2: Check kernel config
-    if [ "$driver_found" = "0" ]; then
-        for config_path in "/proc/config.gz" "/boot/config-$KERNEL_VERSION" "/boot/config.txt"; do
-            if [ -f "$config_path" ]; then
-                if zcat "$config_path" 2>/dev/null | grep -q "CONFIG_MMA8452=y"; then
-                    info "  MMA8452 is built into kernel"
-                    driver_found=1
-                    break
-                elif zcat "$config_path" 2>/dev/null | grep -q "CONFIG_MMA8452=m"; then
-                    info "  MMA8452 available as module"
-                    driver_found=1
-                    # Try to load it
-                    if modprobe mma8452 2>/dev/null; then
-                        info "  mma8452 module loaded"
-                    fi
-                    break
-                fi
-            fi
-        done
+    # Check if mma8452 (generic) is available
+    if modprobe mma8452 2>/dev/null; then
+        info "  Using built-in mma8452 driver"
+        return 0
     fi
     
-    # Method 3: Check for our custom module
-    if [ "$driver_found" = "0" ]; then
-        if [ -f "$KVER_DIR/extra/mma8451q.ko" ]; then
-            info "  Custom mma8451q module found, loading..."
-            if modprobe -v mma8451q 2>/dev/null; then
-                info "  Custom module loaded successfully"
-                driver_found=1
-            fi
-        fi
+    # Check if the module is already loaded
+    if lsmod | grep -q "mma845"; then
+        info "  MMA845 driver already loaded"
+        return 0
     fi
     
-    # Method 4: Check if IIO device exists (driver may be loaded)
-    if [ "$driver_found" = "0" ]; then
-        if [ -d "/sys/bus/iio/devices/iio:device0" ]; then
-            local name=$(cat /sys/bus/iio/devices/iio:device0/name 2>/dev/null || echo "")
-            if [[ "$name" == *"mma"* ]]; then
-                info "  MMA845x device found in IIO subsystem"
-                driver_found=1
-            fi
-        fi
-    fi
-    
-    # If no driver found, build custom module
-    if [ "$driver_found" = "0" ]; then
-        warn "MMA8452 driver not available in kernel"
-        warn "Building custom MMA8451Q kernel module..."
-        echo ""
-        
+    # Try to build and load custom module
+    if [ -f "$SCRIPT_DIR/kernel-module/mma8451q.c" ]; then
         if build_kernel_module; then
-            success "Custom kernel module built and installed"
+            modprobe mma8451q 2>/dev/null || true
             return 0
-        else
-            warn "Failed to build custom kernel module"
-            warn "Service will use userspace I2C fallback instead"
-            return 1
         fi
     fi
     
-    return 0
+    warn "No MMA8451Q driver available - will use userspace I2C fallback"
+    return 1
 }
 
-check_and_build_module
+check_mma8451q_driver
 
-# ── Device Tree Overlay ─────────────────────────────────────────────────────────
+# ── Device Tree Overlay Setup ────────────────────────────────────────────────────
 
-info "Setting up device tree overlay..."
-DTBO_DIR="/boot/firmware/overlays"
-DTBO_NAME="pibrick-mma8451q"
-
-if [ ! -f "$SCRIPT_DIR/dtb/mma8451q-overlay.dts" ]; then
-    warn "Device tree source not found"
-else
-    # Check if dtc is available
-    if ! command -v dtc >/dev/null 2>&1; then
-        warn "dtc (device tree compiler) not found"
-        warn "On Raspberry Pi OS: sudo apt install device-tree-compiler"
-    else
-        mkdir -p "$DTBO_DIR"
+setup_device_tree() {
+    info "Setting up device tree overlay..."
+    
+    local DTB_DIR="$SCRIPT_DIR/dtb"
+    local OVERLAY="pibrick-mma8451q"
+    
+    # Check if we have the overlay source
+    if [ -f "$DTB_DIR/${OVERLAY}.dts" ]; then
+        info "  Compiling device tree overlay..."
         
         # Compile the overlay
-        if dtc -I dts -O dtb -o "$DTBO_DIR/$DTBO_NAME.dtbo" \
-            -@ -b 0 -d /dev/null "$SCRIPT_DIR/dtb/mma8451q-overlay.dts" 2>/dev/null; then
-            info "  Device tree overlay compiled: $DTBO_NAME.dtbo"
-            
-            # Add to config.txt if not already present
-            if ! grep -q "dtoverlay=$DTBO_NAME" /boot/firmware/config.txt 2>/dev/null; then
-                echo "dtoverlay=$DTBO_NAME" >> /boot/firmware/config.txt
-                info "  Added dtoverlay=$DTBO_NAME to config.txt"
-            else
-                info "  Overlay already configured in config.txt"
-            fi
+        if dtc -@ -I dts -O dtb -o "/boot/firmware/overlays/${OVERLAY}.dtbo" "$DTB_DIR/${OVERLAY}.dts" 2>/dev/null; then
+            info "  Device tree overlay compiled: ${OVERLAY}.dtbo"
         else
-            warn "Failed to compile device tree overlay"
+            warn "  Could not compile device tree overlay"
         fi
     fi
-fi
+    
+    # Check if overlay is in config.txt
+    if [ -f /boot/firmware/config.txt ]; then
+        if grep -q "^dtoverlay=${OVERLAY}" /boot/firmware/config.txt 2>/dev/null; then
+            info "  Overlay already configured in config.txt"
+        else
+            info "  Adding overlay to config.txt..."
+            echo "dtoverlay=${OVERLAY}" >> /boot/firmware/config.txt
+            info "  Overlay added - reboot may be required"
+        fi
+    elif [ -f /boot/config.txt ]; then
+        if grep -q "^dtoverlay=${OVERLAY}" /boot/config.txt 2>/dev/null; then
+            info "  Overlay already configured in config.txt"
+        else
+            info "  Adding overlay to config.txt..."
+            echo "dtoverlay=${OVERLAY}" >> /boot/config.txt
+            info "  Overlay added - reboot may be required"
+        fi
+    fi
+}
+
+setup_device_tree
 
 # ── Install Service Files ───────────────────────────────────────────────────────
 
@@ -303,8 +255,8 @@ safe_cp "$SCRIPT_DIR/pibrick-autorotation.sh" /usr/lib/pibrick/autorotation-serv
 # Resolve the real desktop user so the .desktop file lands in the correct home.
 autostart_home="/root"
 if [ -n "${SUDO_USER:-}" ] && [ "$(id -un)" = "root" ]; then
-	autostart_home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
-	autostart_home="${autostart_home:-/root}"
+    autostart_home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+    autostart_home="${autostart_home:-/root}"
 fi
 if mkdir -p "$autostart_home/.config/autostart" 2>/dev/null; then
     cat > "$autostart_home/.config/autostart/pibrick-autorotation.desktop" << 'AUTOSTARTEOF'
@@ -321,6 +273,224 @@ fi
 mkdir -p /etc/pibrick/actions
 safe_cp "$SCRIPT_DIR/etc/pibrick/actions/autorotation-lock.sh" /etc/pibrick/actions/autorotation-lock.sh
 
+# Install autorotation-lock as a system-wide executable (used by the native Plasma
+# Mobile quick setting or any other UI that needs to toggle rotation).
+safe_cp "$SCRIPT_DIR/etc/pibrick/actions/autorotation-lock.sh" /usr/bin/autorotation-lock
+chmod +x /usr/bin/autorotation-lock
+info "Installed autorotation-lock to /usr/bin"
+
+# ── Install Python services ─────────────────────────────────────────────────────
+install_python_services() {
+    info "Installing Python services..."
+
+    # Install rotation UI daemon (provides HTTP API for QML plasmoid)
+    safe_cp "$SCRIPT_DIR/plasmoid/pibrick-rotation-ui.py" /usr/lib/pibrick/autorotation-service/pibrick-rotation-ui.py
+    info "  pibrick-rotation-ui.py installed"
+
+    # Install D-Bus service (provides IPC interface)
+    safe_cp "$SCRIPT_DIR/pibrick-autorotation-dbus.py" /usr/lib/pibrick/autorotation-service/pibrick-autorotation-dbus.py
+    info "  pibrick-autorotation-dbus.py installed"
+
+    # Install pibrick-autorotation-ctl (plasmoid control script)
+    if [ -f "$SCRIPT_DIR/plasmoid/pibrick-autorotation-ctl.sh" ]; then
+        safe_cp "$SCRIPT_DIR/plasmoid/pibrick-autorotation-ctl.sh" /usr/bin/pibrick-autorotation-ctl
+        chmod +x /usr/bin/pibrick-autorotation-ctl
+        info "  pibrick-autorotation-ctl installed"
+    fi
+}
+install_python_services
+
+# ── Install user systemd services ──────────────────────────────────────────────
+install_user_services() {
+    local user_home=""
+    
+    if [ -z "${SUDO_USER:-}" ]; then
+        info "  No SUDO_USER set, skipping user services"
+        return 0
+    fi
+    
+    user_home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+    if [ -z "$user_home" ]; then
+        info "  Could not determine user home, skipping user services"
+        return 0
+    fi
+    
+    local user_systemd_dir="$user_home/.config/systemd/user"
+    
+    mkdir -p "$user_systemd_dir"
+    mkdir -p "$user_systemd_dir/default.target.wants"
+    
+    # Create the user service file
+    cat > "$user_systemd_dir/pibrick-rotation-ui.service" << 'EOF'
+[Unit]
+Description=piBrick Rotation Lock UI daemon
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/lib/pibrick/autorotation-service/pibrick-rotation-ui.py
+Restart=on-failure
+RestartSec=2
+Environment=DISPLAY=:0
+
+[Install]
+WantedBy=default.target
+EOF
+    
+    chmod 644 "$user_systemd_dir/pibrick-rotation-ui.service"
+    chown "$SUDO_USER:$SUDO_USER" "$user_systemd_dir/pibrick-rotation-ui.service"
+    
+    # Enable and start the user service
+    sudo -u "$SUDO_USER" systemctl --user daemon-reload 2>/dev/null || true
+    sudo -u "$SUDO_USER" systemctl --user enable pibrick-rotation-ui.service 2>/dev/null || true
+    sudo -u "$SUDO_USER" systemctl --user start pibrick-rotation-ui.service 2>/dev/null || true
+    
+    info "  pibrick-rotation-ui.service installed and enabled (user)"
+}
+install_user_services
+
+# ── Install D-Bus service for session activation ────────────────────────────────
+install_dbus_service() {
+    local user_home=""
+    
+    if [ -z "${SUDO_USER:-}" ]; then
+        info "  No SUDO_USER set, skipping D-Bus service"
+        return 0
+    fi
+    
+    user_home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+    if [ -z "$user_home" ]; then
+        info "  Could not determine user home, skipping D-Bus service"
+        return 0
+    fi
+    
+    local dbus_service_dir="$user_home/.local/share/dbus-1/services"
+    
+    mkdir -p "$dbus_service_dir"
+    
+    cat > "$dbus_service_dir/com.pibrick.Autorotation.service" << 'EOF'
+[D-BUS Service]
+Name=com.pibrick.Autorotation
+Exec=/usr/bin/python3 /usr/lib/pibrick/autorotation-service/pibrick-autorotation-dbus.py
+User=%u
+EOF
+    
+    chmod 644 "$dbus_service_dir/com.pibrick.Autorotation.service"
+    chown "$SUDO_USER:$SUDO_USER" "$dbus_service_dir/com.pibrick.Autorotation.service"
+    
+    info "  D-Bus session service installed"
+}
+install_dbus_service
+
+# ── Install Plasmoid ───────────────────────────────────────────────────────────
+install_plasmoid() {
+    local user_home=""
+    
+    if [ -z "${SUDO_USER:-}" ]; then
+        info "  No SUDO_USER set, skipping plasmoid"
+        return 0
+    fi
+    
+    user_home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+    if [ -z "$user_home" ]; then
+        info "  Could not determine user home, skipping plasmoid"
+        return 0
+    fi
+    
+    info "Installing plasmoid..."
+    
+    # Install to kservices5
+    local plasmoid_dir="$user_home/.local/share/kservices5/pibrick-rotation-lock"
+    rm -rf "$plasmoid_dir" 2>/dev/null || true
+    
+    if [ -d "$SCRIPT_DIR/plasmoid" ]; then
+        cp -r "$SCRIPT_DIR/plasmoid" "$plasmoid_dir"
+        # Remove old metadata.desktop if present (Plasma 6 uses metadata.json)
+        rm -f "$plasmoid_dir/metadata/metadata.desktop" 2>/dev/null || true
+        chown -R "$SUDO_USER:$SUDO_USER" "$plasmoid_dir"
+        info "  Plasmoid installed to kservices5"
+    fi
+    
+    # Install to plasma plasmoids
+    local plasma_plasmoid_dir="$user_home/.local/share/plasma/plasmoids/pibrick-rotation-lock"
+    mkdir -p "$(dirname "$plasma_plasmoid_dir")"
+    if [ -d "$SCRIPT_DIR/plasmoid" ]; then
+        rm -rf "$plasma_plasmoid_dir" 2>/dev/null || true
+        cp -r "$SCRIPT_DIR/plasmoid" "$plasma_plasmoid_dir"
+        # Remove old metadata.desktop if present (Plasma 6 uses metadata.json)
+        rm -f "$plasma_plasmoid_dir/metadata/metadata.desktop" 2>/dev/null || true
+        chown -R "$SUDO_USER:$SUDO_USER" "$plasma_plasmoid_dir"
+        info "  Plasmoid installed to plasma/plasmoids"
+    fi
+}
+install_plasmoid
+
+# ── Install Plasmoid to System Location ─────────────────────────────────────────
+install_system_plasmoid() {
+    info "Installing plasmoid to system location..."
+    if [ -d "$SCRIPT_DIR/plasmoid" ]; then
+        local system_plasmoid_dir="/usr/share/plasma/plasmoids/pibrick-rotation-lock"
+        rm -rf "$system_plasmoid_dir" 2>/dev/null || true
+        cp -r "$SCRIPT_DIR/plasmoid" "$system_plasmoid_dir"
+        # Remove old metadata.desktop if present (Plasma 6 uses metadata.json)
+        rm -f "$system_plasmoid_dir/metadata/metadata.desktop" 2>/dev/null || true
+        info "  Plasmoid installed to system location"
+    fi
+}
+install_system_plasmoid
+
+# ── Add Plasmoid to Panel Configuration ─────────────────────────────────────────
+add_plasmoid_to_panel() {
+    local user_home=""
+    
+    if [ -z "${SUDO_USER:-}" ]; then
+        info "  No SUDO_USER set, skipping panel config"
+        return 0
+    fi
+    
+    user_home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+    if [ -z "$user_home" ]; then
+        info "  Could not determine user home, skipping panel config"
+        return 0
+    fi
+    
+    info "Adding widget to Plasma Mobile panel..."
+    
+    local panel_config="$user_home/.config/plasma-org.kde.plasma.mobileshell-appletsrc"
+    
+    # Create the config file if it doesn't exist
+    if [ ! -f "$panel_config" ]; then
+        mkdir -p "$(dirname "$panel_config")"
+        cat > "$panel_config" << 'PANELCONFIGEOF'
+[Containments][1]
+plugin=org.kde.plasma.mobile.homescreen.folio
+
+[Containments][3]
+plugin=org.kde.plasma.mobile.panel
+PANELCONFIGEOF
+        chown "$SUDO_USER:$SUDO_USER" "$panel_config"
+    fi
+    
+    # Check if the widget is already added
+    if ! grep -q "pibrick-rotation-lock" "$panel_config" 2>/dev/null; then
+        # Find the next available applet ID
+        local applet_id
+        applet_id=$(grep -oP 'Applets\]\[\K\d+' "$panel_config" 2>/dev/null | sort -n | tail -1)
+        applet_id=$((applet_id + 1))
+        
+        cat >> "$panel_config" << EOF
+
+[Containments][3][Applets][$applet_id]
+plugin=pibrick-rotation-lock
+EOF
+        chown "$SUDO_USER:$SUDO_USER" "$panel_config"
+        info "  Widget added to panel (ID: $applet_id)"
+    else
+        info "  Widget already in panel configuration"
+    fi
+}
+add_plasmoid_to_panel
+
 # Create /var/lib/pibrick — needed for rotation state tracking and debug logs
 mkdir -p /var/lib/pibrick
 chown congn:congn /var/lib/pibrick
@@ -329,10 +499,6 @@ chown congn:congn /var/lib/pibrick
 safe_cp "$SCRIPT_DIR/pibrick-autorotation.service" /etc/systemd/system/pibrick-autorotation.service
 
 # ── Disable KWin built-in auto-rotation ────────────────────────────────────────
-# KWin has a built-in auto-rotation feature that uses iio-sensor-proxy and
-# competes with our custom autorotation service. Disable it to prevent conflicts.
-# This is safe to run on all systems — it only has an effect on KDE Plasma.
-
 disable_kwin_auto_rotation() {
     info "Disabling KWin built-in auto-rotation..."
 
@@ -350,11 +516,12 @@ disable_kwin_auto_rotation() {
     local kwin_config="$home_dir/.config/kwinoutputconfig.json"
     local kwinrc="$home_dir/.config/kwinrc"
 
-    # Fix kwinoutputconfig.json: set autoRotation to "Never"
+    # Fix kwinoutputconfig.json: set autoRotation to "InTabletMode"
+    # We want KWin's auto-rotation to work when enabled
     if [ -f "$kwin_config" ]; then
         if grep -q '"autoRotation"' "$kwin_config" 2>/dev/null; then
             if grep -q '"autoRotation": "Always"' "$kwin_config" 2>/dev/null; then
-                info "  Disabling autoRotation in kwinoutputconfig.json..."
+                info "  Setting autoRotation to InTabletMode in kwinoutputconfig.json..."
                 sudo -u "$active_user" python3 -c "
 import json
 with open('$kwin_config', 'r') as f:
@@ -362,39 +529,19 @@ with open('$kwin_config', 'r') as f:
 for section in d:
     if section.get('name') == 'outputs':
         for output in section.get('data', []):
-            output['autoRotation'] = 'Never'
+            if output.get('autoRotation') == 'Always':
+                output['autoRotation'] = 'InTabletMode'
 with open('$kwin_config', 'w') as f:
     json.dump(d, f, indent=2)
-" && info "  autoRotation set to Never" || true
+" && info "  autoRotation set to InTabletMode" || true
             else
-                info "  autoRotation already disabled in kwinoutputconfig.json"
+                info "  autoRotation already configured"
             fi
-        else
-            info "  No autoRotation setting found in kwinoutputconfig.json"
-        fi
-    else
-        info "  kwinoutputconfig.json not found (may not be on KDE)"
-    fi
-
-    # Fix kwinrc: disable ScreenRotation
-    if [ -f "$kwinrc" ]; then
-        if grep -qi "ScreenRotation.*true" "$kwinrc" 2>/dev/null; then
-            info "  Disabling ScreenRotation in kwinrc..."
-            sudo -u "$active_user" WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" \
-                XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/1000}" \
-                kwriteconfig5 --file kwinrc --group Wayland --key ScreenRotation false 2>/dev/null || true
-            sudo -u "$active_user" WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" \
-                XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/1000}" \
-                kwriteconfig5 --file kwinrc --group Wayland --key AutoRotate false 2>/dev/null || true
-            info "  ScreenRotation disabled in kwinrc"
-        else
-            info "  ScreenRotation already disabled in kwinrc"
         fi
     fi
 
     # CRITICAL: mask and stop iio-sensor-proxy.service to prevent KWin from using it
     # for built-in auto-rotation.  This conflicts with our custom autorotation service.
-    # Without masking, KWin's auto-rotation causes random flicker rotations.
     if systemctl is-active --quiet iio-sensor-proxy.service 2>/dev/null || \
        systemctl is-enabled --quiet iio-sensor-proxy.service 2>/dev/null; then
         info "  Stopping and masking iio-sensor-proxy.service..."
@@ -405,13 +552,100 @@ with open('$kwin_config', 'w') as f:
         info "  iio-sensor-proxy.service already disabled"
     fi
 
-    info "  KWin auto-rotation disabled"
+    info "  KWin auto-rotation configured"
 }
 
 disable_kwin_auto_rotation
 
 # Reload systemd
 systemctl daemon-reload
+
+# ── Configure SDDM for Plasma Mobile ─────────────────────────────────────────────
+configure_sddm() {
+    info "Configuring SDDM for Plasma Mobile..."
+    
+    # Check if SDDM is installed
+    if ! command -v sddm &>/dev/null; then
+        warn "SDDM not installed - installing SDDM..."
+        apt-get update && apt-get install -y sddm || {
+            warn "Failed to install SDDM - skipping SDDM configuration"
+            return 1
+        }
+    fi
+    
+    # Enable SDDM
+    if systemctl is-active --quiet sddm.service 2>/dev/null; then
+        info "  SDDM is already the active display manager"
+    else
+        info "  Enabling SDDM as display manager..."
+        systemctl enable sddm.service 2>/dev/null || true
+        info "  SDDM enabled"
+    fi
+    
+    # Configure SDDM for Plasma Mobile/Wayland
+    sddm_conf_dir="/etc/sddm.conf.d"
+    mkdir -p "$sddm_conf_dir"
+    
+    # Create KDE Plasma Mobile session configuration
+    cat > "$sddm_conf_dir/kde-plasmamobile.conf" << 'SDDMEOF'
+# SDDM configuration for piBrick Plasma Mobile
+# Auto-generated by pibrick-autorotation installer
+
+[General]
+Numlock=on
+
+[Theme]
+Current=breeze
+CursorTheme=breeze_cursors
+
+[Users]
+MaximumUid=65536
+MinimumUid=1000
+
+[Wayland]
+SessionCommand=/usr/bin/startplasma-wayland
+SessionLogFile=.local/share/sddm-wayland-session.log
+SDDMEOF
+    
+    # Set default session to Plasma Wayland (for devices with touch)
+    if [ -n "${SUDO_USER:-}" ]; then
+        local user_home
+        user_home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+        cat > "$sddm_conf_dir/10-pibrick.conf" << SDDMEOF
+# Default session for piBrick devices
+# Auto-generated by pibrick-autorotation installer
+
+[General]
+HaltCommand=/usr/bin/systemctl poweroff
+RebootCommand=/usr/bin/systemctl reboot
+
+[Theme]
+Current=breeze
+
+[Autologin]
+User=$SUDO_USER
+Session=plasma.mobile.desktop
+SDDMEOF
+        info "  SDDM configured with Plasma Mobile session"
+        info "  Auto-login enabled for user: $SUDO_USER"
+    else
+        cat > "$sddm_conf_dir/10-pibrick.conf" << 'SDDMEOF'
+# Default session for piBrick devices
+# Auto-generated by pibrick-autorotation installer
+
+[General]
+HaltCommand=/usr/bin/systemctl poweroff
+RebootCommand=/usr/bin/systemctl reboot
+
+[Theme]
+Current=breeze
+SDDMEOF
+        info "  SDDM configured with Plasma Mobile session"
+    fi
+    info "  To change session: edit /etc/sddm.conf.d/"
+}
+
+configure_sddm
 
 # ── Enable and Start Service ────────────────────────────────────────────────────
 
@@ -443,30 +677,36 @@ fi
 
 echo "Hardware: MMA8451Q accelerometer on I2C1 (address 0x1C)"
 echo ""
+echo "Services installed:"
+echo "  - pibrick-autorotation.service  (system) - Main rotation service"
+echo "  - pibrick-rotation-ui.service  (user)   - HTTP API for plasmoid"
+echo "  - com.pibrick.Autorotation     (dbus)   - D-Bus IPC interface"
+echo "  - SDDM                         (system) - Display manager configured"
+echo ""
 echo "The service monitors device orientation and rotates the screen automatically."
 echo ""
 echo "Usage:"
 echo "  autorotation-lock [normal|left|right|inverted]  Lock to specific orientation"
 echo "  autorotation-lock auto                       Enable auto-rotation"
+echo "  pibrick-autorotation-ctl lock <orientation>  Alternative (plasmoid uses this)"
 echo ""
 echo "Service commands:"
 echo "  sudo systemctl start pibrick-autorotation"
 echo "  sudo systemctl stop pibrick-autorotation"
 echo "  sudo systemctl restart pibrick-autorotation"
+echo "  systemctl --user start pibrick-rotation-ui"
+echo "  pkill -f pibrick-rotation-ui  # restart UI daemon"
 echo "  sudo pibrick-autorotation.sh --status       View status"
 echo "  journalctl -u pibrick-autorotation -f       View logs"
 echo ""
 
 # Check if reboot needed
-if [ -f "$DTBO_DIR/$DTBO_NAME.dtbo" ]; then
-    echo "IMPORTANT: Reboot to load the device tree overlay for MMA8451Q!"
-    echo ""
+if [ -f /boot/firmware/config.txt ]; then
+    if grep -q "^dtoverlay=pibrick-mma8451q" /boot/firmware/config.txt 2>/dev/null; then
+        if ! grep -q "^dtoverlay=pibrick-mma8451q" /proc/device-tree/aliases/i2c* 2>/dev/null; then
+            echo "NOTE: Device tree overlay added. Reboot recommended."
+        fi
+    fi
 fi
 
-# Final status
-echo -n "Status: "
-if systemctl is-active pibrick-autorotation.service 2>/dev/null; then
-    echo "running"
-else
-    echo "stopped"
-fi
+echo "Installation complete!"

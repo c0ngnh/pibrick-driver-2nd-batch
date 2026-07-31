@@ -1,0 +1,25 @@
+[Desktop Entry]
+Name=piBrick Rotation Lock
+Name[vi]=piBrick Khóa Xoay Màn Hình
+GenericName=Screen rotation control
+GenericName[vi]=Điều khiển xoay màn hình
+Comment=Lock or unlock automatic screen rotation for piBrick CM5 handheld
+Comment[vi]=Khóa hoặc mở khóa xoay màn hình tự động cho thiết bị cầm tay piBrick CM5
+Type=Service
+ServiceTypes=Plasma/Applet
+Icon=object-rotate-right
+Category=Hardware
+
+X-Plasma-API=declarativeappletscript
+X-Plasma-MainScript=contents/ui/main.qml
+X-Plasma-StandAloneApp=true
+X-Plasma-PreloadWeight=10
+X-Plasma-HiddenInSlideshow=true
+
+X-KDE-PluginInfo-Name=pibrick-rotation-lock
+X-KDE-PluginInfo-Category=Hardware
+X-KDE-PluginInfo-Author=piBrick Project
+X-KDE-PluginInfo-Email=
+X-KDE-PluginInfo-Version=1.0
+X-KDE-PluginInfo-License=GPL-3.0+
+X-KDE-PluginInfo-EnabledByDefault=true

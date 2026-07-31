@@ -1,0 +1,25 @@
+{
+    "KPackageStructure": "Plasma/Applet",
+    "KPlugin": {
+        "Authors": [
+            {
+                "Name": "piBrick Project"
+            }
+        ],
+        "Category": "Hardware",
+        "Description": "Lock or unlock automatic screen rotation for piBrick CM5 handheld",
+        "EnabledByDefault": true,
+        "FormFactors": [
+            "handset",
+            "tablet"
+        ],
+        "Icon": "object-rotate-right",
+        "Id": "pibrick-rotation-lock",
+        "License": "GPL-3.0+",
+        "Name": "piBrick Rotation Lock",
+        "Version": "1.0"
+    },
+    "X-Plasma-API": "declarativeappletscript",
+    "X-Plasma-MainScript": "contents/ui/main.qml",
+    "X-Plasma-NotificationAreaCategory": "Hardware"
+}

@@ -1,0 +1,14 @@
+[Unit]
+Description=piBrick Rotation Lock UI daemon
+Documentation=man:pibrick-autorotation(1)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/lib/pibrick/autorotation-service/pibrick-rotation-ui.py
+Restart=on-failure
+RestartSec=2
+Environment=DISPLAY=:0
+
+[Install]
+WantedBy=default.target

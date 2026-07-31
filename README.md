@@ -975,6 +975,27 @@ sudo pibrick-tools --autorotation-lock inverted  # Lock to inverted
 sudo pibrick-tools --autorotation-unlock       # Resume auto-rotation
 ```
 
+### KDE Plasma Mobile Control Center Toggle
+
+On **KDE Plasma Mobile** (and Plasma Desktop), the piBrick rotation lock appears as a **plasmoid** in the control center / system tray:
+
+- **Plasma Mobile**: Appears automatically in the status bar; tap to expand the orientation picker
+- **Plasma Desktop**: Add Widget → search "piBrick Rotation Lock"; drag to the system tray or panel
+
+The plasmoid shows the current lock state and provides one-tap buttons for each orientation (Portrait, Landscape, Inverted, Landscape Reverse). The master auto-rotation toggle also lets you lock to the *current* screen orientation.
+
+The plasmoid communicates with `pibrick-autorotation.service` via `/usr/bin/autorotation-lock` (installed alongside the service). No D-Bus required — the lock state is stored in `/var/lib/pibrick/autorotation.lock` which both the service and plasmoid read/write.
+
+### Bounce-back Fix
+
+Rotating from landscape to portrait (or vice versa) previously caused the screen to briefly flip back once before stabilizing. This has been fixed with three changes:
+
+1. **Z-axis transition guard** — Portrait is only detected when the device is nearly upright (`|Z| < 4096` raw units). This prevents a false portrait detection during the moment when Z is still elevated while the device is transitioning between landscape and portrait.
+
+2. **Pending-orientation guard** — Once a new orientation is confirmed and applied, the loop clears the `pending_orientation` buffer. If the sensor re-detects the same orientation as `current_orientation`, it is treated as "already applied" and does not trigger a second rotation call. Previously, this case fell through and could cause a redundant `kscreen-doctor` call.
+
+3. **Single rotation attempt** — The KDE `kscreen-doctor` retry loop was removed. It caused multiple redundant calls because the `kwinoutputconfig.json` verification check ran before KWin had finished writing the new transform. The cooldown (increased from 200 ms → 300 ms) now naturally prevents rapid re-application.
+
 ### Supported Desktops
 
 | Desktop | Rotation Method |

@@ -1,0 +1,14 @@
+[Unit]
+Description=piBrick Autorotation D-Bus Service (IPC for KDE Plasma Mobile)
+PartOf=pibrick-autorotation.service
+After=pibrick-autorotation.service
+
+[Service]
+Type=dbus
+BusName=com.pibrick.Autorotation
+ExecStart=%h/.local/share/kservices5/pibrick-rotation-lock/plasmoid/pibrick-autorotation-dbus.py
+Restart=on-failure
+RestartSec=5
+
+# Install D-Bus service file so it auto-activates on first call
+# The .service file itself is installed separately to the session bus services dir
