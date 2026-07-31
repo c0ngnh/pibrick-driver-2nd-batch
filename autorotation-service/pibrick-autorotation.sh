@@ -347,7 +347,11 @@ run_as_user() {
     local user=$1
     shift
     local uid
-    uid=$(id -u "$user" 2>/dev/null || echo "1000")
+    uid=$(id -u "$user" 2>/dev/null)
+    if [ -z "$uid" ]; then
+        warn "run_as_user: cannot resolve UID for '$user', skipping"
+        return 1
+    fi
     sudo -u "$user" DISPLAY="${DISPLAY:-:0}" XDG_RUNTIME_DIR="/run/user/$uid" "$@" 2>/dev/null || true
 }
 
@@ -359,7 +363,12 @@ rotate_gnome() {
     user=$(get_active_user)
     [ -z "$user" ] && { warn "No active user session"; return 1; }
 
-    local uid=$(id -u "$user" 2>/dev/null || echo "1000")
+    local uid
+    uid=$(id -u "$user" 2>/dev/null)
+    if [ -z "$uid" ]; then
+        warn "rotate_gnome: cannot resolve UID for '$user', aborting"
+        return 1
+    fi
 
     # GNOME uses gsettings for orientation lock
     local gsetting_val

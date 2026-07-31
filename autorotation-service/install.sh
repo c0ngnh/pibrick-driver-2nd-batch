@@ -46,6 +46,7 @@ safe_cp() {
 # Check for root
 if [ "$(id -u)" != "0" ]; then
     error "This script must be run as root (sudo)"
+    exit 1
 fi
 
 info "Installing piBrick Autorotation Service..."
@@ -626,23 +627,26 @@ disable_kwin_auto_rotation() {
     local kwinrc="$home_dir/.config/kwinrc"
 
     # Fix kwinoutputconfig.json: set autoRotation to "InTabletMode"
-    # We want KWin's auto-rotation to work when enabled
+    # We want KWin's auto-rotation to work when enabled.
+    # Pass the path via env to avoid shell injection into the Python -c body.
     if [ -f "$kwin_config" ]; then
         if grep -q '"autoRotation"' "$kwin_config" 2>/dev/null; then
             if grep -q '"autoRotation": "Always"' "$kwin_config" 2>/dev/null; then
                 info "  Setting autoRotation to InTabletMode in kwinoutputconfig.json..."
-                sudo -u "$active_user" python3 -c "
-import json
-with open('$kwin_config', 'r') as f:
+                KWIN_CONFIG_PATH="$kwin_config" sudo -u "$active_user" python3 -c '
+import json, os
+path = os.environ["KWIN_CONFIG_PATH"]
+with open(path) as f:
     d = json.load(f)
 for section in d:
-    if section.get('name') == 'outputs':
-        for output in section.get('data', []):
-            if output.get('autoRotation') == 'Always':
-                output['autoRotation'] = 'InTabletMode'
-with open('$kwin_config', 'w') as f:
+    if section.get("name") == "outputs":
+        for output in section.get("data", []):
+            if output.get("autoRotation") == "Always":
+                output["autoRotation"] = "InTabletMode"
+with open(path, "w") as f:
     json.dump(d, f, indent=2)
-" && info "  autoRotation set to InTabletMode" || true
+' && info "  autoRotation set to InTabletMode" || \
+                    warn "  Failed to update kwinoutputconfig.json"
             else
                 info "  autoRotation already configured"
             fi
