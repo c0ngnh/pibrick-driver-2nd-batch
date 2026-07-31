@@ -57,6 +57,37 @@ KVER_DIR="/lib/modules/${KERNEL_VERSION}"
 BUILD_DIR="${KVER_DIR}/build"
 info "Kernel: $KERNEL_VERSION"
 
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
+# Print the QML import path Qt's resolver will scan, on this system. On Debian
+# the system QML root is the multiarch path /usr/lib/<multiarch>/qt6/qml/,
+# not /usr/lib/qt6/qml/. We probe for whichever path has the QtCore module
+# installed, which is the most reliable signal that Qt's import resolver
+# will look there.
+resolve_qml_lib_root() {
+    local candidate
+    for d in /usr/lib/aarch64-linux-gnu/qt6/qml \
+             /usr/lib/x86_64-linux-gnu/qt6/qml \
+             /usr/lib/armhf-linux-gnueabihf/qt6/qml \
+             /usr/lib/qt6/qml; do
+        if [ -d "$d/QtCore" ]; then
+            echo "$d"
+            return 0
+        fi
+    done
+    # Default to the multiarch style based on the host arch, even if Qt isn't
+    # installed yet — the install will apt install it later.
+    if command -v gcc >/dev/null 2>&1; then
+        local ma
+        ma=$(gcc -print-multiarch 2>/dev/null || true)
+        if [ -n "$ma" ]; then
+            echo "/usr/lib/${ma}/qt6/qml"
+            return 0
+        fi
+    fi
+    echo "/usr/lib/qt6/qml"
+}
+
 # ── Kernel Module Builder ────────────────────────────────────────────────────────
 
 build_kernel_module() {
@@ -543,13 +574,8 @@ build_quicksetting_plugin() {
     # (NOT /usr/lib/qt6/qml/ — that's a system path Qt's import resolver does
     # not scan on Debian).
     local qml_uri="${qs_id//-/}"
-    local qml_lib_root="/usr/lib/qt6/qml"
-    # On Debian, the system QML import path is the multiarch dir; prefer
-    # that if it exists. Otherwise fall back to /usr/lib/qt6/qml (Arch /
-    # single-arch). Test by checking whether QtCore is reachable in either.
-    if [ -d "/usr/lib/${multiarch}/qt6/qml/QtCore" ]; then
-        qml_lib_root="/usr/lib/${multiarch}/qt6/qml"
-    fi
+    local qml_lib_root
+    qml_lib_root=$(resolve_qml_lib_root)
     local qml_install_root="$qml_lib_root/$(echo "$qml_uri" | tr . /)"
     local out_so="$qml_install_root/libpibrick-autorotation-plugin.so"
 
@@ -857,18 +883,8 @@ install_quicksetting() {
     # name has to match the URI verbatim). The install root is the multiarch
     # Qt6 QML path on Debian (or /usr/lib/qt6/qml on systems without multiarch).
     local qml_uri="${qs_id//-/}"
-    local qml_lib_root="/usr/lib/qt6/qml"
-    if [ -d "/usr/lib/aarch64-linux-gnu/qt6/qml/QtCore" ] \
-        || [ -d "/usr/lib/x86_64-linux-gnu/qt6/qml/QtCore" ] \
-        || [ -d "/usr/lib/armhf-linux-gnueabihf/qt6/qml/QtCore" ]; then
-        # Use whichever multiarch path actually has Qt6.
-        for d in /usr/lib/aarch64-linux-gnu/qt6/qml /usr/lib/x86_64-linux-gnu/qt6/qml /usr/lib/armhf-linux-gnueabihf/qt6/qml; do
-            if [ -d "$d/QtCore" ]; then
-                qml_lib_root="$d"
-                break
-            fi
-        done
-    fi
+    local qml_lib_root
+    qml_lib_root=$(resolve_qml_lib_root)
     local plugin_so="$qml_lib_root/$(echo "$qml_uri" | tr . /)/libpibrick-autorotation-plugin.so"
 
     info "  Quick Drawer entry installed: $qs_id"
