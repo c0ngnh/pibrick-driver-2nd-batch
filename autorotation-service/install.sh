@@ -536,9 +536,21 @@ build_quicksetting_plugin() {
     # QML module URIs may not contain hyphens (Qt's QML grammar restricts
     # identifiers to [A-Za-z0-9_.]). The KPackage Id above may have a hyphen
     # because it is just a directory name; the QML URI we register and import
-    # must replace it with an underscore.
-    local qml_uri="${qs_id//-/_}"
-    local qml_install_root="/usr/lib/qt6/qml/$qml_uri"
+    # must drop it. We do NOT replace hyphens with underscores — Qt's import
+    # resolver walks the directory hierarchy one segment per URI segment, so
+    # the on-disk path has to be the dotted URI with dots replaced by `/`.
+    # The QML root itself is the multiarch path /usr/lib/<multiarch>/qt6/qml/
+    # (NOT /usr/lib/qt6/qml/ — that's a system path Qt's import resolver does
+    # not scan on Debian).
+    local qml_uri="${qs_id//-/}"
+    local qml_lib_root="/usr/lib/qt6/qml"
+    # On Debian, the system QML import path is the multiarch dir; prefer
+    # that if it exists. Otherwise fall back to /usr/lib/qt6/qml (Arch /
+    # single-arch). Test by checking whether QtCore is reachable in either.
+    if [ -d "/usr/lib/${multiarch}/qt6/qml/QtCore" ]; then
+        qml_lib_root="/usr/lib/${multiarch}/qt6/qml"
+    fi
+    local qml_install_root="$qml_lib_root/$(echo "$qml_uri" | tr . /)"
     local out_so="$qml_install_root/libpibrick-autorotation-plugin.so"
 
     if [ ! -d "$src_dir" ]; then
@@ -839,8 +851,25 @@ install_quicksetting() {
     # built below. We stage it as main.qml temporarily; after the plugin
     # build we either keep it (plugin OK) or replace it with main-fallback.qml
     # (plugin failed — missing the import would otherwise drop the tile).
-    local qml_uri="${qs_id//-/_}"
-    local plugin_so="/usr/lib/qt6/qml/$qml_uri/libpibrick-autorotation-plugin.so"
+    # The qml_uri here MUST match the one used in build_quicksetting_plugin
+    # (hyphens stripped, NOT replaced with underscores — Qt's import resolver
+    # walks the directory tree one segment per URI segment, so the directory
+    # name has to match the URI verbatim). The install root is the multiarch
+    # Qt6 QML path on Debian (or /usr/lib/qt6/qml on systems without multiarch).
+    local qml_uri="${qs_id//-/}"
+    local qml_lib_root="/usr/lib/qt6/qml"
+    if [ -d "/usr/lib/aarch64-linux-gnu/qt6/qml/QtCore" ] \
+        || [ -d "/usr/lib/x86_64-linux-gnu/qt6/qml/QtCore" ] \
+        || [ -d "/usr/lib/armhf-linux-gnueabihf/qt6/qml/QtCore" ]; then
+        # Use whichever multiarch path actually has Qt6.
+        for d in /usr/lib/aarch64-linux-gnu/qt6/qml /usr/lib/x86_64-linux-gnu/qt6/qml /usr/lib/armhf-linux-gnueabihf/qt6/qml; do
+            if [ -d "$d/QtCore" ]; then
+                qml_lib_root="$d"
+                break
+            fi
+        done
+    fi
+    local plugin_so="$qml_lib_root/$(echo "$qml_uri" | tr . /)/libpibrick-autorotation-plugin.so"
 
     info "  Quick Drawer entry installed: $qs_id"
 
