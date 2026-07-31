@@ -1341,6 +1341,10 @@ PYEOF
 }
 
 stop_upower() {
+	# MASK the service FIRST so systemd can't auto-restart it while we work
+	systemctl mask upower 2>/dev/null || true
+	systemctl --user mask upower 2>/dev/null || true
+	
 	# Stop all upower-related services
 	systemctl stop upower 2>/dev/null || true
 	systemctl --user stop upower 2>/dev/null || true
@@ -1381,7 +1385,10 @@ restart_upower() {
 
 	info "Restarting UPower daemon..."
 	stop_upower
-	sudo -n systemctl start upower 2>/dev/null || "$upowerd_path" &
+	# Unmask so we can start it
+	systemctl unmask upower 2>/dev/null || true
+	systemctl --user unmask upower 2>/dev/null || true
+	systemctl start upower 2>/dev/null || "$upowerd_path" &
 	sleep 4
 
 	local STATE
