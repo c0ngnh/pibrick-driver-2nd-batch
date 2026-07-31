@@ -206,16 +206,28 @@ setup_device_tree() {
     local DTB_DIR="$SCRIPT_DIR/dtb"
     local OVERLAY="pibrick-mma8451q"
     
+    # Find the overlay source file (different naming conventions)
+    local overlay_src=""
+    for src_file in "$DTB_DIR/${OVERLAY}.dts" "$DTB_DIR/mma8451q-overlay.dts" "$DTB_DIR/mma8451q.dts"; do
+        if [ -f "$src_file" ]; then
+            overlay_src="$src_file"
+            break
+        fi
+    done
+    
     # Check if we have the overlay source
-    if [ -f "$DTB_DIR/${OVERLAY}.dts" ]; then
+    if [ -n "$overlay_src" ]; then
+        info "  Found overlay source: $overlay_src"
         info "  Compiling device tree overlay..."
         
-        # Compile the overlay
-        if dtc -@ -I dts -O dtb -o "/boot/firmware/overlays/${OVERLAY}.dtbo" "$DTB_DIR/${OVERLAY}.dts" 2>/dev/null; then
+        # Compile the overlay with sudo (needs root for /boot)
+        if sudo dtc -@ -I dts -O dtb -o "/boot/firmware/overlays/${OVERLAY}.dtbo" "$overlay_src" 2>/dev/null; then
             info "  Device tree overlay compiled: ${OVERLAY}.dtbo"
         else
             warn "  Could not compile device tree overlay"
         fi
+    else
+        warn "  No overlay source found in $DTB_DIR"
     fi
     
     # Check if overlay is in config.txt
@@ -224,7 +236,7 @@ setup_device_tree() {
             info "  Overlay already configured in config.txt"
         else
             info "  Adding overlay to config.txt..."
-            echo "dtoverlay=${OVERLAY}" >> /boot/firmware/config.txt
+            echo "dtoverlay=${OVERLAY}" | sudo tee -a /boot/firmware/config.txt > /dev/null
             info "  Overlay added - reboot may be required"
         fi
     elif [ -f /boot/config.txt ]; then
@@ -232,13 +244,70 @@ setup_device_tree() {
             info "  Overlay already configured in config.txt"
         else
             info "  Adding overlay to config.txt..."
-            echo "dtoverlay=${OVERLAY}" >> /boot/config.txt
+            echo "dtoverlay=${OVERLAY}" | sudo tee -a /boot/config.txt > /dev/null
             info "  Overlay added - reboot may be required"
         fi
     fi
 }
 
 setup_device_tree
+
+# ── I2C Device Setup ─────────────────────────────────────────────────────────────
+# Some devices need the MMA8451Q to be added manually to I2C bus
+
+setup_i2c_device() {
+    info "Setting up I2C accelerometer device..."
+    
+    # Check if IIO device already exists
+    if [ -d "/sys/bus/iio/devices/iio:device0" ]; then
+        local device_name
+        device_name=$(cat /sys/bus/iio/devices/iio:device0/name 2>/dev/null || echo "")
+        if [[ "$device_name" == *"mma"* ]] || [[ "$device_name" == *"accel"* ]]; then
+            info "  Accelerometer already detected: $device_name"
+            return 0
+        fi
+    fi
+    
+    # Check if device is present on I2C bus (address 0x1C)
+    if [ -d "/sys/bus/i2c/devices/1-001c" ]; then
+        info "  Device already registered on I2C bus"
+        return 0
+    fi
+    
+    # Try to add the device manually
+    if [ -e "/sys/bus/i2c/devices/i2c-1/new_device" ]; then
+        info "  Adding MMA8451Q to I2C bus..."
+        if echo 'mma8451q 0x1c' | sudo tee /sys/bus/i2c/devices/i2c-1/new_device > /dev/null 2>&1; then
+            sleep 2
+            if [ -d "/sys/bus/iio/devices/iio:device0" ]; then
+                local device_name
+                device_name=$(cat /sys/bus/iio/devices/iio:device0/name 2>/dev/null || echo "unknown")
+                info "  ✓ Accelerometer detected: $device_name"
+                
+                # Make this persistent across reboots
+                if [ -n "${SUDO_USER:-}" ]; then
+                    local user_home
+                    user_home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+                    mkdir -p "$user_home/.config/autostart"
+                    cat > "$user_home/.config/autostart/pibrick-i2c-setup.desktop" << 'I2CAUTOSTART'
+[Desktop Entry]
+Type=Application
+Name=piBrick I2C Setup
+Exec=/usr/bin/bash -c 'echo mma8451q 0x1c > /sys/bus/i2c/devices/i2c-1/new_device 2>/dev/null || true'
+X-GNOME-Autostart-enabled=true
+I2CAUTOSTART
+                    chown "$SUDO_USER:$SUDO_USER" "$user_home/.config/autostart/pibrick-i2c-setup.desktop"
+                    info "  Created autostart entry for I2C device"
+                fi
+                return 0
+            fi
+        fi
+    fi
+    
+    warn "  Could not add I2C device - will retry after reboot"
+}
+
+setup_i2c_device
 
 # ── Install Service Files ───────────────────────────────────────────────────────
 
@@ -404,6 +473,8 @@ install_plasmoid() {
     rm -rf "$plasmoid_dir" 2>/dev/null || true
     
     if [ -d "$SCRIPT_DIR/plasmoid" ]; then
+        # Create parent directory if it doesn't exist
+        mkdir -p "$user_home/.local/share/kservices5"
         cp -r "$SCRIPT_DIR/plasmoid" "$plasmoid_dir"
         # Remove old metadata.desktop if present (Plasma 6 uses metadata.json)
         rm -f "$plasmoid_dir/metadata/metadata.desktop" 2>/dev/null || true
@@ -413,7 +484,8 @@ install_plasmoid() {
     
     # Install to plasma plasmoids
     local plasma_plasmoid_dir="$user_home/.local/share/plasma/plasmoids/pibrick-rotation-lock"
-    mkdir -p "$(dirname "$plasma_plasmoid_dir")"
+    # Create parent directories if they don't exist
+    mkdir -p "$user_home/.local/share/plasma/plasmoids"
     if [ -d "$SCRIPT_DIR/plasmoid" ]; then
         rm -rf "$plasma_plasmoid_dir" 2>/dev/null || true
         cp -r "$SCRIPT_DIR/plasmoid" "$plasma_plasmoid_dir"
@@ -473,10 +545,10 @@ PANELCONFIGEOF
     
     # Check if the widget is already added
     if ! grep -q "pibrick-rotation-lock" "$panel_config" 2>/dev/null; then
-        # Find the next available applet ID
+        # Find the next available applet ID using awk
         local applet_id
-        applet_id=$(grep -oP 'Applets\]\[\K\d+' "$panel_config" 2>/dev/null | sort -n | tail -1)
-        applet_id=$((applet_id + 1))
+        applet_id=$(awk -F'[][]' '/Applets\]\[/ {gsub(/\[/, "", $2); if ($2 > max) max=$2} END {print (max+1)}' "$panel_config" 2>/dev/null || echo "101")
+        [ -z "$applet_id" ] && applet_id="101"
         
         cat >> "$panel_config" << EOF
 
