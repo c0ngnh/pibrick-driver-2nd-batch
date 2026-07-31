@@ -556,11 +556,189 @@ install_quicksetting() {
     rm -rf "$qs_dir" 2>/dev/null || true
     cp -r "$SCRIPT_DIR/quicksetting/package" "$qs_dir"
     info "  Quick Drawer entry installed: $qs_id"
+
+    # Build and install the matching QML extension plugin so the tile
+    # gets a bindable state property. Without it, the tile would always
+    # appear "on" because pure QML in this sandbox has no way to read
+    # the auto-rotation state. See plugin-src/README-style comments in
+    # pibrick-autorotation-util.h for the rationale.
+    if build_quicksetting_plugin "$qs_id"; then
+        info "  Tile state is now live (auto / locked)."
+    else
+        warn "  QML plugin build failed — the tile will still appear,"
+        warn "  but its 'enabled' state will be stale (always On)."
+        warn "  See install log above for the build error."
+    fi
+
     info "  Sign out and back in once; the 'Auto-rotate' tile will then appear in the"
     info "  top-pull Quick Drawer. (The shell scans quicksettings/ at session start;"
     info "  there is no user-level plasmashell unit on this image to restart instead.)"
 }
 install_quicksetting
+
+# ── Build & install the piBrick Quick-Setting QML extension plugin ───────────────
+# Compiles plugin-src/{plugin.cpp,util.h,util.cpp} into a Qt6 QML plugin shared
+# library and drops it next to a qmldir at
+#   /usr/lib/qt6/qml/org/kde/plasma/quicksetting.<id>/
+# so the tile's QML can `import org.kde.plasma.quicksetting.<id> 1.0` and get
+# a bindable PibrickAutorotationUtil singleton.
+#
+# Args: $1 = quicksetting plugin id (e.g. org.kde.plasma.quicksetting.pibrick-autorotation)
+# Returns 0 on success (built or skipped because already up-to-date), 1 on failure.
+build_quicksetting_plugin() {
+    local qs_id="$1"
+    local src_dir="$SCRIPT_DIR/quicksetting/plugin-src"
+    local qml_install_root="/usr/lib/qt6/qml/$qs_id"
+    local out_so="$qml_install_root/libpibrick-autorotation-plugin.so"
+
+    if [ ! -d "$src_dir" ]; then
+        warn "  plugin-src/ not present; skipping plugin build"
+        return 1
+    fi
+
+    # ── 1. Toolchain detection ───────────────────────────────────────────────
+    local cxx=""
+    for candidate in g++ c++; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            cxx="$candidate"
+            break
+        fi
+    done
+    if [ -z "$cxx" ]; then
+        warn "  C++ compiler not found (g++/c++). Attempting apt-get install..."
+        if command -v apt-get >/dev/null 2>&1; then
+            apt-get update >/dev/null 2>&1 || true
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+                g++ \
+                qt6-base-dev \
+                qt6-declarative-dev \
+                >/dev/null 2>&1 || {
+                warn "  apt-get install g++ qt6-base-dev failed."
+                warn "  Install manually with:"
+                warn "    sudo apt install g++ qt6-base-dev qt6-declarative-dev"
+                return 1
+            }
+        else
+            warn "  No C++ compiler and no apt-get available. Aborting plugin build."
+            return 1
+        fi
+        cxx=g++
+    fi
+
+    local moc=""
+    for candidate in moc-qt6 moc; do
+        if command -v "$candidate" >/dev/null 2>&1; then
+            moc="$candidate"
+            break
+        fi
+    done
+    if [ -z "$moc" ]; then
+        warn "  Qt6 moc not found. Attempting apt-get install qt6-base-dev..."
+        if command -v apt-get >/dev/null 2>&1; then
+            DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+                qt6-base-dev \
+                >/dev/null 2>&1 || {
+                warn "  Could not install qt6-base-dev. Aborting plugin build."
+                return 1
+            }
+            moc=moc-qt6
+        else
+            warn "  No Qt6 moc available. Aborting plugin build."
+            return 1
+        fi
+    fi
+
+    # ── 2. Qt6 include / link flags via pkg-config ───────────────────────────
+    # `pkg-config --cflags Qt6Core Qt6Qml` gives e.g. -I/usr/include/x86_64-linux-gnu/qt6
+    # `pkg-config --libs` gives -lQt6Core -lQt6Qml. We prefer pkg-config when present
+    # because the include path is multiarch on Debian and not always /usr/include.
+    local qt_cflags=""
+    local qt_libs=""
+    if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists Qt6Core Qt6Qml 2>/dev/null; then
+        qt_cflags=$(pkg-config --cflags Qt6Core Qt6Qml 2>/dev/null || true)
+        qt_libs=$(pkg-config --libs Qt6Core Qt6Qml 2>/dev/null || true)
+    fi
+    if [ -z "$qt_cflags" ] || [ -z "$qt_libs" ]; then
+        # Fallback: assume standard Debian layout.
+        qt_cflags="-I/usr/include/x86_64-linux-gnu/qt6 -I/usr/include/x86_64-linux-gnu/qt6/QtCore -I/usr/include/x86_64-linux-gnu/qt6/QtQml"
+        qt_libs="-lQt6Core -lQt6Qml"
+        warn "  pkg-config for Qt6 not available; falling back to hard-coded paths."
+        warn "  If the build fails, install qt6-base-dev and rerun."
+    fi
+
+    # ── 3. Skip if up-to-date (idempotent) ──────────────────────────────────
+    local newer=0
+    for f in "$src_dir"/*.cpp "$src_dir"/*.h "$src_dir/qmldir"; do
+        if [ -f "$f" ] && [ ! -f "$out_so" -o "$f" -nt "$out_so" ]; then
+            newer=1
+            break
+        fi
+    done
+    if [ "$newer" = "0" ] && [ -f "$out_so" ]; then
+        info "  QML plugin already built and up-to-date."
+        return 0
+    fi
+
+    # ── 4. Build ────────────────────────────────────────────────────────────
+    local build_dir
+    build_dir=$(mktemp -d /tmp/pibrick-qs-plugin-XXXXXX)
+    info "  Building QML plugin in $build_dir (this takes ~5s the first time)..."
+    info "  cxx=$cxx  moc=$moc"
+
+    # Run moc on both headers; outputs are moc_<hdr>.cpp files. We include
+    # those moc_*.cpp outputs at the bottom of the matching .cpp file.
+    "$moc" -o "$build_dir/moc_pibrick-autorotation-util.cpp" \
+        "$src_dir/pibrick-autorotation-util.h" >/dev/null 2>&1 || {
+        warn "  moc failed for pibrick-autorotation-util.h"
+        rm -rf "$build_dir"
+        return 1
+    }
+    "$moc" -o "$build_dir/pibrick-autorotation-plugin.moc" \
+        "$src_dir/pibrick-autorotation-plugin.cpp" >/dev/null 2>&1 || {
+        warn "  moc failed for pibrick-autorotation-plugin.cpp"
+        rm -rf "$build_dir"
+        return 1
+    }
+
+    # Compile & link. -fPIC + -shared. We deliberately do not link against
+    # Qt6Widgets / Qt6Quick / Qt6Svg — only Core + Qml are needed.
+    if ! "$cxx" -fPIC -shared -std=c++17 \
+        -fvisibility=hidden \
+        $qt_cflags \
+        "$src_dir/pibrick-autorotation-plugin.cpp" \
+        "$src_dir/pibrick-autorotation-util.cpp" \
+        "$build_dir/moc_pibrick-autorotation-util.cpp" \
+        -o "$out_so" \
+        $qt_libs \
+        2>"$build_dir/build.log"; then
+        warn "  C++ build failed. Build log:"
+        sed 's/^/      /' "$build_dir/build.log" >&2
+        rm -rf "$build_dir"
+        return 1
+    fi
+
+    # ── 5. Install qmldir + .so into the QML module dir ────────────────────
+    mkdir -p "$qml_install_root"
+    safe_cp "$src_dir/qmldir" "$qml_install_root/qmldir"
+    chmod 644 "$out_so"
+    success "  QML plugin installed: $out_so"
+
+    # Drop a small README next to it so uninstall doesn't leave a mystery.
+    cat > "$qml_install_root/.pibrick-autorotation-source" <<EOF
+Built by autorotation-service/install.sh on $(date -u +%Y-%m-%dT%H:%M:%SZ).
+Source: $src_dir/
+Build cmd: $cxx -fPIC -shared -std=c++17 -fvisibility=hidden \\
+    $qt_cflags \\
+    pibrick-autorotation-plugin.cpp \\
+    pibrick-autorotation-util.cpp \\
+    moc_pibrick-autorotation-util.cpp \\
+    -o $out_so \\
+    $qt_libs
+EOF
+
+    rm -rf "$build_dir"
+    return 0
+}
 
 # ── Add Plasmoid to Panel Configuration ─────────────────────────────────────────
 add_plasmoid_to_panel() {

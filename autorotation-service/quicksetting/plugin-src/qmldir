@@ -1,0 +1,3 @@
+module org.kde.plasma.quicksetting.pibrick-autorotation
+plugin pibrick-autorotation-plugin
+classname PibrickAutorotationPlugin
