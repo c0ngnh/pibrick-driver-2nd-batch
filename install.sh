@@ -2291,6 +2291,10 @@ uninstall_autorotation() {
 		rm -rf "$HOME/.local/share/kservices5/pibrick-rotation-lock" 2>/dev/null || true
 		rm -f "$HOME/.local/share/dbus-1/services/com.pibrick.Autorotation.service" 2>/dev/null || true
 		rm -f /boot/firmware/overlays/pibrick-mma8451q.dtbo 2>/dev/null || true
+		# Remove SDDM config files created by autorotation-service
+		rm -f /etc/sddm.conf.d/10-pibrick.conf
+		rm -f /etc/sddm.conf.d/kde-plasmamobile.conf
+		rm -f /etc/sddm.conf.d/zz-pibrick-autorotation.conf
 		systemctl daemon-reload
 	fi
 

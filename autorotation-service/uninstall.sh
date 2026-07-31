@@ -76,4 +76,19 @@ info "Removing state files..."
 rm -f /var/lib/pibrick/autorotation.lock
 rm -f /var/lib/pibrick/autorotation.lock.type
 
+# Remove SDDM config files created by autorotation-service
+info "Removing SDDM config files..."
+rm -f /etc/sddm.conf.d/10-pibrick.conf
+rm -f /etc/sddm.conf.d/kde-plasmamobile.conf
+rm -f /etc/sddm.conf.d/zz-pibrick-autorotation.conf
+
+# Remove plasmoid and user services
+info "Removing plasmoid and user services..."
+for home in /home/*; do
+    rm -rf "$home/.local/share/kservices5/pibrick-rotation-lock" 2>/dev/null || true
+    rm -rf "$home/.local/share/plasma/plasmoids/pibrick-rotation-lock" 2>/dev/null || true
+    rm -f "$home/.local/share/dbus-1/services/com.pibrick.Autorotation.service" 2>/dev/null || true
+    rm -f "$home/.config/systemd/user/pibrick-rotation-ui.service" 2>/dev/null || true
+done
+
 info "Autorotation service uninstalled."
