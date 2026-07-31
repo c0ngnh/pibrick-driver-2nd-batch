@@ -91,6 +91,8 @@ INSTALL_BUTTON=
 INSTALL_AUTOROTATION=         # MMA8451Q accelerometer-based screen rotation
 INSTALL_KDE_MOBILE_DESKTOP=  # Enable SDDM + graphical.target (KDE Plasma prerequisite)
 INSTALL_PLASMA_MOBILE=       # KDE Plasma Mobile KWin fix (requires kde-mobile-desktop)
+INSTALL_PHOSH_PI5=            # libwlroots-0.18 Debian ABI fix for Phosh on Pi 5
+INSTALL_ZSH=                  # Oh My Zsh + Powerlevel10k (user-level)
 INSTALL_EXPLICIT=
 
 # ── Calibration functions (must be defined before use) ──────────────────────────
@@ -369,6 +371,8 @@ ${BOLD}Other Components:${RESET}
   kde-mobile-desktop      Enable SDDM + graphical.target (prerequisite for Plasma fixes)
   button           Button service (pibrickbtn over libgpiod)
   autorotation     Autorotation service (MMA8451Q accelerometer)
+  phosh-pi5        libwlroots-0.18 fix for Phosh (Pi 5; refuses to install on non-Phosh systems)
+  zsh              Oh My Zsh + Powerlevel10k for the active user
 
 ${BOLD}All Components:${RESET}
   all              Install display + battery-new + calibration + button
@@ -376,7 +380,7 @@ ${BOLD}All Components:${RESET}
 ${BOLD}Uninstall (requires root, prompts for typed YES):${RESET}
   $0 --uninstall <component[,component...]>    # Remove one or more components
   $0 --uninstall all                            # Remove everything pibrick-tools installed
-  Components: display, battery, calibration, upower, kde-mobile-desktop, button, autorotation, wrapper
+  Components: display, battery, calibration, upower, kde-mobile-desktop, button, autorotation, phosh-pi5, zsh, wrapper
 
 ${BOLD}Options:${RESET}
   --apply-calibration       Apply calibrated OCV table to installed driver
@@ -509,12 +513,14 @@ do_uninstall() {
 		*" $comp "*)
 			echo
 			echo -e "${BOLD}--- Removing $comp ---${RESET}"
-			# Hyphenated component names must map to underscored function names.
-			case "$comp" in
-				kde-mobile-desktop)  uninstall_kde_mobile_desktop || warn "Failed to remove $comp (continuing)" ;;
-				plasma-mobile-black-recent-fix) uninstall_plasma_mobile || warn "Failed to remove $comp (continuing)" ;;
-				*) uninstall_"$comp" || warn "Failed to remove $comp (continuing)" ;;
-			esac
+		# Hyphenated component names must map to underscored function names.
+		case "$comp" in
+			kde-mobile-desktop)  uninstall_kde_mobile_desktop || warn "Failed to remove $comp (continuing)" ;;
+			plasma-mobile-black-recent-fix) uninstall_plasma_mobile || warn "Failed to remove $comp (continuing)" ;;
+			phosh-pi5)           uninstall_phosh_pi5 || warn "Failed to remove $comp (continuing)" ;;
+			zsh)                 uninstall_zsh || warn "Failed to remove $comp (continuing)" ;;
+			*) uninstall_"$comp" || warn "Failed to remove $comp (continuing)" ;;
+		esac
 			;;
 		esac
 	done
@@ -814,6 +820,14 @@ while [ $# -gt 0 ]; do
 			INSTALL_PLASMA_MOBILE=1
 			INSTALL_EXPLICIT=1
 			;;
+		phosh-pi5)
+			INSTALL_PHOSH_PI5=1
+			INSTALL_EXPLICIT=1
+			;;
+		zsh)
+			INSTALL_ZSH=1
+			INSTALL_EXPLICIT=1
+			;;
 		*)
 			error "Unknown component: $comp"
 			usage
@@ -834,7 +848,7 @@ while [ $# -gt 0 ]; do
 		all)
 			UNINSTALL_TARGETS="$UNINSTALL_TARGETS display battery calibration upower kde-mobile-desktop plasma-mobile-black-recent-fix button autorotation wrapper"
 			;;
-		display|battery|calibration|upower|kde-mobile-desktop|button|autorotation|plasma-mobile-black-recent-fix|wrapper)
+		display|battery|calibration|upower|kde-mobile-desktop|button|autorotation|plasma-mobile-black-recent-fix|phosh-pi5|zsh|wrapper)
 			UNINSTALL_TARGETS="$UNINSTALL_TARGETS $comp"
 				;;
 			*)
@@ -2162,6 +2176,64 @@ uninstall_autorotation() {
 	success "Autorotation service uninstalled"
 }
 
+# ── Install Phosh-on-Pi5 libwlroots fix ────────────────────────────────────
+# Wraps extras/phosh-pi5/install.sh (which itself delegates to the original
+# fix-phosh-pi5.sh after checking that phosh / phoc is installed). The
+# wrapper requires root — that's the existing rule for the install system
+# and matches what the original fix script also requires.
+install_phosh_pi5() {
+	info "Installing Phosh-on-Pi5 libwlroots fix..."
+	local PHOSH_INSTALL="$PIBRICK_LIB/extras/phosh-pi5/install.sh"
+	if [ ! -f "$PHOSH_INSTALL" ]; then
+		error "phosh-pi5 install script not found (expected at $PHOSH_INSTALL)"
+		return 1
+	fi
+	# Run with any extra args forwarded (e.g. --boot-to-gdm).
+	bash "$PHOSH_INSTALL" "$@"
+}
+
+# ── Uninstall Phosh-on-Pi5 libwlroots fix ─────────────────────────────────
+# Releases the apt hold on libwlroots-0.18. Does NOT change boot behaviour
+# (GDM / phosh.service) — that's a user preference, not the fix.
+uninstall_phosh_pi5() {
+	info "Uninstalling Phosh-on-Pi5 libwlroots fix..."
+	local PHOSH_UNINSTALL="$PIBRICK_LIB/extras/phosh-pi5/uninstall.sh"
+	if [ -f "$PHOSH_UNINSTALL" ]; then
+		bash "$PHOSH_UNINSTALL"
+	else
+		warn "phosh-pi5 uninstall script not found; releasing hold manually..."
+		apt-mark unhold libwlroots-0.18 2>/dev/null || true
+	fi
+	success "Phosh-on-Pi5 fix uninstalled (apt hold released)"
+}
+
+# ── Install zsh + Oh My Zsh for the active user ────────────────────────────
+# The wrapper detects $SUDO_USER / loginctl / who and re-execs the inner
+# install-zsh.sh as that user, since the inner script refuses to run as
+# root. The outer install.sh always runs under sudo, so we do the
+# privilege drop here.
+install_zsh() {
+	info "Installing zsh + Oh My Zsh for the active user..."
+	local ZSH_INSTALL="$PIBRICK_LIB/extras/zsh/install.sh"
+	if [ ! -f "$ZSH_INSTALL" ]; then
+		error "zsh install script not found (expected at $ZSH_INSTALL)"
+		return 1
+	fi
+	bash "$ZSH_INSTALL" "$@"
+}
+
+# ── Uninstall zsh setup for the active user ───────────────────────────────
+uninstall_zsh() {
+	info "Uninstalling zsh setup for the active user..."
+	local ZSH_UNINSTALL="$PIBRICK_LIB/extras/zsh/uninstall.sh"
+	if [ -f "$ZSH_UNINSTALL" ]; then
+		bash "$ZSH_UNINSTALL"
+	else
+		warn "zsh uninstall script not found; skipping"
+	fi
+	success "zsh setup uninstalled"
+}
+
 # ── Reload drivers ─────────────────────────────────────────────────────────────
 reload_drivers() {
 	info "Reloading drivers..."
@@ -2236,7 +2308,7 @@ main() {
 	choose_components "$@"
 
 	# Copy source tree for all installs
-	if [ -n "$INSTALL_DISPLAY$INSTALL_BATTERY_NEW$INSTALL_BATTERY_ORIGINAL$INSTALL_CALIBRATION$INSTALL_BUTTON$INSTALL_AUTOROTATION" ]; then
+	if [ -n "$INSTALL_DISPLAY$INSTALL_BATTERY_NEW$INSTALL_BATTERY_ORIGINAL$INSTALL_CALIBRATION$INSTALL_BUTTON$INSTALL_AUTOROTATION$INSTALL_PHOSH_PI5$INSTALL_ZSH" ]; then
 		copy_sources
 	fi
 
@@ -2260,6 +2332,8 @@ main() {
 	[ -n "$INSTALL_PLASMA_MOBILE" ] && fix_plasma_mobile
 	[ -n "$INSTALL_BUTTON" ] && install_button
 	[ -n "$INSTALL_AUTOROTATION" ] && install_autorotation
+	[ -n "$INSTALL_PHOSH_PI5" ] && install_phosh_pi5
+	[ -n "$INSTALL_ZSH" ] && install_zsh
 
 	# Install the global /usr/local/bin/pibrick-tools wrapper so users
 	# don't have to remember the install.sh path under /usr/lib/pibrick/.
@@ -2285,6 +2359,8 @@ main() {
 	[ -n "$INSTALL_PLASMA_MOBILE" ] && echo "  - Plasma Mobile KWin fix"
 	[ -n "$INSTALL_BUTTON" ] && echo "  - Button service"
 	[ -n "$INSTALL_AUTOROTATION" ] && echo "  - Autorotation service (MMA8451Q accelerometer)"
+	[ -n "$INSTALL_PHOSH_PI5" ] && echo "  - Phosh-on-Pi5 libwlroots ABI fix"
+	[ -n "$INSTALL_ZSH" ] && echo "  - zsh + Oh My Zsh + Powerlevel10k (for the active user)"
 	echo
 	echo "Use \`pibrick-tools\` for everything from now on:"
 	echo "  sudo pibrick-tools --battery-status"

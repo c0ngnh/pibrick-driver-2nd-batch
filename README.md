@@ -13,6 +13,7 @@ Kernel modules and user-space helpers for the piBrick CM5 handheld (Raspberry Pi
 | Calibration | `battery/battery-calibration-logger.py`, `battery/battery-auto-calibrator.py` | Automatic battery OCV calibration service |
 | Autorotation | `autorotation-service/` | MMA8451Q accelerometer-based automatic screen rotation |
 | Plasma Mobile | `install.sh` | KWin black-Recent/fix (kde-mobile-desktop) + charging state (upower) on Pi V3D |
+| Extras | `extras/` | Optional install components (Phosh-on-Pi5 libwlroots fix, Oh My Zsh setup) |
 
 This repository bundles the display, touch, battery, button, and desktop pieces into a single installable tree, targeting **Raspberry Pi OS on kernel 6.18** with **GNOME 48 (Wayland)** or **KDE Plasma Mobile**.
 
@@ -454,6 +455,8 @@ The new **interactive installer** provides a user-friendly menu for selecting co
 | `--install upower` | UPower KDE charging-state fix |
 | `--install button` | Button service |
 | `--install autorotation` | MMA8451Q accelerometer autorotation |
+| `--install phosh-pi5` | libwlroots-0.18 fix for Phosh on Pi 5 (refuses to install on non-Phosh systems) |
+| `--install zsh` | Oh My Zsh + Powerlevel10k for the active user |
 | `--enable-calibration` | Start calibration logging |
 | `--disable-calibration` | Stop calibration logging |
 | `--apply-calibration` | Apply calibrated OCV table |
@@ -937,6 +940,60 @@ ZINK_FALLBACK=1 sudo pibrick-tools --install kde-mobile-desktop
 ```
 
 This adds `MESA_LOADER_DRIVER_OVERRIDE=zink` to a second drop-in. It has higher CPU usage.
+
+---
+
+## Extras
+
+A small collection of optional install components that don't fit the core
+piBrick driver pipeline but are useful for getting a fresh image ready to
+develop on. They live under `extras/` and are wired into the same
+`pibrick-tools --install <component>` interface as the main components.
+
+### `phosh-pi5` — libwlroots-0.18 fix for Phosh on Pi 5
+
+Fixes the Debian-vs-Raspberry-Pi-OS ABI mismatch in `libwlroots-0.18`
+that breaks the Phosh compositor (`phoc`) on Raspberry Pi 5. Installs
+the Debian build of `libwlroots-0.18` matching phoc's ABI and holds it
+so `apt upgrade` does not replace it with the Pi fork.
+
+**Precondition: phosh / phoc must be installed.** The wrapper script
+checks for `phoc` and refuses to install on a system where Phosh is
+not present — installing the Debian libwlroots on a non-Phosh system
+would replace the Pi-forked library that KWin / mutter rely on, and
+would break the existing compositor.
+
+```bash
+sudo pibrick-tools --install phosh-pi5     # interactive boot-mode prompt
+sudo pibrick-tools --uninstall phosh-pi5   # releases the apt hold
+```
+
+Uninstall releases the apt hold but does **not** change boot behaviour
+(GDM / phosh.service). Re-run the install with a different boot-mode
+flag if you want to change that.
+
+See `extras/phosh-pi5/README.md` for full details.
+
+### `zsh` — Oh My Zsh + Powerlevel10k for the active user
+
+Installs [Oh My Zsh](https://ohmyz.sh/), the Powerlevel10k theme,
+and the `zsh-autosuggestions` / `zsh-syntax-highlighting` plugins.
+Switches the user's default login shell to zsh.
+
+The original installer refuses to run as root because it manipulates
+`$HOME` files and `chsh`. Our wrapper detects the active user via
+`$SUDO_USER` → `loginctl` → `who` (first non-root) and re-execs the
+inner script under `sudo -u <user>` so the user sees the right
+`$USER`, `$HOME`, and `EUID`.
+
+```bash
+sudo pibrick-tools --install zsh     # run from an interactive sudo session
+sudo pibrick-tools --uninstall zsh   # restores bash, removes ~/.oh-my-zsh
+```
+
+Uninstall renames the existing `~/.zshrc` to
+`~/.zshrc.pibrick-backup-<timestamp>` so any previous config can be
+recovered. See `extras/zsh/README.md`.
 
 ---
 

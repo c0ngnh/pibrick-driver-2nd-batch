@@ -28,6 +28,7 @@ _pibrick_tools() {
 		"calibration" "upower"
 		"kde-mobile-desktop" "plasma-mobile-black-recent-fix"
 		"button" "autorotation"
+		"phosh-pi5" "zsh"
 	)
 
 	# Sub-params you can pass to --battery-config <param>
