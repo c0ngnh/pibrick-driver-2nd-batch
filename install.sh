@@ -462,10 +462,10 @@ do_uninstall() {
 		battery)    { ! lsmod 2>/dev/null | grep -q bq25890_battery && [ ! -f /etc/modprobe.d/pibrick-battery.conf ] && [ ! -f /etc/systemd/system/pibrick-battery-load-soc.service ]; } && missing="$missing battery" ;;
 		calibration) [ ! -f /etc/systemd/system/pibrick-battery-calibration.service ] && missing="$missing calibration" ;;
 		upower)     { [ ! -f /usr/libexec/upowerd ] && [ ! -f /usr/lib/upower/upowerd ]; } && missing="$missing upower" ;;
-		kde-mobile-desktop)  { [ ! -f /etc/sddm.conf.d/kde-plasma-mobile.conf ] && [ ! -f "$HOME/.config/systemd/user/plasma-kwin_wayland.service.d/pi-kwin-recent-fix.conf" ]; } && missing="$missing kde-mobile-desktop" ;;
+		kde-mobile-desktop)  { [ ! -f /etc/sddm.conf.d/kde-plasma-mobile.conf ] && [ ! -f "$ORIG_HOME/.config/systemd/user/plasma-kwin_wayland.service.d/pi-kwin-recent-fix.conf" ]; } && missing="$missing kde-mobile-desktop" ;;
 		button)     { [ ! -f /usr/local/bin/pibrickbtn ] && [ ! -f /etc/systemd/system/pibrickbtn.service ]; } && missing="$missing button" ;;
 		autorotation) { [ ! -f /usr/lib/pibrick/autorotation-service/pibrick-autorotation.sh ] && [ ! -f /usr/local/bin/pibrick-autorotation.sh ] && [ ! -f /etc/systemd/system/pibrick-autorotation.service ]; } && missing="$missing autorotation" ;;
-		plasma-mobile-black-recent-fix) [ ! -d "$HOME/.config/systemd/user/plasma-kwin_wayland.service.d" ] && missing="$missing plasma-mobile-black-recent-fix" ;;
+		plasma-mobile-black-recent-fix) [ ! -d "$ORIG_HOME/.config/systemd/user/plasma-kwin_wayland.service.d" ] && missing="$missing plasma-mobile-black-recent-fix" ;;
 		wrapper)    [ ! -f /usr/local/bin/pibrick-tools ] && missing="$missing wrapper" ;;
 		esac
 	done
@@ -1649,9 +1649,8 @@ install_kde_mobile_desktop() {
 	for dir in /usr/share/xsessions /usr/share/wayland-sessions; do
 		for f in "$dir"/plasma-mobile*.desktop "$dir"/plasma-mobile.desktop; do
 			[ -f "$f" ] || continue
-			# Extract session name from Desktop Entry (e.g. Plasma Mobile)
-			plasma_mobile_session=$(awk -F= '$1=="Name"{print $2; exit}' "$f" 2>/dev/null)
-			plasma_mobile_session="${plasma_mobile_session:-plasma-mobile}"
+			# SDDM Session= needs the filename, not the human-readable Name=
+			plasma_mobile_session=$(basename "$f")
 			info "Found Plasma Mobile session: $plasma_mobile_session ($f)"
 			break 2
 		done
@@ -1662,7 +1661,7 @@ install_kde_mobile_desktop() {
 		cat > "$sddm_conf" << SDDMEOF
 [General]
 # piBrick: default to Plasma Mobile session
-Session=$plasma_mobile_session.desktop
+		Session=$plasma_mobile_session
 
 [Autologin]
 # piBrick: disable auto-login; let SDDM greeter prompt for user selection
@@ -1820,6 +1819,9 @@ uninstall_kde_mobile_desktop() {
 
 	# Remove the SDDM default-session config
 	rm -f /etc/sddm.conf.d/kde-plasma-mobile.conf
+	# Also clean up the old broken 10-pibrick.conf from autorotation-service
+	rm -f /etc/sddm.conf.d/10-pibrick.conf
+	rm -f /etc/sddm.conf.d/kde-plasmamobile.conf
 
 	# Unmask any display managers we masked during install so the user can
 	# manually re-enable their preferred one.
@@ -2287,9 +2289,13 @@ uninstall_autorotation() {
 		rm -f /var/lib/pibrick/autorotation.lock
 		rm -f /var/lib/pibrick/autorotation.lock.type
 		rmdir /usr/lib/pibrick/autorotation-service 2>/dev/null || true
-		# Remove plasmoid
-		rm -rf "$HOME/.local/share/kservices5/pibrick-rotation-lock" 2>/dev/null || true
-		rm -f "$HOME/.local/share/dbus-1/services/com.pibrick.Autorotation.service" 2>/dev/null || true
+		# Remove plasmoid (iterate all user homes to avoid hardcoding a username)
+		for home in /home/*; do
+			rm -rf "$home/.local/share/kservices5/pibrick-rotation-lock" 2>/dev/null || true
+			rm -rf "$home/.local/share/plasma/plasmoids/pibrick-rotation-lock" 2>/dev/null || true
+			rm -f "$home/.local/share/dbus-1/services/com.pibrick.Autorotation.service" 2>/dev/null || true
+			rm -f "$home/.config/systemd/user/pibrick-rotation-ui.service" 2>/dev/null || true
+		done
 		rm -f /boot/firmware/overlays/pibrick-mma8451q.dtbo 2>/dev/null || true
 		# Remove SDDM config files created by autorotation-service
 		rm -f /etc/sddm.conf.d/10-pibrick.conf

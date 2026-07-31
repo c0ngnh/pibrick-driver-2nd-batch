@@ -568,8 +568,8 @@ main() {
     log "Starting pibrick-autorotation service"
     log "Based on piBrick AOSP17 V6 by Sconioo"
 
-    if [ "$(id -u)" != "0" ] && [ "$(id -u)" != "1000" ]; then
-        error "Must be run as root or user congn"
+    if [ "$(id -u)" != "0" ] && [ "$(id -u)" -gt 1000 ] 2>/dev/null; then
+        error "Must be run as root or a regular user (UID > 1000)"
         exit 1
     fi
 
