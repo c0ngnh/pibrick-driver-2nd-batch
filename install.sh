@@ -393,7 +393,7 @@ ${BOLD}Options:${RESET}
                                 --force            Bypass safety checks (coulomb_uah)
                                 --show             Show all current values
                                 --list             List all parameters
-  --install kde-mobile-desktop     Enable SDDM + graphical.target (run before upower / plasma-mobile-black-recent-fix fixes)
+  --install kde-mobile-desktop     Install kde-standard + sddm + enable graphical.target (no fancy preconfig)
   --install autorotation    Install autorotation service (MMA8451Q accelerometer)
   --enable-autorotation     Enable and start autorotation service
   --disable-autorotation    Stop and disable autorotation service
@@ -462,7 +462,7 @@ do_uninstall() {
 		battery)    { ! lsmod 2>/dev/null | grep -q bq25890_battery && [ ! -f /etc/modprobe.d/pibrick-battery.conf ] && [ ! -f /etc/systemd/system/pibrick-battery-load-soc.service ]; } && missing="$missing battery" ;;
 		calibration) [ ! -f /etc/systemd/system/pibrick-battery-calibration.service ] && missing="$missing calibration" ;;
 		upower)     { [ ! -f /usr/libexec/upowerd ] && [ ! -f /usr/lib/upower/upowerd ]; } && missing="$missing upower" ;;
-		kde-mobile-desktop)  { [ ! -f /etc/sddm.conf.d/kde-plasma-mobile.conf ] && [ ! -f "$ORIG_HOME/.config/systemd/user/plasma-kwin_wayland.service.d/pi-kwin-recent-fix.conf" ]; } && missing="$missing kde-mobile-desktop" ;;
+		kde-mobile-desktop)  { ! command -v sddm >/dev/null 2>&1 && [ ! -f /etc/sddm.conf ]; } && missing="$missing kde-mobile-desktop" ;;
 		button)     { [ ! -f /usr/local/bin/pibrickbtn ] && [ ! -f /etc/systemd/system/pibrickbtn.service ]; } && missing="$missing button" ;;
 		autorotation) { [ ! -f /usr/lib/pibrick/autorotation-service/pibrick-autorotation.sh ] && [ ! -f /usr/local/bin/pibrick-autorotation.sh ] && [ ! -f /etc/systemd/system/pibrick-autorotation.service ]; } && missing="$missing autorotation" ;;
 		plasma-mobile-black-recent-fix) [ ! -d "$ORIG_HOME/.config/systemd/user/plasma-kwin_wayland.service.d" ] && missing="$missing plasma-mobile-black-recent-fix" ;;
@@ -1170,7 +1170,8 @@ fix_upower() {
 
 	info "Patching UPower (rebuild from source)..."
 	local UPVER
-	UPVER=$(upower --version 2>/dev/null | grep '^UPower daemon' | awk '{print $NF}' | tr -d '\n')
+	# Capture upower version; tolerate empty/upstream-format changes (pipefail-safe).
+	UPVER=$(upower --version 2>/dev/null | grep '^UPower daemon' | awk '{print $NF}' | tr -d '\n' || true)
 	[ -z "$UPVER" ] && UPVER="unknown"
 	info "UPower daemon version: $UPVER"
 
@@ -1509,120 +1510,60 @@ ZINKDIS
 }
 
 # ── Install KDE desktop ─────────────────────────────────────────────────────────
-# Detects installed packages, prompts to install via apt, enables SDDM and
-# graphical.target, then applies the Plasma Mobile KWin fix.
+# Minimal installer: install required packages, enable SDDM, set graphical.target.
+# No fancy preconfigure — default SDDM session selection, default KWin settings.
+# Users pick their session on first login at the SDDM greeter.
 install_kde_mobile_desktop() {
 	info "Setting up KDE desktop..."
-
-	# ── Derive the desktop user ────────────────────────────────────────────────
-	local desk_user=""
-	if [ -n "${SUDO_USER:-}" ] && [ "$(id -un)" = "root" ]; then
-		desk_user="$SUDO_USER"
-	elif command -v loginctl >/dev/null 2>&1; then
-		desk_user=$(loginctl show-session \
-			"$(loginctl | grep -E '^\s*c[0-9]+' | head -1 | awk '{print $1}' 2>/dev/null)" \
-			-p User --value 2>/dev/null)
-		desk_user="${desk_user:-$(who | head -1 | awk '{print $1}')}"
-	else
-		desk_user=$(who | head -1 | awk '{print $1}')
-	fi
-	[ -z "$desk_user" ] && { error "Cannot determine desktop user."; return 1; }
-
-	local desk_home
-	desk_home=$(getent passwd "$desk_user" | cut -d: -f6)
-	desk_home="${desk_home:-/home/$desk_user}"
 
 	# ── Detect installed packages ───────────────────────────────────────────────
 	local have_plasma_mobile=0
 	local have_kde_standard=0
 	local have_sddm=0
 
-	if dpkg -l plasma-mobile 2>/dev/null | grep -q "^ii "; then
-		have_plasma_mobile=1
-		info "plasma-mobile package: installed"
-	else
-		info "plasma-mobile package: not installed"
-	fi
+	dpkg -l plasma-mobile 2>/dev/null | grep -q "^ii " && have_plasma_mobile=1
+	dpkg -l kde-standard  2>/dev/null | grep -q "^ii " && have_kde_standard=1
+	dpkg -l sddm           2>/dev/null | grep -q "^ii " && have_sddm=1
 
-	if dpkg -l kde-standard 2>/dev/null | grep -q "^ii "; then
-		have_kde_standard=1
-		info "kde-standard package: installed"
-	else
-		info "kde-standard package: not installed"
-	fi
+	[ "$have_plasma_mobile" = "1" ] && info "plasma-mobile: installed"  || info "plasma-mobile: not installed"
+	[ "$have_kde_standard"  = "1" ] && info "kde-standard: installed"   || info "kde-standard: not installed"
+	[ "$have_sddm"          = "1" ] && info "sddm: installed"           || info "sddm: not installed"
 
-	if dpkg -l sddm 2>/dev/null | grep -q "^ii "; then
-		have_sddm=1
-		info "sddm package: installed"
-	else
-		info "sddm package: not installed"
-	fi
-
-	# ── Offer to install missing packages ──────────────────────────────────────
+	# ── Install missing packages ────────────────────────────────────────────────
 	if [ "$have_plasma_mobile" = "0" ] || [ "$have_kde_standard" = "0" ] || [ "$have_sddm" = "0" ]; then
 		echo
-		echo -e "${BOLD}Missing packages detected:${RESET}"
-		[ "$have_plasma_mobile" = "0" ] && echo "  - plasma-mobile (apt package)"
-		[ "$have_kde_standard" = "0" ] && echo "  - kde-standard"
-		[ "$have_sddm" = "0" ] && echo "  - sddm"
+		echo "Missing packages: plasma-mobile, kde-standard, sddm (~1.3 GB download)"
 		echo
-		echo "Would you like to install these packages now?"
-		echo "(This requires ~1-2 GB of downloads and may take a while.)"
-
 		if [ -t 0 ]; then
-			printf "Install packages? [Y/n]: " >&2
 			local pkgs_reply
-			read -r pkgs_reply || pkgs_reply="y"
-			case "${pkgs_reply,,}" in
-				n|no)
-					info "Skipping package installation."
-					echo "Install manually, then re-run: sudo pibrick-tools --install kde-mobile-desktop"
-					return 1
-					;;
-				*)
-					install_plasma_packages "$have_plasma_mobile" "$have_kde_standard" "$have_sddm" "$desk_user"
-					;;
-			esac
+			read -r -p "Install packages? [Y/n]: " pkgs_reply || pkgs_reply="y"
+			if [[ "${pkgs_reply,,}" == "n" || "${pkgs_reply,,}" == "no" ]]; then
+				info "Skipping package installation."
+				return 1
+			fi
 		else
 			info "Non-interactive mode — installing packages automatically."
-			install_plasma_packages "$have_plasma_mobile" "$have_kde_standard" "$have_sddm" "$desk_user"
 		fi
+		install_plasma_packages "$have_plasma_mobile" "$have_kde_standard" "$have_sddm" || return 1
 	else
 		info "All required packages already installed."
 	fi
 
-	# ── Enable SDDM and set graphical target ───────────────────────────────────
-	# If the system is currently running lightdm (the Raspbian Desktop default),
-	# we must stop and disable it — otherwise both lightdm and SDDM fight over
-	# the VT and only one can win. Also set Plasma Mobile as the default
-	# session so the next boot logs in directly without user interaction.
-	info "Configuring SDDM as the default display manager..."
-
-	# Stop any active display manager first (safe to call even if not running).
-	for dm in lightdm sddm gdm3 lxdm; do
-		if systemctl is-active --quiet "$dm" 2>/dev/null; then
-			if [ "$dm" != "sddm" ]; then
-				info "Stopping active display manager: $dm"
-				systemctl stop "$dm" 2>/dev/null || true
-				systemctl disable "$dm" 2>/dev/null || true
-				# Mask so systemd doesn't auto-restart it on boot.
-				systemctl mask "$dm" 2>/dev/null || true
-			fi
-		else
-			# Disable for boot even if not currently running.
-			if [ "$dm" != "sddm" ]; then
-				systemctl disable "$dm" 2>/dev/null || true
-				systemctl mask "$dm" 2>/dev/null || true
-			fi
-		fi
+	# ── Stop / disable any other display manager (lightdm on Raspbian) ──────────
+	# Two DMs fighting over VT1 is the most common cause of boot loops.
+	for dm in lightdm gdm3 lxdm; do
+		systemctl disable "$dm" 2>/dev/null || true
+		systemctl stop "$dm" 2>/dev/null || true
+		systemctl mask "$dm" 2>/dev/null || true
 	done
-
 	systemctl daemon-reload
 
-	# Enable SDDM
-	info "Enabling and starting SDDM..."
-	systemctl enable sddm 2>/dev/null || true
+	# ── Enable SDDM ────────────────────────────────────────────────────────────
+	info "Enabling SDDM..."
 	systemctl unmask sddm 2>/dev/null || true
+	systemctl enable sddm 2>/dev/null || true
+	# Don't try to start SDDM if we're already in a graphical session —
+	# it would steal the VT. Wait for the next reboot.
 	if [ -z "${WAYLAND_DISPLAY:-}" ] && [ -z "${DISPLAY:-}" ]; then
 		systemctl start sddm 2>/dev/null || \
 			warn "Could not start SDDM now. Reboot to activate."
@@ -1630,7 +1571,7 @@ install_kde_mobile_desktop() {
 		info "SDDM will be active after next reboot."
 	fi
 
-	# Set default target
+	# ── Set default target ──────────────────────────────────────────────────────
 	local current_target
 	current_target=$(systemctl get-default 2>/dev/null || echo "unknown")
 	if [ "$current_target" != "graphical.target" ]; then
@@ -1638,134 +1579,20 @@ install_kde_mobile_desktop() {
 		systemctl set-default graphical.target 2>/dev/null || \
 			warn "Could not set default target. Run: sudo systemctl set-default graphical.target"
 	else
-		info "Default target already set to graphical.target."
+		info "Default target already graphical.target."
 	fi
-
-	# ── Set Plasma Mobile as default SDDM session ───────────────────────────────
-	# Write SDDM.conf so the Plasma Mobile Wayland session is pre-selected
-	# at the SDDM greeter. The session name varies by install; detect it.
-	local sddm_conf="/etc/sddm.conf.d/kde-plasma-mobile.conf"
-	local plasma_mobile_session=""
-	for dir in /usr/share/xsessions /usr/share/wayland-sessions; do
-		for f in "$dir"/plasma-mobile*.desktop "$dir"/plasma-mobile.desktop; do
-			[ -f "$f" ] || continue
-			# SDDM Session= needs the filename, not the human-readable Name=
-			plasma_mobile_session=$(basename "$f")
-			info "Found Plasma Mobile session: $plasma_mobile_session ($f)"
-			break 2
-		done
-	done
-
-	if [ -n "$plasma_mobile_session" ]; then
-		install -d -m 755 /etc/sddm.conf.d
-		cat > "$sddm_conf" << SDDMEOF
-[General]
-# piBrick: default to Plasma Mobile session
-		Session=$plasma_mobile_session
-
-[Autologin]
-# piBrick: disable auto-login; let SDDM greeter prompt for user selection
-User=
-Session=
-SDDMEOF
-		success "SDDM configured: Plasma Mobile ($plasma_mobile_session) is the default session."
-		
-		# ── Disable OS-level auto-login ────────────────────────────────────────────
-		# Raspbian/piOS images may have auto-login configured in lightdm.conf
-		# or via raspi-config. Remove any such settings.
-		info "Disabling OS-level auto-login settings..."
-		
-		# Remove lightdm autologin if it exists (Raspbian default)
-		if [ -f /etc/lightdm/lightdm.conf ]; then
-			if grep -q "^autologin-user=" /etc/lightdm/lightdm.conf 2>/dev/null; then
-				sed -i 's/^autologin-user=.*/autologin-user=/' /etc/lightdm/lightdm.conf
-				info "Disabled autologin in lightdm.conf"
-			fi
-		fi
-		
-		# Disable raspi-config autologin if it was enabled
-		if command -v raspi-config >/dev/null 2>&1; then
-			# raspi-config stores boot behavior in /boot/cmdline.txt or via systemctl
-			# Check if auto-login is enabled via getty
-			if systemctl is-enabled getty@tty1.service 2>/dev/null | grep -q "enabled"; then
-				# Check for autologin getty
-				if systemctl is-enabled autologin@tty1.service 2>/dev/null | grep -q "enabled"; then
-					systemctl disable autologin@tty1.service 2>/dev/null || true
-					systemctl enable getty@tty1.service 2>/dev/null || true
-					info "Disabled console autologin (using standard getty)"
-				fi
-			fi
-		fi
-		
-		# Ensure no other sddm configs have autologin
-		for conf in /etc/sddm.conf /etc/sddm.conf.d/*.conf; do
-			[ -f "$conf" ] || continue
-			[ "$conf" = "$sddm_conf" ] && continue
-			if grep -qi "^autologin-user=" "$conf" 2>/dev/null; then
-				sed -i 's/^autologin-user=.*/autologin-user=/i' "$conf"
-				sed -i 's/^autologin-session=.*/autologin-session=/i' "$conf"
-				info "Cleared autologin in $conf"
-			fi
-		done
-	else
-		warn "Could not detect Plasma Mobile session files."
-		warn "You may need to manually select the Plasma Mobile session in SDDM."
-	fi
-
-	# ── Write the KWin drop-in ────────────────────────────────────────────────
-	local zink_flag="${ZINK_FALLBACK:-0}"
-
-	local drop_in_dir="$desk_home/.config/systemd/user/plasma-kwin_wayland.service.d"
-	local fix_conf="$drop_in_dir/pi-kwin-recent-fix.conf"
-	local zink_conf="$drop_in_dir/pi-kwin-zink-fallback.conf"
-	local zink_disabled="$drop_in_dir/pi-kwin-zink-fallback.conf.disabled"
-
-	install -d -m 755 "$drop_in_dir"
-
-	cat > "$fix_conf" << 'PLASMAFIX'
-[Service]
-# Fix black screen in mobile task switcher / overview on Raspberry Pi (KDE bug 519099)
-Environment=KWIN_DRM_USE_MODIFIERS=0
-Environment=KWIN_COMPOSE=O2ES
-Environment=KWIN_PERSISTENT_VBO=1
-Environment=KWIN_RENDER_BACKEND=gles
-Environment=KWIN_OPENGL_INTERFACE=egl
-PLASMAFIX
-
-	if [ "$zink_flag" = "1" ]; then
-		cat > "$zink_conf" << 'ZINKFIX'
-[Service]
-# Fallback when OpenGL ES alone is not enough (higher CPU usage).
-Environment=MESA_LOADER_DRIVER_OVERRIDE=zink
-ZINKFIX
-		rm -f "$zink_disabled"
-		info "Zink fallback enabled (software Vulkan via Mesa)."
-	else
-		rm -f "$zink_conf"
-		cat > "$zink_disabled" << 'ZINKDIS'
-# Optional fallback if OpenGL ES alone is not enough (higher CPU usage).
-# Enable with: ZINK_FALLBACK=1 sudo pibrick-tools --install kde-mobile-desktop
-[Service]
-Environment=MESA_LOADER_DRIVER_OVERRIDE=zink
-ZINKDIS
-		info "Zink fallback left disabled (set ZINK_FALLBACK=1 to enable)."
-	fi
-
-	su - "$desk_user" -c 'systemctl --user daemon-reload' 2>/dev/null || true
 
 	success "KDE desktop setup complete."
 	echo
 	echo "Reboot to start the Plasma Mobile session via SDDM."
 	echo "  sudo reboot"
 	echo
-	echo "After login, verify the compositor:"
-	echo "  qdbus6 org.kde.KWin /KWin org.kde.KWin.supportInformation | grep -i compositing"
-	echo "  Expected: Compositing Type: OpenGL ES 2.0"
+	echo "Pick the Plasma Mobile session at the SDDM greeter on first login."
 }
 
 # ── Install Plasma Mobile packages ────────────────────────────────────────────────
 install_plasma_packages() {
-	local have_pm=$1 have_ks=$2 have_sd=$3 desk_user=$4
+	local have_pm=$1 have_ks=$2 have_sd=$3
 
 	info "Installing Plasma Mobile packages (requires network)..."
 	info "This may take a while on first run as it downloads ~1-2 GB of packages."

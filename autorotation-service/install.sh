@@ -575,34 +575,40 @@ else
 fi
 
 # Install systemd service with user/policy substituted
-# Resolve the real desktop user so the service runs as the correct UID.
-local autorot_user=""
-if [ -n "${SUDO_USER:-}" ] && [ "$(id -un)" = "root" ]; then
-    autorot_user="$SUDO_USER"
-else
-    autorot_user=$(loginctl list-sessions --no-legend 2>/dev/null | \
-        awk 'NR>1 && $3 != "root" {print $3; exit}')
-    [ -z "$autorot_user" ] && autorot_user=$(who 2>/dev/null | awk '{print $1}' | grep -v '^root$' | head -1)
-fi
-[ -z "$autorot_user" ] && autorot_user="root"
+install_systemd_service() {
+    # Resolve the real desktop user so the service runs as the correct UID.
+    local autorot_user=""
+    if [ -n "${SUDO_USER:-}" ] && [ "$(id -un)" = "root" ]; then
+        autorot_user="$SUDO_USER"
+    else
+        autorot_user=$(loginctl list-sessions --no-legend 2>/dev/null | \
+            awk 'NR>0 && $3 != "" && $3 != "root" && $6 != "manager" {print $3; exit}')
+        [ -z "$autorot_user" ] && autorot_user=$(who 2>/dev/null | awk '{print $1}' | grep -v '^root$' | head -1)
+    fi
+    [ -z "$autorot_user" ] && autorot_user="root"
 
-local autorot_uid
-autorot_uid=$(id -u "$autorot_user" 2>/dev/null || echo "1000")
-local autorot_home
-autorot_home=$(getent passwd "$autorot_user" 2>/dev/null | cut -d: -f6)
-autorot_home="${autorot_home:-/home/$autorot_user}"
+    local autorot_uid
+    autorot_uid=$(id -u "$autorot_user" 2>/dev/null)
+    if [ -z "$autorot_uid" ]; then
+        autorot_uid=1000
+    fi
+    local autorot_home
+    autorot_home=$(getent passwd "$autorot_user" 2>/dev/null | cut -d: -f6)
+    autorot_home="${autorot_home:-/home/$autorot_user}"
 
-# Substitute User, Group, HOME, USER, and UID-specific paths in the service file
-sed -e "s|^User=congn$|User=$autorot_user|" \
-    -e "s|^Group=congn$|Group=$autorot_user|" \
-    -e "s|Environment=USER=congn$|Environment=USER=$autorot_user|" \
-    -e "s|Environment=HOME=/home/congn$|Environment=HOME=$autorot_home|" \
-    -e "s|Environment=XDG_RUNTIME_DIR=/run/user/1000$|Environment=XDG_RUNTIME_DIR=/run/user/$autorot_uid|" \
-    -e "s|Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus$|Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$autorot_uid/bus|" \
-    "$SCRIPT_DIR/pibrick-autorotation.service" \
-    > /etc/systemd/system/pibrick-autorotation.service
-chmod 644 /etc/systemd/system/pibrick-autorotation.service
-info "  pibrick-autorotation.service installed (user=$autorot_user uid=$autorot_uid)"
+    # Substitute User, Group, HOME, USER, and UID-specific paths in the service file
+    sed -e "s|^User=congn$|User=$autorot_user|" \
+        -e "s|^Group=congn$|Group=$autorot_user|" \
+        -e "s|Environment=USER=congn$|Environment=USER=$autorot_user|" \
+        -e "s|Environment=HOME=/home/congn$|Environment=HOME=$autorot_home|" \
+        -e "s|Environment=XDG_RUNTIME_DIR=/run/user/1000$|Environment=XDG_RUNTIME_DIR=/run/user/$autorot_uid|" \
+        -e "s|Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus$|Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$autorot_uid/bus|" \
+        "$SCRIPT_DIR/pibrick-autorotation.service" \
+        > /etc/systemd/system/pibrick-autorotation.service
+    chmod 644 /etc/systemd/system/pibrick-autorotation.service
+    info "  pibrick-autorotation.service installed (user=$autorot_user uid=$autorot_uid)"
+}
+install_systemd_service
 
 # ── Disable KWin built-in auto-rotation ────────────────────────────────────────
 disable_kwin_auto_rotation() {
@@ -675,57 +681,12 @@ disable_kwin_auto_rotation
 # Reload systemd
 systemctl daemon-reload
 
-# ── Configure SDDM for Plasma Mobile ─────────────────────────────────────────────
-configure_sddm() {
-    info "Configuring SDDM for Plasma Mobile..."
-
-    # Detect the actual Plasma Mobile session .desktop filename at runtime.
-    local sddm_conf_dir="/etc/sddm.conf.d"
-    local sddm_conf="$sddm_conf_dir/kde-plasma-mobile.conf"
-    local plasma_mobile_session=""
-    for dir in /usr/share/xsessions /usr/share/wayland-sessions; do
-        for f in "$dir"/plasma-mobile*.desktop "$dir"/plasma-mobile.desktop; do
-            [ -f "$f" ] || continue
-            # Extract the filename without the directory path
-            plasma_mobile_session=$(basename "$f")
-            info "  Found Plasma Mobile session: $plasma_mobile_session"
-            break 2
-        done
-    done
-
-    # Only create the SDDM config if kde-mobile-desktop hasn't already created it.
-    # SDDM reads configs alphabetically; our config should come after kde-mobile-desktop's
-    # so we use "zz-" prefix. If the session was already configured, skip entirely.
-    if [ -n "$plasma_mobile_session" ]; then
-        if [ -f "$sddm_conf" ]; then
-            info "  SDDM already configured by kde-mobile-desktop ($sddm_conf)"
-        else
-            mkdir -p "$sddm_conf_dir"
-            cat > "$sddm_conf_dir/zz-pibrick-autorotation.conf" << SDDMEOF
-# piBrick autorotation SDDM config
-# Created by autorotation-service/install.sh
-
-[General]
-# piBrick: default to Plasma Mobile session
-Session=$plasma_mobile_session
-HaltCommand=/usr/bin/systemctl poweroff
-RebootCommand=/usr/bin/systemctl reboot
-
-[Autologin]
-# piBrick: no auto-login; let SDDM greeter prompt for user selection
-User=
-Session=
-SDDMEOF
-            info "  SDDM configured: default session=$plasma_mobile_session (no autologin)"
-        fi
-        fi
-    else
-        warn "  Could not detect Plasma Mobile session file"
-        warn "  SDDM not configured by autorotation-service"
-    fi
-}
-
-configure_sddm
+# Note: SDDM default session is left at distro defaults. The plasma-mobile
+# session is available in the wayland-sessions directory and the user can
+# pick it at the SDDM greeter on first login. Previously we wrote a
+# /etc/sddm.conf.d/zz-pibrick-autorotation.conf to pre-select it; that
+# overrode the user's preference and prevented easy switching back to
+# another session. Skip it now and let the greeter show the default.
 
 # ── Enable and Start Service ────────────────────────────────────────────────────
 
