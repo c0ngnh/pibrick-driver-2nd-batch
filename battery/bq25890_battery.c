@@ -841,15 +841,53 @@ static bool bq25890_is_actively_charging(struct bq25890_device *bq,
 	if (!bq25890_has_external_power(bq, state))
 		return false;
 
-	if (state->chrg_status == STATUS_NOT_CHARGING ||
-	    state->chrg_status == STATUS_TERMINATION_DONE)
+	if (state->chrg_status == STATUS_TERMINATION_DONE)
 		return false;
 
+	/*
+	 * The PMIC's CHRG_STATUS register doesn't always reflect real
+	 * battery activity: during input-current regulation, DPM, recharge
+	 * after termination, and battery-detection sweeps the chip pulses
+	 * through STATUS_NOT_CHARGING even though current is still flowing
+	 * into the cell. Reporting this as "Not charging" makes upower
+	 * (and therefore KDE Plasma Mobile's tray icon) flicker between the
+	 * charging bolt and the plain battery every few seconds. Upower maps
+	 * the kernel's "Not charging" status to its own "pending-charge"
+	 * state, and KDE's Solid backend maps that to Battery::NoCharge —
+	 * so the tray icon shows the plain battery icon and "checking
+	 * battery information in settings" reports the battery as
+	 * "stable" / not charging.
+	 *
+	 * Two signals can confirm we are actually putting energy into the
+	 * battery; either is sufficient:
+	 *
+	 *   1. The PMIC's ICHGR register reports measurable charge current
+	 *      (>= BQ25890_CHARGE_CURRENT_MIN_UA). This is the chip's own
+	 *      measurement of current going into the cell.
+	 *
+	 *   2. The INA228 (if bound) reads negative battery current, meaning
+	 *      current is flowing into the cell from some source. INA228 is
+	 *      ground-truth for actual battery-terminal current.
+	 *
+	 * Either signal wins. We deliberately no longer look at
+	 * chrg_status == STATUS_NOT_CHARGING as a disqualifier — that flag
+	 * fires for the regulator-pause case above.
+	 */
 	ichgr = bq25890_get_charge_current_ua(bq);
-	if (ichgr < 0)
-		return false;
+	if (ichgr >= BQ25890_CHARGE_CURRENT_MIN_UA)
+		return true;
 
-	return ichgr >= BQ25890_CHARGE_CURRENT_MIN_UA;
+	if (bq->ina228 && bq->ina228->present && ina228_enabled) {
+		/*
+		 * INA228 reports positive = discharge. Negative therefore
+		 * means current flowing into the battery — i.e. charging.
+		 * Use a small deadband (50 mA) to ignore ADC noise.
+		 */
+		if (bq->ina228_current_ua < -50000)
+			return true;
+	}
+
+	return false;
 }
 
 static long bq25890_get_battery_current_ua(struct bq25890_device *bq,
