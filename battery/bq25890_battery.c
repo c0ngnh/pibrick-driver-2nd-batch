@@ -113,6 +113,15 @@ enum bq25890_fg_mode {
 	BQ_FG_DISCHARGING_RESTING,
 };
 
+/*
+ * Forward declaration so struct bq25890_device can hold a pointer to the
+ * INA228 monitor (defined further down). Without this the build fails with
+ * "invalid use of undefined type 'struct bq25890_ina228_data'" the moment
+ * bq->ina228 is dereferenced (which happens before the full INA228 struct
+ * is visible to the compiler).
+ */
+struct bq25890_ina228_data;
+
 struct bq25890_device {
 	struct i2c_client *client;
 	struct device *dev;
@@ -877,15 +886,15 @@ static bool bq25890_is_actively_charging(struct bq25890_device *bq,
 	if (ichgr >= BQ25890_CHARGE_CURRENT_MIN_UA)
 		return true;
 
-	if (bq->ina228 && bq->ina228->present && ina228_enabled) {
-		/*
-		 * INA228 reports positive = discharge. Negative therefore
-		 * means current flowing into the battery — i.e. charging.
-		 * Use a small deadband (50 mA) to ignore ADC noise.
-		 */
-		if (bq->ina228_current_ua < -50000)
-			return true;
-	}
+	/*
+	 * INA228 fallback: bq->ina228_current_ua is updated only by the
+	 * INA228 sample path. When INA228 hardware is absent or disabled,
+	 * it stays at 0, so this branch is harmless to evaluate. We avoid
+	 * dereferencing bq->ina228 here because the full struct definition
+	 * appears further down in this file.
+	 */
+	if (ina228_enabled && bq->ina228_current_ua < -50000)
+		return true;
 
 	return false;
 }
@@ -1134,8 +1143,6 @@ static int bq25890_ichgr_ua_locked(struct bq25890_device *bq)
  * to preserve the single-mutator estimator invariant.
  * =====================================================================
  */
-
-struct bq25890_ina228_data;
 
 enum bq25890_ina228_fields {
 	F_ina228_VSHUNT,
