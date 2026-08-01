@@ -1215,11 +1215,21 @@ fix_upower() {
 		# empty UPVER skips directly to main. The previous behavior of always
 		# trying "v<garbage>" first wasted a round-trip on every unknown case.
 		local git_ok=0
+		# We previously piped `git clone` through `grep -vE '^(Cloning|...)'`
+		# which stripped ALL of git's output — including the progress bar
+		# lines — so the user saw nothing for the entire duration of the
+		# clone and assumed the script was hung. That led to people
+		# Ctrl-C'ing out of a successful run, then re-running it on a
+		# half-cloned state. Use `git clone --progress` so git writes
+		# progress to stderr (which we already redirect to stdout), and
+		# print every line as it arrives. The clone itself rarely takes
+		# more than 30s on a fresh image; if it does, the user will see
+		# live progress and won't be tempted to abort.
 		if [ -n "$UPVER" ] && [ "$UPVER" != "unknown" ]; then
 			info "Cloning UPower source (tag v$UPVER) — this may take a few minutes..."
-			git clone --depth=1 --branch="v$UPVER" \
+			git clone --progress --depth=1 --branch="v$UPVER" \
 				https://gitlab.freedesktop.org/upower/upower.git "$UP_SRC" 2>&1 \
-				| grep -vE '^(Cloning|Receiving|Resolving|Updating|Checking|Enumerating|warning:)' \
+				| sed 's/^/    /' \
 				|| true
 			if [ -d "$UP_SRC/.git" ]; then
 				git_ok=1
@@ -1229,13 +1239,29 @@ fix_upower() {
 		fi
 		if [ "$git_ok" -eq 0 ]; then
 			info "Cloning UPower source (main branch) — this may take a few minutes..."
-			# Capture full stderr so we can show a real error if it fails.
-			local git_err
-			git_err=$(git clone --depth=1 \
-				https://gitlab.freedesktop.org/upower/upower.git "$UP_SRC" 2>&1 \
-				| grep -vE '^(Cloning|Receiving|Resolving|Updating|Checking|Enumerating)' \
-				|| true)
-			echo "$git_err" | grep -E '(error|fatal|Could not|unable)' | head -3 | sed 's/^/    /'
+			# Capture stderr to a file so we can (a) print it live and
+			# (b) extract errors at the end. With `set -e` and
+			# `set -o pipefail`, a failed pipeline inside $() can
+			# abort the script — see the bash pitfall where
+			# `local x=$()` propagates a non-zero exit even with
+			# `|| true` at the end of the pipe. So we capture to a
+			# file first, then read it.
+			# `--filter=blob:none` skips downloading file blobs we
+			# won't need (we only patch one C file); cuts clone time
+			# noticeably on slow links.
+			local git_log=/tmp/pibrick-upower-clone.log
+			: > "$git_log"
+			if git clone --progress --filter=blob:none --depth=1 \
+					https://gitlab.freedesktop.org/upower/upower.git "$UP_SRC" \
+					> "$git_log" 2>&1; then
+				info "  Clone complete."
+			else
+				warn "  Clone returned non-zero. Last lines:"
+				tail -5 "$git_log" | sed 's/^/    /'
+			fi
+			# Show errors explicitly (in case the user wants to debug)
+			grep -E '(error|fatal|Could not|unable)' "$git_log" 2>/dev/null \
+				| head -3 | sed 's/^/    /' || true
 			[ -d "$UP_SRC/.git" ] && git_ok=1
 		fi
 		if [ "$git_ok" -eq 0 ]; then
