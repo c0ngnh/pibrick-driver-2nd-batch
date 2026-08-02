@@ -321,6 +321,10 @@ setup_i2c_device() {
                     local user_home
                     user_home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
                     mkdir -p "$user_home/.config/autostart"
+                    # Make the autostart dir + new file user-owned so the
+                    # user's session bus can traverse and parse them. Without
+                    # this the directory can end up root:root and although
+                    # world-traversable, the user can't chown-edit it later.
                     cat > "$user_home/.config/autostart/pibrick-i2c-setup.desktop" << 'I2CAUTOSTART'
 [Desktop Entry]
 Type=Application
@@ -328,7 +332,10 @@ Name=piBrick I2C Setup
 Exec=/usr/bin/bash -c 'echo mma8451q 0x1c > /sys/bus/i2c/devices/i2c-1/new_device 2>/dev/null || true'
 X-GNOME-Autostart-enabled=true
 I2CAUTOSTART
-                    chown "$SUDO_USER:$SUDO_USER" "$user_home/.config/autostart/pibrick-i2c-setup.desktop"
+                    chown "$SUDO_USER:$SUDO_USER" \
+                          "$user_home/.config/autostart" \
+                          "$user_home/.config/autostart/pibrick-i2c-setup.desktop"
+                    chmod 755 "$user_home/.config/autostart"
                     info "  Created autostart entry for I2C device"
                 fi
                 return 0
@@ -353,22 +360,30 @@ chmod 755 /var/lib/pibrick
 safe_cp "$SCRIPT_DIR/pibrick-autorotation.sh" /usr/lib/pibrick/autorotation-service/pibrick-autorotation.sh
 
 # For KDE Plasma Mobile, create autostart entry (optional).
-# Resolve the real desktop user so the .desktop file lands in the correct home.
-autostart_home="/root"
+#
+# We do NOT create a user-level autostart entry here. The autorotation
+# service is already installed as a system-wide systemd service
+# (pibrick-autorotation.service, started below). Adding an autostart
+# entry would launch a second instance of the script in the user session,
+# which would race with the systemd instance for the accelerometer file
+# and could in turn confuse the plasmoid's lock-file Loader.
+#
+# On older distros without working user-lingering, this autostart entry
+# was a fallback. On this image the systemd service starts reliably, so
+# the duplicate isn't needed.
+#
+# If a previous install did write the autostart entry under
+# `~/.config/autostart/pibrick-autorotation.desktop`, remove it now so we
+# don't accumulate a stale duplicate. Idempotent.
 if [ -n "${SUDO_USER:-}" ] && [ "$(id -un)" = "root" ]; then
-    autostart_home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
-    autostart_home="${autostart_home:-/root}"
+    st_user_home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+    if [ -n "$st_user_home" ] && \
+       [ -f "$st_user_home/.config/autostart/pibrick-autorotation.desktop" ]; then
+        rm -f "$st_user_home/.config/autostart/pibrick-autorotation.desktop"
+        info "Removed stale pibrick-autorotation.desktop autostart entry"
+    fi
 fi
-if mkdir -p "$autostart_home/.config/autostart" 2>/dev/null; then
-    cat > "$autostart_home/.config/autostart/pibrick-autorotation.desktop" << 'AUTOSTARTEOF'
-[Desktop Entry]
-Type=Application
-Name=piBrick Autorotation
-Exec=/usr/lib/pibrick/autorotation-service/pibrick-autorotation.sh
-X-GNOME-Autostart-enabled=true
-AUTOSTARTEOF
-    info "Created autostart entry for KDE Plasma Mobile"
-fi
+# Original autostart-entry block deliberately omitted. See comment above.
 
 # Install action scripts
 mkdir -p /etc/pibrick/actions
@@ -488,43 +503,44 @@ install_dbus_service
 # ── Install Plasmoid ───────────────────────────────────────────────────────────
 install_plasmoid() {
     local user_home=""
-    
+
     if [ -z "${SUDO_USER:-}" ]; then
         info "  No SUDO_USER set, skipping plasmoid"
         return 0
     fi
-    
+
     user_home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
     if [ -z "$user_home" ]; then
         info "  Could not determine user home, skipping plasmoid"
         return 0
     fi
-    
+
     info "Installing plasmoid..."
-    
-    # Install to kservices5
-    local plasmoid_dir="$user_home/.local/share/kservices5/pibrick-rotation-lock"
-    rm -rf "$plasmoid_dir" 2>/dev/null || true
-    
+
     if [ -d "$SCRIPT_DIR/plasmoid" ]; then
-        # Create parent directory if it doesn't exist
+        # Install to kservices5 (legacy layout — Plasma 5 users on this distro)
+        local kservices_plasmoid_dir="$user_home/.local/share/kservices5/pibrick-rotation-lock"
+        rm -rf "$kservices_plasmoid_dir" 2>/dev/null || true
         mkdir -p "$user_home/.local/share/kservices5"
-        cp -r "$SCRIPT_DIR/plasmoid" "$plasmoid_dir"
-        # Remove old metadata.desktop if present (Plasma 6 uses metadata.json)
-        rm -f "$plasmoid_dir/metadata/metadata.desktop" 2>/dev/null || true
-        chown -R "$SUDO_USER:$SUDO_USER" "$plasmoid_dir"
+        # Copy the plasmoid directory verbatim so the on-disk layout matches the
+        # repo exactly: metadata/metadata.desktop + metadata/metadata.json +
+        # contents/ui/main.qml + contents/ui/workerscript.js + helper scripts at
+        # the package root. Do NOT delete anything — the package metadata is
+        # required by Plasma 6 even when it would be unused on Plasma 5.
+        cp -r "$SCRIPT_DIR/plasmoid" "$kservices_plasmoid_dir"
+        chown -R "$SUDO_USER:$SUDO_USER" "$kservices_plasmoid_dir"
         info "  Plasmoid installed to kservices5"
-    fi
-    
-    # Install to plasma plasmoids
-    local plasma_plasmoid_dir="$user_home/.local/share/plasma/plasmoids/pibrick-rotation-lock"
-    # Create parent directories if they don't exist
-    mkdir -p "$user_home/.local/share/plasma/plasmoids"
-    if [ -d "$SCRIPT_DIR/plasmoid" ]; then
+
+        # Install to Plasma 6 user location
+        local plasma_plasmoid_dir="$user_home/.local/share/plasma/plasmoids/pibrick-rotation-lock"
+        mkdir -p "$user_home/.local/share/plasma/plasmoids"
         rm -rf "$plasma_plasmoid_dir" 2>/dev/null || true
         cp -r "$SCRIPT_DIR/plasmoid" "$plasma_plasmoid_dir"
-        # Remove old metadata.desktop if present (Plasma 6 uses metadata.json)
-        rm -f "$plasma_plasmoid_dir/metadata/metadata.desktop" 2>/dev/null || true
+        # Plasma 6 ALSO requires a metadata.json at the package root (not nested
+        # under metadata/). The repo metadata.json is identical to the one in
+        # metadata/metadata.json, so we can hardlink/copy without drift.
+        safe_cp "$SCRIPT_DIR/plasmoid/metadata/metadata.json" \
+                "$plasma_plasmoid_dir/metadata.json"
         chown -R "$SUDO_USER:$SUDO_USER" "$plasma_plasmoid_dir"
         info "  Plasmoid installed to plasma/plasmoids"
     fi
@@ -537,9 +553,22 @@ install_system_plasmoid() {
     if [ -d "$SCRIPT_DIR/plasmoid" ]; then
         local system_plasmoid_dir="/usr/share/plasma/plasmoids/pibrick-rotation-lock"
         rm -rf "$system_plasmoid_dir" 2>/dev/null || true
+        # Copy the plasmoid directory verbatim. The repo layout is the correct
+        # KPackage layout: metadata/metadata.desktop + metadata/metadata.json +
+        # contents/ui/main.qml + contents/ui/workerscript.js + helper scripts at
+        # the package root.
+        #
+        # Plasma 6's stricter loader requires metadata.json at the package root
+        # (not nested under metadata/). The repo metadata.json is byte-for-byte
+        # identical to metadata/metadata.json, so we copy it next to the package
+        # root as well. Do NOT delete metadata/metadata.desktop — it is still
+        # the canonical metadata file and Plasma 6 reads it; the older Plasma
+        # loader reads metadata.json (root) when metadata.desktop is absent.
+        # Having both files makes the package compatible with all common
+        # loader versions.
         cp -r "$SCRIPT_DIR/plasmoid" "$system_plasmoid_dir"
-        # Remove old metadata.desktop if present (Plasma 6 uses metadata.json)
-        rm -f "$system_plasmoid_dir/metadata/metadata.desktop" 2>/dev/null || true
+        safe_cp "$SCRIPT_DIR/plasmoid/metadata/metadata.json" \
+                "$system_plasmoid_dir/metadata.json"
         info "  Plasmoid installed to system location"
     fi
 }
@@ -921,23 +950,34 @@ install_quicksetting
 # ── Add Plasmoid to Panel Configuration ─────────────────────────────────────────
 add_plasmoid_to_panel() {
     local user_home=""
-    
+
     if [ -z "${SUDO_USER:-}" ]; then
         info "  No SUDO_USER set, skipping panel config"
         return 0
     fi
-    
+
     user_home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
     if [ -z "$user_home" ]; then
         info "  Could not determine user home, skipping panel config"
         return 0
     fi
-    
+
+    # Only relevant for Plasma Mobile — the panel config file lives in the
+    # mobile shell's namespace. On a stock Plasma Desktop install this file
+    # does not exist and Plasma Mobile is not the active session, so skip.
+    if [ ! -f "/usr/share/wayland-sessions/plasma-mobile.desktop" ]; then
+        info "  Plasma Mobile session not installed; skipping panel config"
+        return 0
+    fi
+
     info "Adding widget to Plasma Mobile panel..."
-    
+
     local panel_config="$user_home/.config/plasma-org.kde.plasma.mobileshell-appletsrc"
-    
-    # Create the config file if it doesn't exist
+
+    # Create the config file if it doesn't exist. Plasma Mobile uses two
+    # containments: containment 1 (homescreen folio) and containment 3 (panel).
+    # The trailing blank line matters — without it, the heredoc-append below
+    # would fuse the new [Applets] section onto the [Containments][3] line.
     if [ ! -f "$panel_config" ]; then
         mkdir -p "$(dirname "$panel_config")"
         cat > "$panel_config" << 'PANELCONFIGEOF'
@@ -946,27 +986,51 @@ plugin=org.kde.plasma.mobile.homescreen.folio
 
 [Containments][3]
 plugin=org.kde.plasma.mobile.panel
+
 PANELCONFIGEOF
         chown "$SUDO_USER:$SUDO_USER" "$panel_config"
     fi
-    
+
     # Check if the widget is already added
-    if ! grep -q "pibrick-rotation-lock" "$panel_config" 2>/dev/null; then
-        # Find the next available applet ID using awk
-        local applet_id
-        applet_id=$(awk -F'[][]' '/Applets\]\[/ {gsub(/\[/, "", $2); if ($2 > max) max=$2} END {print (max+1)}' "$panel_config" 2>/dev/null || echo "101")
-        [ -z "$applet_id" ] && applet_id="101"
-        
-        cat >> "$panel_config" << EOF
+    if grep -q "pibrick-rotation-lock" "$panel_config" 2>/dev/null; then
+        info "  Widget already in panel configuration"
+        return 0
+    fi
+
+    # Find the next available applet ID. We scan for [Applets][<n>] sections
+    # anywhere inside any [Containments][<n>][Applets] subtree, since the
+    # same numeric ID space is shared. The current mobile shell uses ids
+    # starting at 100, so we offset by 100 to stay clear of the housing.
+    # Uses POSIX awk (split + sort) instead of gawk's 3-arg match() because
+    # Debian's default /usr/bin/awk is mawk, which doesn't implement the
+    # 3-arg form.
+    local applet_id
+    applet_id=$(awk '
+        /\[Applets\]\[/ {
+            s = $0
+            sub(/.*\[Applets\]\[/, "", s)
+            sub(/\].*$/, "", s)
+            if (s+0 > max+0) max = s
+        }
+        END { print (max == "" ? 100 : max + 1) }
+    ' "$panel_config" 2>/dev/null)
+    [ -z "$applet_id" ] && applet_id="101"
+
+    # Append the applet to the panel containment. We use a sub-shell with a
+    # here-doc so the variable is expanded but the file still gets a real
+    # newline before the new section (printf-style append is fragile here).
+    {
+        # Make sure the file ends with a newline before we append.
+        [ -n "$(tail -c 1 "$panel_config" 2>/dev/null)" ] && echo ""
+        cat << EOF
 
 [Containments][3][Applets][$applet_id]
 plugin=pibrick-rotation-lock
 EOF
-        chown "$SUDO_USER:$SUDO_USER" "$panel_config"
-        info "  Widget added to panel (ID: $applet_id)"
-    else
-        info "  Widget already in panel configuration"
-    fi
+    } >> "$panel_config"
+    chown "$SUDO_USER:$SUDO_USER" "$panel_config"
+    info "  Widget added to panel (ID: $applet_id)"
+    info "  (Will appear on the top bar after the next Plasma Mobile session start.)"
 }
 add_plasmoid_to_panel
 
@@ -1103,6 +1167,34 @@ if systemctl restart pibrick-autorotation.service; then
 else
     warn "Service failed to start - checking logs..."
     journalctl -u pibrick-autorotation.service -n 5 --no-pager || true
+fi
+
+# ── Cleanup any stale pibrick-autorotation.sh process ───────────────────────────
+# Older installs left a stub autostart .desktop file that launched a second
+# pibrick-autorotation.sh in the user's session. We no longer create that
+# autostart entry (so future logins don't start a new duplicate), but a
+# previously-started instance may still be running. Kill any pibrick-autorotation
+# processes that are NOT children of the systemd service we just started.
+#
+# Detection: the systemd-managed process has PPID=1 (init). Anything else with
+# the same executable is a leftover and should be terminated so we have a
+# single canonical process reading the accelerometer.
+if [ -n "${SUDO_USER:-}" ] && [ "$(id -un)" = "root" ]; then
+    local_uid=$(id -u "$SUDO_USER" 2>/dev/null)
+    if [ -n "$local_uid" ]; then
+        # Find all pibrick-autorotation.sh PIDs owned by the user; kill any
+        # whose parent is NOT the systemd service (MainPID).
+        main_pid=$(systemctl show pibrick-autorotation.service \
+                       -p MainPID --value 2>/dev/null || echo 0)
+        for pid in $(pgrep -u "$SUDO_USER" -f 'pibrick-autorotation\.sh' \
+                          2>/dev/null || true); do
+            ppid=$(awk '/^PPid:/ {print $2; exit}' "/proc/$pid/status" 2>/dev/null || echo "?")
+            if [ "$ppid" != "$main_pid" ] && [ "$ppid" != "1" ]; then
+                warn "  Killing stale pibrick-autorotation.sh pid=$pid (ppid=$ppid)"
+                kill -TERM "$pid" 2>/dev/null || true
+            fi
+        done
+    fi
 fi
 
 # ── Summary ────────────────────────────────────────────────────────────────────
