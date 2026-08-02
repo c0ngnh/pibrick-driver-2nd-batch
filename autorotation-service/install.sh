@@ -510,10 +510,17 @@ install_user_services() {
     fi
     
     local user_systemd_dir="$user_home/.config/systemd/user"
-    
-    mkdir -p "$user_systemd_dir"
-    mkdir -p "$user_systemd_dir/default.target.wants"
-    
+
+    # mkdir -p runs as root. If either of these directories is freshly
+    # created (no prior user-owned copy existed), it ends up root:root,
+    # and the user's later `systemctl --user` invocations can't traverse
+    # or modify it. Same pattern as the autostart path: chown the dirs
+    # we may have just created. chown is a no-op on an already
+    # user-owned dir, so this is idempotent.
+    mkdir -p "$user_systemd_dir" "$user_systemd_dir/default.target.wants"
+    chown "$SUDO_USER:$SUDO_USER" "$user_systemd_dir" "$user_systemd_dir/default.target.wants"
+    chmod 755 "$user_systemd_dir" "$user_systemd_dir/default.target.wants"
+
     # Create the user service file
     cat > "$user_systemd_dir/pibrick-rotation-ui.service" << 'EOF'
 [Unit]
@@ -561,9 +568,25 @@ install_dbus_service() {
     fi
     
     local dbus_service_dir="$user_home/.local/share/dbus-1/services"
-    
+
+    # mkdir -p runs as root. If `dbus-1/` or `dbus-1/services/` is freshly
+    # created (no prior user-owned copy existed), it ends up root:root,
+    # and the user's session bus / user tooling can no longer install or
+    # modify user D-Bus service files. chown the parents we may have
+    # just created. chown is a no-op on an already user-owned dir, so
+    # this is idempotent.
     mkdir -p "$dbus_service_dir"
-    
+    chown "$SUDO_USER:$SUDO_USER" \
+          "$user_home/.local" \
+          "$user_home/.local/share" \
+          "$user_home/.local/share/dbus-1" \
+          "$dbus_service_dir"
+    chmod 755 \
+          "$user_home/.local" \
+          "$user_home/.local/share" \
+          "$user_home/.local/share/dbus-1" \
+          "$dbus_service_dir"
+
     cat > "$dbus_service_dir/com.pibrick.Autorotation.service" << 'EOF'
 [D-BUS Service]
 Name=com.pibrick.Autorotation
