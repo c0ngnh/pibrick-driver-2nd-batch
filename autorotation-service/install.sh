@@ -70,6 +70,23 @@ if [ "${1:-}" = "--reset-panel" ]; then
     user_home="${user_home:-/home/$active_user}"
     panel_config="$user_home/.config/plasma-org.kde.plasma.mobileshell-appletsrc"
     mkdir -p "$(dirname "$panel_config")"
+    # Baseline layout for Plasma Mobile on this image:
+    #   Containment 1 — the homescreen folio (a "desktop" containment,
+    #                    location=0). The shell writes the activityId and
+    #                    Pages keys itself on first session start.
+    #   Containment 3 — the top status-bar panel (location=4 = TopEdge,
+    #                    lastScreen=0). Both fields are REQUIRED:
+    #                     - shellcorona.cpp only treats a containment as a
+    #                       panel if `location` is one of TopEdge/Bottom/
+    #                       Left/RightEdge (4/5/6/7). With location=0 the
+    #                       shell treats it as a desktop containment and
+    #                       never renders it as a panel.
+    #                     - lastScreen=0 is required for the panel to be
+    #                       placed on the actual screen; without it the
+    #                       shell sets lastScreen=-1 and the top bar is
+    #                       invisible.
+    # No applet entries: the org.kde.plasma.mobile.panel plugin provides
+    # its own clock/systray UI, so a bare containment renders normally.
     cat > "$panel_config" << 'PANELRESET'
 [Containments][1]
 plugin=org.kde.plasma.mobile.homescreen.folio
@@ -79,7 +96,8 @@ location=0
 [Containments][3]
 plugin=org.kde.plasma.mobile.panel
 formfactor=0
-location=0
+location=4
+lastScreen=0
 
 PANELRESET
     chown "$active_user:$active_user" "$panel_config"
