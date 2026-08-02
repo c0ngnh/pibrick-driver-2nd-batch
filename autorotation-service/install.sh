@@ -49,6 +49,66 @@ if [ "$(id -u)" != "0" ]; then
     exit 1
 fi
 
+# ── Subcommands ─────────────────────────────────────────────────────────────────
+# `./install.sh --reset-panel` rewrites the Plasma Mobile panel config to a
+# known-good baseline (containments 1 and 3, no applet entries). Earlier
+# versions of this installer wrote a `pibrick-rotation-lock` applet into the
+# panel containment whose QML referenced an undefined property, which would
+# take down the top status bar (battery, wifi, clock, pull-down gesture).
+# Running --reset-panel scrubs those stale entries without an OS reinstall.
+if [ "${1:-}" = "--reset-panel" ]; then
+    info "Resetting Plasma Mobile panel config to baseline..."
+    if [ -z "${SUDO_USER:-}" ]; then
+        active_user=$(loginctl list-sessions --no-legend 2>/dev/null | \
+            awk 'NR>0 && $3 != "" && $3 != "root" {print $3; exit}')
+        [ -z "$active_user" ] && active_user=$(who 2>/dev/null | awk '{print $1}' | grep -v '^root$' | head -1)
+        [ -z "$active_user" ] && active_user="root"
+    else
+        active_user="$SUDO_USER"
+    fi
+    user_home=$(getent passwd "$active_user" 2>/dev/null | cut -d: -f6)
+    user_home="${user_home:-/home/$active_user}"
+    panel_config="$user_home/.config/plasma-org.kde.plasma.mobileshell-appletsrc"
+    mkdir -p "$(dirname "$panel_config")"
+    cat > "$panel_config" << 'PANELRESET'
+[Containments][1]
+plugin=org.kde.plasma.mobile.homescreen.folio
+formfactor=0
+location=0
+
+[Containments][3]
+plugin=org.kde.plasma.mobile.panel
+formfactor=0
+location=0
+
+PANELRESET
+    chown "$active_user:$active_user" "$panel_config"
+    success "Reset $panel_config"
+
+    # Also remove the plasmoid KPackage if it was installed by an earlier
+    # run. The mobile shell enumerates this directory at session start; if
+    # the package's QML throws on load the whole top-bar containment is
+    # killed (which is the regression --reset-panel is meant to recover
+    # from). Removing the package file is enough to make the next session
+    # render normally.
+    for d in \
+        "$user_home/.local/share/kservices5/pibrick-rotation-lock" \
+        "$user_home/.local/share/plasma/plasmoids/pibrick-rotation-lock" \
+        ; do
+        if [ -e "$d" ]; then
+            info "  Removing stale plasmoid KPackage: $d"
+            rm -rf "$d" || true
+        fi
+    done
+    if [ -e "/usr/share/plasma/plasmoids/pibrick-rotation-lock" ]; then
+        info "  Removing stale plasmoid KPackage: /usr/share/plasma/plasmoids/pibrick-rotation-lock"
+        rm -rf "/usr/share/plasma/plasmoids/pibrick-rotation-lock" || true
+    fi
+
+    info "Sign out and back in to recover the top status bar."
+    exit 0
+fi
+
 info "Installing piBrick Autorotation Service..."
 info "Based on piBrick AOSP17 V6 by Sconioo"
 
@@ -501,6 +561,29 @@ EOF
 install_dbus_service
 
 # ── Install Plasmoid ───────────────────────────────────────────────────────────
+# Earlier versions of this installer copied the `pibrick-rotation-lock`
+# KPackage into ~/.local/share/plasma/plasmoids/ and /usr/share/plasma/plasmoids/
+# so users could add it as a top-bar applet via Widgets. The plasma-mobile
+# shell (and Plasma 6 in general) enumerates every plasmoid KPackage it finds
+# in those directories at containment load time, even one the user never
+# added. If the QML in any such package throws on load, the shell kills the
+# whole containment — the top bar, the lock screen, anything in the panel —
+# rather than rendering an inconsistent UI.
+#
+# Empirically the package's `EnabledByDefault: true` flag (combined with a
+# permissive `FormFactors` list) caused the shell to try to auto-place our
+# applet in the panel containment on first login, the QML threw, and the
+# top bar never rendered again. SDDM's theme doesn't enumerate the user
+# plasmoids path so SDDM rendered fine — which is exactly the symptom we
+# are chasing now ("top bar shows at SDDM, gone after login").
+#
+# The rotation toggle now lives entirely in the Quick Drawer entry installed
+# by install_quicksetting(). That path does NOT involve a KPackage in the
+# plasmoids tree; the Quick Settings shell loads it from
+# /usr/share/plasma/quicksettings/ on demand only.
+#
+# This function therefore (a) removes any stale copy the user may have from
+# a previous install, and (b) deliberately installs nothing in its place.
 install_plasmoid() {
     local user_home=""
 
@@ -515,62 +598,34 @@ install_plasmoid() {
         return 0
     fi
 
-    info "Installing plasmoid..."
+    # Scrub any pre-existing copies from previous installs. The shell may
+    # have already loaded the applet into the containment; cleaning it now
+    # means the next session start (sign out / in, or reboot) renders the
+    # top bar correctly even though the in-memory state of the current
+    # session is unaffected.
+    for d in \
+        "$user_home/.local/share/kservices5/pibrick-rotation-lock" \
+        "$user_home/.local/share/plasma/plasmoids/pibrick-rotation-lock" \
+        ; do
+        if [ -e "$d" ]; then
+            info "  Removing stale plasmoid package: $d"
+            rm -rf "$d" || true
+        fi
+    done
 
-    if [ -d "$SCRIPT_DIR/plasmoid" ]; then
-        # Install to kservices5 (legacy layout — Plasma 5 users on this distro)
-        local kservices_plasmoid_dir="$user_home/.local/share/kservices5/pibrick-rotation-lock"
-        rm -rf "$kservices_plasmoid_dir" 2>/dev/null || true
-        mkdir -p "$user_home/.local/share/kservices5"
-        # Copy the plasmoid directory verbatim so the on-disk layout matches the
-        # repo exactly: metadata/metadata.desktop + metadata/metadata.json +
-        # contents/ui/main.qml + contents/ui/workerscript.js + helper scripts at
-        # the package root. Do NOT delete anything — the package metadata is
-        # required by Plasma 6 even when it would be unused on Plasma 5.
-        cp -r "$SCRIPT_DIR/plasmoid" "$kservices_plasmoid_dir"
-        chown -R "$SUDO_USER:$SUDO_USER" "$kservices_plasmoid_dir"
-        info "  Plasmoid installed to kservices5"
-
-        # Install to Plasma 6 user location
-        local plasma_plasmoid_dir="$user_home/.local/share/plasma/plasmoids/pibrick-rotation-lock"
-        mkdir -p "$user_home/.local/share/plasma/plasmoids"
-        rm -rf "$plasma_plasmoid_dir" 2>/dev/null || true
-        cp -r "$SCRIPT_DIR/plasmoid" "$plasma_plasmoid_dir"
-        # Plasma 6 ALSO requires a metadata.json at the package root (not nested
-        # under metadata/). The repo metadata.json is identical to the one in
-        # metadata/metadata.json, so we can hardlink/copy without drift.
-        safe_cp "$SCRIPT_DIR/plasmoid/metadata/metadata.json" \
-                "$plasma_plasmoid_dir/metadata.json"
-        chown -R "$SUDO_USER:$SUDO_USER" "$plasma_plasmoid_dir"
-        info "  Plasmoid installed to plasma/plasmoids"
-    fi
+    info "Plasmoid package not installed (use the Quick Drawer entry instead)."
 }
 install_plasmoid
 
 # ── Install Plasmoid to System Location ─────────────────────────────────────────
+# Same rationale as install_plasmoid above: the system plasmoids tree is also
+# enumerated at containment load time. We scrub any existing copy and do not
+# reinstall it. The Quick Drawer entry (quicksettings/) is the only surface
+# we ship on Plasma 6.
 install_system_plasmoid() {
-    info "Installing plasmoid to system location..."
-    if [ -d "$SCRIPT_DIR/plasmoid" ]; then
-        local system_plasmoid_dir="/usr/share/plasma/plasmoids/pibrick-rotation-lock"
-        rm -rf "$system_plasmoid_dir" 2>/dev/null || true
-        # Copy the plasmoid directory verbatim. The repo layout is the correct
-        # KPackage layout: metadata/metadata.desktop + metadata/metadata.json +
-        # contents/ui/main.qml + contents/ui/workerscript.js + helper scripts at
-        # the package root.
-        #
-        # Plasma 6's stricter loader requires metadata.json at the package root
-        # (not nested under metadata/). The repo metadata.json is byte-for-byte
-        # identical to metadata/metadata.json, so we copy it next to the package
-        # root as well. Do NOT delete metadata/metadata.desktop — it is still
-        # the canonical metadata file and Plasma 6 reads it; the older Plasma
-        # loader reads metadata.json (root) when metadata.desktop is absent.
-        # Having both files makes the package compatible with all common
-        # loader versions.
-        cp -r "$SCRIPT_DIR/plasmoid" "$system_plasmoid_dir"
-        safe_cp "$SCRIPT_DIR/plasmoid/metadata/metadata.json" \
-                "$system_plasmoid_dir/metadata.json"
-        info "  Plasmoid installed to system location"
-    fi
+    info "Removing any system plasmoid package from previous installs..."
+    rm -rf /usr/share/plasma/plasmoids/pibrick-rotation-lock 2>/dev/null || true
+    info "System plasmoid package not installed."
 }
 install_system_plasmoid
 
@@ -870,22 +925,49 @@ install_quicksetting() {
 
     # Ensure the entry is in the user's enabled-quick-settings list. The
     # shell only renders tiles that are both (a) discoverable on disk
-    # AND (b) listed in enabledQuickSettings. We add it implicitly if
-    # the user already has a list set (so we don't drop their other
-    # customizations), and skip otherwise — the user can enable it via
-    # Settings → Shell → Action Drawer → Quick Settings.
+    # AND (b) listed in enabledQuickSettings in plasmamobilerc.
+    #
+    # Plasma Mobile's defaults already include org.kde.plasma.quicksetting.screenrotation,
+    # wifi, bluetooth, etc. We pin only our entry to ensure the tile shows up
+    # on a brand-new install (where the user has never opened the Quick
+    # Settings page and so the file is missing or has no list). Where a list
+    # already exists we just append so we don't drop the user's other entries.
     if [ -n "${SUDO_USER:-}" ]; then
         local user_home
         user_home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
-        local pmrc="${user_home:-$HOME}/.config/plasmamobilerc"
-        if [ -f "$pmrc" ] && grep -q '^enabledQuickSettings=' "$pmrc" 2>/dev/null; then
-            if ! grep -q 'pibrick-autorotation' "$pmrc"; then
-                info "  Adding pibrick-autorotation to enabledQuickSettings in $pmrc"
-                # Append to the comma-separated list without disturbing order.
-                sed -i 's|^enabledQuickSettings=\(.*\)$|\1,org.kde.plasma.quicksetting.pibrick-autorotation|' \
-                    "$pmrc"
-            fi
+        local pmrc_dir="${user_home:-$HOME}/.config"
+        local pmrc="${pmrc_dir}/plasmamobilerc"
+        mkdir -p "$pmrc_dir"
+        # Resolve the qs_id first so we know the canonical entry name; falls
+        # back to the known string if metadata.json hasn't been read yet.
+        local qs_id_for_rc="org.kde.plasma.quicksetting.pibrick-autorotation"
+        if [ -f "$SCRIPT_DIR/quicksetting/package/metadata.json" ]; then
+            qs_id_for_rc=$(grep -o '"Id": *"org\.kde\.plasma\.quicksetting\.pibrick-autorotation"' \
+                           "$SCRIPT_DIR/quicksetting/package/metadata.json" \
+                           | head -1 \
+                           | sed 's/.*"\(org\.kde\.plasma\.quicksetting\.pibrick-autorotation\)".*/\1/')
+            [ -z "$qs_id_for_rc" ] && qs_id_for_rc="org.kde.plasma.quicksetting.pibrick-autorotation"
         fi
+        if [ -f "$pmrc" ] && grep -q '^enabledQuickSettings=' "$pmrc" 2>/dev/null; then
+            if ! grep -q "pibrick-autorotation" "$pmrc"; then
+                info "  Adding pibrick-autorotation to enabledQuickSettings in $pmrc"
+                sed -i "s|^enabledQuickSettings=\\(.*\\)\$|\\1,${qs_id_for_rc}|" "$pmrc"
+            fi
+        else
+            # No list yet — write a default that includes our entry. We use
+            # a minimal base set so the Quick Drawer also has the built-in
+            # entries users expect (wifi, bluetooth, screenrotation).
+            info "  Creating $pmrc with pibrick-autorotation in enabledQuickSettings"
+            cat > "$pmrc" << EOF
+[General]
+enabledQuickSettings=org.kde.plasma.quicksetting.airplanemode,org.kde.plasma.quicksetting.bluetooth,org.kde.plasma.quicksetting.wifi,org.kde.plasma.quicksetting.screenrotation,${qs_id_for_rc}
+EOF
+        fi
+        # Only chown if the file is now owned by the desktop user. On first
+        # boot SUDO_USER may not exist; in that case leave root-only.
+        [ -n "${user_home:-}" ] && [ -d "$user_home" ] && \
+            chown "$SUDO_USER:$SUDO_USER" "$pmrc" 2>/dev/null || true
+        chmod 644 "$pmrc" 2>/dev/null || true
     fi
 
     if [ ! -d "$SCRIPT_DIR/quicksetting" ]; then
@@ -948,89 +1030,83 @@ install_quicksetting() {
 install_quicksetting
 
 # ── Add Plasmoid to Panel Configuration ─────────────────────────────────────────
+# Earlier versions of this installer appended a `pibrick-rotation-lock` applet
+# into the panel containment (the top status bar). The plasmoid QML it loaded
+# referenced an undefined `ParentDialog` property; the mobile shell treated
+# that as a runtime error and refused to render the entire top bar (no clock,
+# no battery, no wifi, no pull-down gesture for the Quick Drawer). The user
+# had to reinstall the OS to recover.
+#
+# The rotation toggle now lives in the Quick Drawer entry installed further
+# up — that's a tap in the pull-down panel, not a panel applet, so it cannot
+# crash the containment. This function therefore:
+#   1. Removes any stale `[Containments][*][Applets][<n>]` lines pointing at
+#      `pibrick-rotation-lock` so the panel containment can recover on the
+#      next session start.
+#   2. Logs that we deliberately do NOT add a panel applet.
+#
+# --reset-panel (handled above) does a fuller reset of the panel config for
+# cases where the file is too malformed for the in-place scrub to be enough.
 add_plasmoid_to_panel() {
     local user_home=""
 
     if [ -z "${SUDO_USER:-}" ]; then
-        info "  No SUDO_USER set, skipping panel config"
+        info "  No SUDO_USER set, skipping panel config cleanup"
         return 0
     fi
 
     user_home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
     if [ -z "$user_home" ]; then
-        info "  Could not determine user home, skipping panel config"
+        info "  Could not determine user home, skipping panel config cleanup"
         return 0
     fi
-
-    # Only relevant for Plasma Mobile — the panel config file lives in the
-    # mobile shell's namespace. On a stock Plasma Desktop install this file
-    # does not exist and Plasma Mobile is not the active session, so skip.
-    if [ ! -f "/usr/share/wayland-sessions/plasma-mobile.desktop" ]; then
-        info "  Plasma Mobile session not installed; skipping panel config"
-        return 0
-    fi
-
-    info "Adding widget to Plasma Mobile panel..."
 
     local panel_config="$user_home/.config/plasma-org.kde.plasma.mobileshell-appletsrc"
 
-    # Create the config file if it doesn't exist. Plasma Mobile uses two
-    # containments: containment 1 (homescreen folio) and containment 3 (panel).
-    # The trailing blank line matters — without it, the heredoc-append below
-    # would fuse the new [Applets] section onto the [Containments][3] line.
-    if [ ! -f "$panel_config" ]; then
-        mkdir -p "$(dirname "$panel_config")"
-        cat > "$panel_config" << 'PANELCONFIGEOF'
-[Containments][1]
-plugin=org.kde.plasma.mobile.homescreen.folio
-
-[Containments][3]
-plugin=org.kde.plasma.mobile.panel
-
-PANELCONFIGEOF
+    # If the file exists and references the broken panel applet, strip those
+    # lines so the containment can render normally on the next session.
+    if [ -f "$panel_config" ] && \
+       grep -q "pibrick-rotation-lock" "$panel_config" 2>/dev/null; then
+        info "  Removing stale pibrick-rotation-lock entries from $panel_config"
+        # Delete every line whose group is a [Containments][*][Applets][<n>]
+        # header AND whose plugin= line is our applet. Use perl for portable
+        # in-place block deletion (sed -i with multi-line ranges varies by
+        # implementation, and we want a single atomic edit).
+        perl -0777 -i -ne '
+            my %drop;
+            my @lines = split /\n/, $_;
+            my $i = 0;
+            while ($i < @lines) {
+                if ($lines[$i] =~ /^\[Containments\]\[\d+\]\[Applets\]\[\d+\]\s*$/) {
+                    my $j = $i + 1;
+                    my %props;
+                    while ($j < @lines && $lines[$j] =~ /^([^=]+)=(.*)$/) {
+                        $props{$1} = $2;
+                        $j++;
+                    }
+                    if (($props{plugin} // "") =~ /pibrick-rotation-lock/) {
+                        $drop{$i} = 1;
+                        for (my $k = $i + 1; $k < $j; $k++) { $drop{$k} = 1; }
+                    }
+                    $i = $j;
+                } else {
+                    $i++;
+                }
+            }
+            my $kept = "";
+            for (my $k = 0; $k < @lines; $k++) {
+                next if $drop{$k};
+                $kept .= $lines[$k];
+                $kept .= "\n" unless $k == $#lines;
+            }
+            print $kept;
+        ' "$panel_config"
         chown "$SUDO_USER:$SUDO_USER" "$panel_config"
+        info "  Stale entries removed. Sign out / in to restore the top bar."
     fi
 
-    # Check if the widget is already added
-    if grep -q "pibrick-rotation-lock" "$panel_config" 2>/dev/null; then
-        info "  Widget already in panel configuration"
-        return 0
-    fi
-
-    # Find the next available applet ID. We scan for [Applets][<n>] sections
-    # anywhere inside any [Containments][<n>][Applets] subtree, since the
-    # same numeric ID space is shared. The current mobile shell uses ids
-    # starting at 100, so we offset by 100 to stay clear of the housing.
-    # Uses POSIX awk (split + sort) instead of gawk's 3-arg match() because
-    # Debian's default /usr/bin/awk is mawk, which doesn't implement the
-    # 3-arg form.
-    local applet_id
-    applet_id=$(awk '
-        /\[Applets\]\[/ {
-            s = $0
-            sub(/.*\[Applets\]\[/, "", s)
-            sub(/\].*$/, "", s)
-            if (s+0 > max+0) max = s
-        }
-        END { print (max == "" ? 100 : max + 1) }
-    ' "$panel_config" 2>/dev/null)
-    [ -z "$applet_id" ] && applet_id="101"
-
-    # Append the applet to the panel containment. We use a sub-shell with a
-    # here-doc so the variable is expanded but the file still gets a real
-    # newline before the new section (printf-style append is fragile here).
-    {
-        # Make sure the file ends with a newline before we append.
-        [ -n "$(tail -c 1 "$panel_config" 2>/dev/null)" ] && echo ""
-        cat << EOF
-
-[Containments][3][Applets][$applet_id]
-plugin=pibrick-rotation-lock
-EOF
-    } >> "$panel_config"
-    chown "$SUDO_USER:$SUDO_USER" "$panel_config"
-    info "  Widget added to panel (ID: $applet_id)"
-    info "  (Will appear on the top bar after the next Plasma Mobile session start.)"
+    info "Not adding widget to top bar; use the Quick Drawer entry instead."
+    info "  (Pull down from the top edge; the 'Auto-rotate' tile toggles state.)"
 }
 add_plasmoid_to_panel
 

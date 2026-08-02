@@ -90,6 +90,8 @@ for home in /home/*; do
     rm -f "$home/.local/share/dbus-1/services/com.pibrick.Autorotation.service" 2>/dev/null || true
     rm -f "$home/.config/systemd/user/pibrick-rotation-ui.service" 2>/dev/null || true
 done
+# System plasmoid dir (not user-specific)
+rm -rf /usr/share/plasma/plasmoids/pibrick-rotation-lock 2>/dev/null || true
 
 # Remove Quick Drawer entry (Plasma Mobile top-pull panel tile)
 info "Removing Quick Drawer entry..."
@@ -97,6 +99,59 @@ rm -rf /usr/share/plasma/quicksettings/org.kde.plasma.quicksetting.pibrick-autor
 # Also remove any user-level copy
 for home in /home/*; do
     rm -rf "$home/.local/share/plasma/quicksettings/org.kde.plasma.quicksetting.pibrick-autorotation" 2>/dev/null || true
+done
+
+# Strip our entry from each user's enabled-quick-settings list. If left in
+# place after uninstall the Quick Settings UI silently loses a tile on every
+# shell start, which looks like a regression.
+info "Removing pibrick-autorotation from users' Quick Settings lists..."
+for home in /home/*; do
+    pmrc="$home/.config/plasmamobilerc"
+    [ -f "$pmrc" ] || continue
+    if grep -q 'pibrick-autorotation' "$pmrc"; then
+        # Remove just our ID, with surrounding comma if present, from the
+        # comma-separated list. Done with sed; if the line ends up empty the
+        # shell will simply ignore it.
+        sed -i 's/,\{0,1\}org\.kde\.plasma\.quicksetting\.pibrick-autorotation,*/,/g; \
+                s/^enabledQuickSettings=,$//; \
+                s/,,\+/,/g' "$pmrc"
+    fi
+done
+
+# Scrub any leftover pibrick-rotation-lock entries from the Plasma Mobile
+# panel config of every user. Earlier installs wrote them in and they can
+# crash the panel containment; uninstall should leave the panel config
+# clean so the top bar keeps rendering after uninstall.
+info "Removing pibrick-rotation-lock entries from Plasma Mobile panel configs..."
+for home in /home/*; do
+    panel_cfg="$home/.config/plasma-org.kde.plasma.mobileshell-appletsrc"
+    [ -f "$panel_cfg" ] || continue
+    if grep -q "pibrick-rotation-lock" "$panel_cfg"; then
+        perl -0777 -i -ne '
+            my @lines = split /\n/, $_;
+            my $i = 0;
+            my @keep;
+            while ($i < @lines) {
+                if ($lines[$i] =~ /^\[Containments\]\[\d+\]\[Applets\]\[\d+\]\s*$/) {
+                    my $j = $i + 1;
+                    my %props;
+                    while ($j < @lines && $lines[$j] =~ /^([^=]+)=(.*)$/) {
+                        $props{$1} = $2;
+                        $j++;
+                    }
+                    if (($props{plugin} // "") !~ /pibrick-rotation-lock/) {
+                        push @keep, @lines[$i .. $j - 1];
+                    }
+                    $i = $j;
+                } else {
+                    push @keep, $lines[$i];
+                    $i++;
+                }
+            }
+            print join("\n", @keep);
+            print "\n" if $keep[-1] !~ /^\n$/;
+        ' "$panel_cfg"
+    fi
 done
 
 info "Autorotation service uninstalled."

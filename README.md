@@ -1032,35 +1032,96 @@ sudo pibrick-tools --autorotation-lock inverted  # Lock to inverted
 sudo pibrick-tools --autorotation-unlock       # Resume auto-rotation
 ```
 
-### KDE Plasma Mobile Control Center Toggle
+### KDE Plasma Mobile Quick Drawer tile
 
-On **KDE Plasma Mobile** (and Plasma Desktop), the piBrick rotation lock appears as a **plasmoid** in the control center / system tray:
+On **KDE Plasma Mobile**, the piBrick autorotation toggle is exposed in the
+**Quick Drawer** — pull down from the top edge of the screen. A new tile
+labelled **"Auto-rotate"** appears alongside the built-in entries
+(Wi-Fi, Bluetooth, brightness, etc.):
 
-- **Plasma Mobile**: Appears automatically in the status bar; tap to expand the orientation picker
-- **Plasma Desktop**: Add Widget → search "piBrick Rotation Lock"; drag to the system tray or panel
+- **Tile lit** → auto-rotation is enabled, the screen follows the
+  accelerometer.
+- **Tile dim** → rotation is locked. Tapping restores auto-rotation.
 
-The plasmoid shows the current lock state and provides one-tap buttons for each orientation (Portrait, Landscape, Inverted, Landscape Reverse). The master auto-rotation toggle also lets you lock to the *current* screen orientation.
+> Earlier versions of this installer dropped a `pibrick-rotation-lock`
+> plasmoid KPackage into `~/.local/share/plasma/plasmoids/` and
+> `/usr/share/plasma/plasmoids/`. The mobile shell enumerates every plasmoid
+> KPackage in those directories at containment load time, regardless of
+> whether the user has actually added it to a panel. With the package's
+> `EnabledByDefault: true` flag, the shell tried to auto-place our applet
+> in the panel containment on first login; the QML threw on load; and the
+> shell killed the whole panel containment to avoid rendering an
+> inconsistent UI. Symptom: top bar shows at SDDM (SDDM's greeter does not
+> enumerate user plasmoids), disappears after logging into Plasma Mobile,
+> and stays missing across reboots. The only sure recovery was an OS
+> reinstall.
+>
+> The current installer therefore does **not** copy a plasmoid KPackage
+> into either path. The Quick Drawer entry, installed into
+> `/usr/share/plasma/quicksettings/`, is the only surface we ship. Anyone
+> upgrading from an older release should run `./install.sh --reset-panel`
+> (described below) to scrub the leftover package.
 
-The plasmoid communicates with `pibrick-autorotation.service` via `/usr/bin/autorotation-lock` (installed alongside the service). No D-Bus required — the lock state is stored in `/var/lib/pibrick/autorotation.lock` which both the service and plasmoid read/write.
-
-### Quick Drawer (top-pull panel) entry
-
-Pulling down from the top of the screen on Plasma Mobile opens the native Quick Drawer. After installing the autorotation service you will see a new **"Auto-rotate"** tile alongside the built-in entries (Wi-Fi, Bluetooth, brightness, etc.).
-
-- **Tile lit** → auto-rotation is enabled, the screen follows the accelerometer
-- **Tile dim** → rotation is locked at whatever orientation the screen was in when you tapped it
-
-Tapping the tile flips the state by calling `/usr/bin/autorotation-lock auto` / `lock-current` under the hood — the same mechanism the panel plasmoid uses, so the two stay in sync. State is sourced from `/var/lib/pibrick/autorotation.lock` and refreshed every second.
+The tile state is sourced from `/var/lib/pibrick/autorotation.lock` (the
+same file `pibrick-autorotation.service` watches). Tapping the tile calls
+`/usr/bin/autorotation-lock {auto|normal}` to flip state, and a 1-second
+poll keeps the tile highlighted in sync.
 
 #### Activating the tile
 
-The shell scans `/usr/share/plasma/quicksettings/` and reads `enabledQuickSettings` from `~/.config/plasmamobilerc` **at session start**. The installer adds the entry to that list automatically, but:
+The shell scans `/usr/share/plasma/quicksettings/` and reads
+`enabledQuickSettings` from `~/.config/plasmamobilerc` **at session
+start**. The installer writes a default value on first install, but:
 
-- **Sign out and back in once** after the first install. Plasmashell on this image is launched by SDDM as a system service rather than a user systemd unit, so `systemctl --user restart plasma-mobile-shell` does not exist.
-- If the tile is still missing after sign-out/in, check `~/.config/plasmamobilerc` — the entry `org.kde.plasma.quicksetting.pibrick-autorotation` must appear in `enabledQuickSettings`.
-- If entries in the KCM (`Settings → Shell → Action Drawer → Quick Settings`) keep un-checking themselves, the most common cause is a stale `plasma-discover` cache: `rm -rf ~/.cache/plasma-discover/ && sign out → in`.
+- **Sign out and back in once** after the first install. Plasmashell on
+  this image is launched by SDDM as a system service rather than a user
+  systemd unit, so `systemctl --user restart plasma-mobile-shell` does not
+  exist.
+- If the tile is still missing after sign-out/in, check
+  `~/.config/plasmamobilerc` — the entry
+  `org.kde.plasma.quicksetting.pibrick-autorotation` must appear in
+  `enabledQuickSettings`.
+- If entries in the KCM (`Settings → Shell → Action Drawer → Quick
+  Settings`) keep un-checking themselves, the most common cause is a stale
+  `plasma-discover` cache:
+  `rm -rf ~/.cache/plasma-discover/ && sign out → in`.
 
-Do **not** run `loginctl terminate-user "$USER"` to "restart" the shell — it kills the entire user session (KWin + plasmashell + SSH) and leaves you with a black screen at SDDM. A clean sign-out from the session menu is the same effect, but recoverable.
+Do **not** run `loginctl terminate-user "$USER"` to "restart" the shell —
+it kills the entire user session (KWin + plasmashell + SSH) and leaves you
+with a black screen at SDDM. A clean sign-out from the session menu is the
+same effect, but recoverable.
+
+#### Recovering a broken top bar
+
+If you ran an older version of `install.sh` and your top status bar has
+disappeared, the broken panel config can be repaired without an OS
+reinstall:
+
+```bash
+sudo ./autorotation-service/install.sh --reset-panel
+# then sign out / sign in
+```
+
+`--reset-panel` does three things, in this order:
+
+1. Removes the `pibrick-rotation-lock` KPackage from
+   `~/.local/share/plasma/plasmoids/` and
+   `~/.local/share/kservices5/` (the per-user plasmoid trees the shell
+   enumerates at session start).
+2. Removes `/usr/share/plasma/plasmoids/pibrick-rotation-lock` if present
+   (the system-wide tree).
+3. Rewrites
+   `~/.config/plasma-org.kde.plasma.mobileshell-appletsrc` to the default
+   Plasma Mobile layout (containments 1 and 3, no applet entries).
+
+A fresh `install.sh` run on a broken system already scrubs all three
+locations in passing, so re-running `install.sh --all` is usually enough
+to recover without the dedicated `--reset-panel` step.
+
+After any recovery, **sign out and back in once** — the in-memory state of
+the currently-running shell is unaffected; you need a fresh session start
+for the containment to be re-instantiated without the offending applet.
+A reboot is fine too.
 
 ### Bounce-back Fix
 

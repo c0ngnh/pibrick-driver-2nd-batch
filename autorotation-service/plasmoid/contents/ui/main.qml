@@ -21,23 +21,28 @@ Item {
     property string lockedOrientation: ""
     property bool isWorking: false
 
-    // ── Read lock state from file ─────────────────────────────────────────────
-    function readLockFile() {
-        try {
-            var file = lockFileHandle
-            if (file.status === Loader.Ready) {
-                return file.item.text.trim()
-            }
-        } catch(e) {}
-        return ""
+    // ── Read lock state from file (via Process, not Loader) ─────────────────
+    // Earlier this used Loader { source: lockFile } which only loads QML
+    // components — a plain text file with "normal" / "left" / "right" /
+    // "inverted" would throw and had been observed to take down the
+    // surrounding Plasma containment. Use Process to read instead.
+    function refreshStatus() {
+        lockReader.start("cat", [lockFile])
     }
 
-    Loader {
-        id: lockFileHandle
-        source: lockFile
-        onLoaded: {
-            isLocked = item.text.trim().length > 0
-            lockedOrientation = isLocked ? item.text.trim() : ""
+    Process {
+        id: lockReader
+        onFinished: {
+            // Anything in the file (a non-empty body) means we're locked.
+            // Empty body or missing file (exitCode != 0) means auto.
+            if (exitCode === 0 && stdout !== null) {
+                var body = stdout.toString().trim()
+                isLocked = body.length > 0
+                lockedOrientation = isLocked ? body : ""
+            } else {
+                isLocked = false
+                lockedOrientation = ""
+            }
         }
     }
 
@@ -52,16 +57,19 @@ Item {
         onFinished: {
             isWorking = false
             if (exitCode === 0) {
-                // Refresh state
-                lockFileHandle.active = false
-                lockFileHandle.active = true
+                refreshStatus()
             }
         }
     }
 
-    function refreshStatus() {
-        lockFileHandle.active = false
-        lockFileHandle.active = true
+    // refreshStatus() is defined above (next to lockReader). The periodic
+    // timer keeps the popup in sync if some other tool flips the lock file.
+    Timer {
+        interval: 1000
+        repeat: true
+        running: true
+        triggeredOnStart: true
+        onTriggered: refreshStatus()
     }
 
     // ── Actions ──────────────────────────────────────────────────────────────
@@ -71,6 +79,22 @@ Item {
 
     function unlock() {
         runCtl("unlock", [])
+    }
+
+    // Safely close any containing popup, or quit if running standalone.
+    // Earlier revisions referenced `root.ParentDialog` directly; that
+    // property is only set when the applet is shown inside a Plasma popup,
+    // so referencing it from a panel slot or from the Quick Drawer hosted
+    // variant would resolve to `undefined` and crash the QML engine (which
+    // on the mobile shell can take the whole panel containment down with it).
+    // Use Qt.binding-style conditional access so we never touch a missing
+    // property.
+    function dismissSelf() {
+        if (root.ParentDialog && root.ParentDialog.close) {
+            root.ParentDialog.close()
+        } else {
+            Qt.quit()
+        }
     }
 
     // ── Helpers ─────────────────────────────────────────────────────────────
@@ -107,7 +131,7 @@ Item {
             PlasmaComponents.ToolButton {
                 action: Kirigami.Action {
                     icon.name: "window-close"
-                    onTriggered: root.ParentDialog.close()
+                    onTriggered: root.dismissSelf()
                 }
             }
 
@@ -173,7 +197,7 @@ Item {
                 enabled: !isWorking
                 onClicked: {
                     root.lockTo("normal")
-                    root.ParentDialog.close()
+                    root.dismissSelf()
                 }
             }
 
@@ -184,7 +208,7 @@ Item {
                 enabled: !isWorking
                 onClicked: {
                     root.lockTo("right")
-                    root.ParentDialog.close()
+                    root.dismissSelf()
                 }
             }
 
@@ -195,7 +219,7 @@ Item {
                 enabled: !isWorking
                 onClicked: {
                     root.lockTo("inverted")
-                    root.ParentDialog.close()
+                    root.dismissSelf()
                 }
             }
 
@@ -206,7 +230,7 @@ Item {
                 enabled: !isWorking
                 onClicked: {
                     root.lockTo("left")
-                    root.ParentDialog.close()
+                    root.dismissSelf()
                 }
             }
         }
@@ -229,7 +253,7 @@ Item {
                 Layout.fillWidth: true
                 text: i18n("Close")
                 icon.name: "window-close"
-                onClicked: root.ParentDialog.close()
+                onClicked: root.dismissSelf()
             }
         }
     }
