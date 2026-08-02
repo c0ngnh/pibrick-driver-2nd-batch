@@ -74,13 +74,13 @@ if [ "${1:-}" = "--reset-panel" ]; then
     #   Containment 1 — the homescreen folio (a "desktop" containment,
     #                    location=0). The shell writes the activityId and
     #                    Pages keys itself on first session start.
-    #   Containment 3 — the top status-bar panel (location=4 = TopEdge,
+    #   Containment 3 — the top status-bar panel (location=3 = TopEdge,
     #                    lastScreen=0). Both fields are REQUIRED:
     #                     - shellcorona.cpp only treats a containment as a
     #                       panel if `location` is one of TopEdge/Bottom/
-    #                       Left/RightEdge (4/5/6/7). With location=0 the
-    #                       shell treats it as a desktop containment and
-    #                       never renders it as a panel.
+    #                       Left/RightEdge (3/4/5/6 in Plasma::Types::Location).
+    #                       With location=0 the shell treats it as a desktop
+    #                       containment and never renders it as a panel.
     #                     - lastScreen=0 is required for the panel to be
     #                       placed on the actual screen; without it the
     #                       shell sets lastScreen=-1 and the top bar is
@@ -96,7 +96,7 @@ location=0
 [Containments][3]
 plugin=org.kde.plasma.mobile.panel
 formfactor=0
-location=4
+location=3
 lastScreen=0
 
 PANELRESET
