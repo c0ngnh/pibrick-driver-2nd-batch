@@ -303,6 +303,36 @@ PARAMS = {
         "kind": "module",
         "default": 5,
     },
+    "ina228_shunt_tcr_ppm": {
+        "desc": "INA228 shunt resistor TCR (ppm/°C) for temperature compensation",
+        "detail": (
+            "Temperature Coefficient of Resistance for the shunt resistor. "
+            "Used to compensate for shunt resistance drift with temperature. "
+            "Typical values: 50 ppm/°C for precision metal foil, 100 ppm/°C for "
+            "standard SMD sense resistors, 200 ppm/°C for low-cost thick film. "
+            "The driver applies automatic correction when temperature differs from "
+            "calibration. Default: 100 ppm/°C. Set to 0 to disable compensation."
+        ),
+        "unit": "ppm/°C",
+        "unit_hint": "ppm",
+        "kind": "module",
+        "default": 100,
+    },
+    "ina228_filter_alpha": {
+        "desc": "INA228 EMA filter alpha (0-1000)",
+        "detail": (
+            "Exponential Moving Average filter coefficient for INA228 current readings. "
+            "Controls smoothing of current measurements. "
+            "Value is α × 1000: 250=balanced (default), 100=very smooth, "
+            "500=responsive, 1000=no filtering (raw ADC). "
+            "Lower values reduce noise but slow response to current changes. "
+            "Recommended: 250 for general use, 100 for long-term accuracy."
+        ),
+        "unit": "α×1000",
+        "unit_hint": "0-1000",
+        "kind": "module",
+        "default": 250,
+    },
     "coulomb_uah": {
         "desc": "Remaining capacity (coulomb counter; fuel gauge overwrites)",
         "detail": (
