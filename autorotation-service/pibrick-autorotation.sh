@@ -954,37 +954,15 @@ except Exception as e:
     local last_rotation_timestamp=0
     local last_rotated_to=""  # GUARD: ignore re-detecting the same orientation we just rotated to.
 
-    # Startup sync: read actual screen rotation from kwinoutputconfig.json so we don't
-    # re-rotate unnecessarily. kscreen-doctor is unreliable in the service context.
-    log "Reading current screen rotation..."
-    local initial_rot
-    initial_rot=$(
-        python3 -c "
-import json, os, sys
-path = os.path.expanduser('~/.config/kwinoutputconfig.json')
-try:
-    with open(path) as f:
-        data = json.load(f)
-    for section in data:
-        if section.get('name') == 'outputs':
-            for out in section.get('data', []):
-                if 'transform' in out:
-                    t = out['transform']
-                    if t == 'Normal': print('normal')
-                    elif t == 'Rotated90': print('right')
-                    elif t == 'Rotated180': print('inverted')
-                    elif t == 'Rotated270': print('left')
-                    else: print('unknown')
-                    break
-except: print('unknown')
-" 2>/dev/null || echo "unknown"
-    )
-    if [ -n "$initial_rot" ] && [ "$initial_rot" != "unknown" ]; then
-        current_orientation="$initial_rot"
-        log "Startup: screen is at '$current_orientation' — will maintain"
-    else
-        log "Startup: could not determine screen rotation — will rotate as needed"
-    fi
+    # No startup sync from kwinoutputconfig.json — the file is whatever the screen
+    # was last left at, NOT what the sensor says is correct now. Trusting it leads
+    # to a visible flip 1-2s after boot whenever the file's stored rotation doesn't
+    # match the user's actual orientation (e.g. they held the device still while
+    # the prior session left the screen rotated, then rebooted). Instead, let the
+    # sensor drive the first rotation. Buffer-fills in ~100ms, with a single
+    # one-time flicker to the correct orientation.
+    log "Startup: trusting accelerometer for first orientation"
+    current_orientation=""
 
     # orient_buf_size=5 → 5 consecutive samples must agree before committing rotation.
     # This filters out single-sample sensor noise and prevents rapid bouncing when
