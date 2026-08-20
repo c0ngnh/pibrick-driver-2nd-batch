@@ -158,9 +158,14 @@ def analyze_calibration_data(data, no_ina228=False):
 
     for row in data:
         try:
+            # Skip rows with missing essential data (corrupted/incomplete rows)
+            capacity_val = row.get("capacity")
+            if capacity_val is None or capacity_val == "":
+                continue
+
             fg_mode = row.get("fg_mode", "")
             status = row.get("status", "")
-            soc = int(row.get("capacity", 0))
+            soc = int(capacity_val)
             voltage_uv = int(row.get("voltage_now", 0))
             v_ocv_uv = int(row.get("v_ocv_uv", 0))
             current_ua_str = row.get("current_now", "0") or "0"
@@ -596,7 +601,7 @@ def apply_calibration(rebuild=True, yes=False):
     if driver_source is not None:
         cmd += ["--driver", str(driver_source)]
     print("Running:", " ".join(cmd))
-    rc = subprocess.call(cmd)
+    rc = subprocess.run(cmd).returncode
     if rc != 0:
         print(f"update-ocv-table.py failed with exit code {rc}")
         return False

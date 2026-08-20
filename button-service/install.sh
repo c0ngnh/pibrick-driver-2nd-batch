@@ -41,8 +41,13 @@ if [ -f /sys/class/backlight/pibrick-backlight/brightness ]; then
 		chmod 0666 /sys/class/backlight/pibrick-backlight/brightness
 	chgrp video /sys/class/backlight/pibrick-backlight/brightness 2>/dev/null || true
 fi
+while IFS= read -r sysfs_path; do
+	chmod 0666 "$sysfs_path" 2>/dev/null || true
+done < <(find /sys/bus/i2c/devices -name hyntpdbg 2>/dev/null)
 udevadm trigger --subsystem-match=platform
 udevadm trigger --subsystem-match=backlight
+udevadm trigger --subsystem-match=i2c
+udevadm trigger --subsystem-match=mipi-dsi
 
 systemctl daemon-reload
 systemctl enable pibrickbtn.service

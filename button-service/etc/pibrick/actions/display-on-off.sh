@@ -16,7 +16,11 @@ else
 fi
 
 if ! echo "$new_value" >"$sysfs_path" 2>/dev/null; then
-	echo "pibrick_display_enable: permission denied (re-run: sudo bash button-service/install.sh)" >&2
+	if [ ! -w "$sysfs_path" ]; then
+		echo "pibrick_display_enable: permission denied (re-run: sudo bash button-service/install.sh)" >&2
+	else
+		echo "pibrick_display_enable: write failed for $sysfs_path" >&2
+	fi
 	exit 1
 fi
 

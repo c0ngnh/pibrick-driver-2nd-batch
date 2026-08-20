@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 Battery/INA228 interactive parameter setter.
 
@@ -165,14 +166,19 @@ def sysfs_path(name):
 #                logic within seconds; treat writes as a momentary bias, not a set
 PARAMS = {
     "charge_full_uah": {
-        "desc": "Battery design capacity",
+        "desc": "Battery design capacity (microamp-hours)",
         "detail": (
             "The total capacity of the battery as designed (in microamp-hours). "
             "This value is used as the reference '100%%' for state-of-charge "
             "calculations. Set this to match your battery's actual rated "
             "capacity. The PocketCM5 ships with a 3800 mAh pack, so the "
             "compile-time default is 3800000 uAh. For a 5000 mAh battery, "
-            "enter 5000000 uAh."
+            "enter 5000000 uAh.\n"
+            "\n"
+            "Note: The kernel also exports 'charge_full' (current full capacity) "
+            "and 'charge_full_design' (original design capacity). This parameter "
+            "corresponds to 'charge_full_design' - the rated capacity, not the "
+            "current capacity which may decrease with battery wear over time."
         ),
         "unit": "mAh",
         "unit_hint": "mAh",

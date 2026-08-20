@@ -6,6 +6,9 @@
 # (e.g. the control center toggle) can lock/unlock auto-rotation without
 # directly touching the lock file.
 #
+# This service is OPTIONAL - the autorotation service can work without it.
+# When python3-dbus is not available, this service exits gracefully.
+#
 # D-Bus activation: runs as a session-bus service owned by the logged-in user.
 # Accelerometer polling is handled by pibrick-autorotation.sh (which watches the
 # same lock file). This service only handles IPC / lock state management.
@@ -35,6 +38,7 @@ try:
     HAS_DBUS = True
 except ImportError:
     HAS_DBUS = False
+    # We'll still provide a fallback file-based interface
 
 # ── Paths ──────────────────────────────────────────────────────────────────────
 # Use /var/lib/pibrick for system-wide state (matches pibrick-autorotation.service)
@@ -217,9 +221,22 @@ def run_dbus_service():
 
 def main():
     if not HAS_DBUS:
-        print("python3-dbus not available — D-Bus service not started.", file=sys.stderr)
+        # Provide a graceful fallback that just monitors the lock file
+        # This allows the service to run even without python3-dbus
+        print("python3-dbus not available - running in file-based fallback mode.", file=sys.stderr)
+        print("D-Bus interface will not be available.", file=sys.stderr)
         print("Install with: sudo apt install python3-dbus gir1.2-glib-2.0", file=sys.stderr)
-        sys.exit(1)
+        print("")
+        print("The autorotation service will continue monitoring via lock files.")
+        print("Press Ctrl+C to exit.")
+
+        # Just run a simple monitor loop
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            print("\nService stopped.")
+        sys.exit(0)
 
     # Ensure state directory exists
     os.makedirs(STATE_DIR, exist_ok=True)

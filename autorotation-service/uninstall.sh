@@ -53,6 +53,15 @@ rm -f /usr/lib/pibrick/autorotation-service/pibrick-autorotation.sh
 rm -f /usr/lib/pibrick/autorotation-service/pibrick-autorotation.sh.bak* 2>/dev/null || true
 rmdir /usr/lib/pibrick/autorotation-service 2>/dev/null || true
 
+# Remove shared library
+info "Removing shared library..."
+rm -f /usr/lib/pibrick/lib-desktop-detection.sh
+rmdir /usr/lib/pibrick 2>/dev/null || true
+
+# Remove config file
+info "Removing config file..."
+rm -f /etc/pibrick/autorotation.conf
+
 # Remove action scripts
 info "Removing action scripts..."
 rm -f /etc/pibrick/actions/autorotation-lock.sh

@@ -1,19 +1,17 @@
 [Unit]
 Description=piBrick Battery Calibration Logger
-After=network.target
+After=local-fs.target
+RequiresMountsFor=/sys/class/power_supply/battery
 
 [Service]
 Type=simple
-# Path substituted at install time by install.sh.
-# Default install location: $PIBRICK_USER_HOME/battery-tools/
+ExecStartPre=/bin/bash -c 'if [ ! -d /sys/class/power_supply/battery ]; then echo "Battery sysfs not found. Waiting..."; for i in $(seq 1 30); do [ -d /sys/class/power_supply/battery ] && exit 0; sleep 1; done; [ -d /sys/class/power_supply/battery ] || exit 1; fi'
 ExecStart=/usr/bin/python3 __PIBRICK_TOOLS__/battery-calibration-logger.py --interval 10
 Restart=on-failure
 RestartSec=30
 StandardOutput=journal
 StandardError=journal
 User=root
-
-# Logging to /var/log/bq25890_battery/calibration.log
 SyslogIdentifier=battery-calibration
 
 [Install]

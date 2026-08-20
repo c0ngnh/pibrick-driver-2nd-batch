@@ -11,19 +11,28 @@ Restart=on-failure
 RestartSec=5
 StandardOutput=journal
 StandardError=journal
-User=congn
-Group=congn
-Environment=USER=congn
-Environment=HOME=/home/congn
+
+# Environment is set dynamically by the installer based on detected desktop
+# These are placeholders that get substituted
+Environment=USER=PLACEHOLDER_USER
+Environment=HOME=/home/PLACEHOLDER_USER
 Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# Desktop-specific environment (detected at runtime)
+# KDE Plasma Mobile
 Environment=QT_QPA_PLATFORM=wayland
 Environment=EGL_PLATFORM=wayland
 Environment=WAYLAND_DISPLAY=wayland-0
-Environment=XDG_RUNTIME_DIR=/run/user/1000
-Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+# IMPORTANT: DBUS_SESSION_BUS_ADDRESS is critical for busctl and sudo -u commands
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/PLACEHOLDER_UID/bus
+
+# Allow the service to run as the desktop user (not root)
+# The installer substitutes these with actual user values
+User=PLACEHOLDER_USER
+Group=PLACEHOLDER_USER
 
 # ProtectSystem=strict prevents writing to /usr, /boot, /etc, etc.
-# NOTE: ProtectHome=true is NOT used — it blocks access to /home/congn which breaks
+# NOTE: ProtectHome=true is NOT used — it blocks access to /home/user which breaks
 # the Python script that reads ~/.config/kwinoutputconfig.json for rotation verification.
 ReadWritePaths=/var/lib/pibrick
 

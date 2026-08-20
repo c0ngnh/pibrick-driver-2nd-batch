@@ -1,0 +1,44 @@
+/* polkit rule for piBrick battery driver
+ *
+ * This allows the desktop user to persist SOC readings without requiring sudo.
+ * The battery-soc-persist.py script needs to write to:
+ *   - /var/lib/bq25890_battery/soc_persist
+ *
+ * Without this rule, only root can write to /var/lib/bq25890_battery/
+ *
+ * Install: cp this file to /etc/polkit-1/localauthority/50-local.d/
+ */
+
+polkit.addRule(function(action, subject) {
+    // Allow systemd service management for pibrick battery services
+    // Only allow for local, active, non-root sessions (the actual desktop user)
+    if (action.id == "org.freedesktop.systemd1.manage-units" &&
+        subject.isSystemBusProxy === true &&
+        subject.active === true &&
+        subject.local === true &&
+        subject.user != "root") {
+        // Only allow management of pibrick-battery units
+        if (action.lookup("unit").indexOf("pibrick-battery") === 0) {
+            return polkit.Result.AUTH_ADMIN_KEEP;
+        }
+    }
+
+    // Allow reading battery status via UPower (information-only actions)
+    // This is safe because it only allows reading, not modifying battery state
+    if (action.id.match(/^org\.freedesktop\.upower\.(info|watch|refresh)$/) &&
+        subject.active === true &&
+        subject.local === true) {
+        return polkit.Result.YES;
+    }
+
+    // Allow system-specific battery operations (charging, etc.)
+    // Still restrict to local active sessions
+    if (action.id.match(/^org\.freedesktop\.upower\.system\./) &&
+        subject.active === true &&
+        subject.local === true &&
+        subject.user != "root") {
+        return polkit.Result.AUTH_ADMIN_KEEP;
+    }
+
+    return polkit.Result.NOT_HANDLED;
+});

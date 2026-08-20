@@ -7,9 +7,11 @@ import sys
 
 BATTERY = "/sys/class/power_supply/battery"
 INTERVAL_SEC = 15
-CHARGE_FULL_UAH = 5_000_000
 CHARGE_CURRENT_MIN_UA = 100_000
 DISCHARGE_CURRENT_UA = 900_000
+
+# Fallback capacity if sysfs read fails (in mAh)
+FALLBACK_CHARGE_FULL_MAH = 3800
 
 try:
 	import gi
@@ -44,6 +46,15 @@ def read_sysfs_text(path):
 		return None
 
 
+def get_charge_full_uah():
+	"""Read battery capacity from sysfs, fallback to default if unavailable."""
+	value = read_sysfs_int(os.path.join(BATTERY, "charge_full"))
+	if value is not None and value > 0:
+		return value
+	# Fallback to default from battery.conf (3800 mAh for piBrick)
+	return FALLBACK_CHARGE_FULL_MAH * 1000
+
+
 def format_duration(seconds):
 	if seconds is None or seconds <= 0:
 		return None
@@ -56,7 +67,7 @@ def format_duration(seconds):
 	return "< 1 min"
 
 
-def estimate_time_seconds(status, capacity_pct, current_ua):
+def estimate_time_seconds(status, capacity_pct, current_ua, charge_full_uah):
 	if capacity_pct is None:
 		return None, None
 
@@ -67,7 +78,7 @@ def estimate_time_seconds(status, capacity_pct, current_ua):
 				return "to full", None
 			if capacity_pct >= 100:
 				return "to full", 0
-			remaining_uah = (100 - capacity_pct) * CHARGE_FULL_UAH // 100
+			remaining_uah = (100 - capacity_pct) * charge_full_uah // 100
 			seconds = remaining_uah * 3600 // current_ua
 		return "to full", seconds
 
@@ -76,7 +87,7 @@ def estimate_time_seconds(status, capacity_pct, current_ua):
 		if seconds is None or seconds <= 0:
 			if capacity_pct <= 0:
 				return "left", 0
-			charge_now_uah = capacity_pct * CHARGE_FULL_UAH // 100
+			charge_now_uah = capacity_pct * charge_full_uah // 100
 			seconds = charge_now_uah * 3600 // DISCHARGE_CURRENT_UA
 		return "left", seconds
 
@@ -91,11 +102,13 @@ def read_battery():
 	if capacity_pct is None or voltage_uv is None or not status:
 		return None
 
-	time_kind, time_seconds = estimate_time_seconds(status, capacity_pct, current_ua)
+	charge_full_uah = get_charge_full_uah()
+	time_kind, time_seconds = estimate_time_seconds(status, capacity_pct, current_ua, charge_full_uah)
 	return {
 		"capacity_pct": capacity_pct,
 		"volts": voltage_uv / 1_000_000,
 		"status": status,
+		"charge_full_uah": charge_full_uah,
 		"time_kind": time_kind,
 		"time_seconds": time_seconds,
 	}
@@ -168,32 +181,33 @@ class BatteryIndicator(Gtk.Window):
 		status = data["status"]
 		pct = data["capacity_pct"]
 		volts = data["volts"]
+		charge_mah = data.get("charge_full_uah", 0) // 1000
 
 		if status in ("Full", "Not charging"):
 			label = "Fully charged" if status == "Full" else "Charged (on AC)"
-			return f"{label}\n{pct}%  {volts:.2f} V"
+			return f"{label}\n{pct}%  {volts:.2f} V  ({charge_mah} mAh)"
 
 		if status == "Charging":
 			if time_text:
 				return (
 					f"Charging\n"
 					f"Time to full: {time_text}\n"
-					f"{pct}%  {volts:.2f} V"
+					f"{pct}%  {volts:.2f} V  ({charge_mah} mAh)"
 				)
-			return f"Charging\n{pct}%  {volts:.2f} V"
+			return f"Charging\n{pct}%  {volts:.2f} V  ({charge_mah} mAh)"
 
 		if status == "Discharging":
 			if time_text:
 				return (
 					f"On battery\n"
 					f"Time left: {time_text}\n"
-					f"{pct}%  {volts:.2f} V"
+					f"{pct}%  {volts:.2f} V  ({charge_mah} mAh)"
 				)
-			return f"On battery\n{pct}%  {volts:.2f} V"
+			return f"On battery\n{pct}%  {volts:.2f} V  ({charge_mah} mAh)"
 
 		if time_text and data["time_kind"] == "left":
-			return f"{status}\nTime left: {time_text}\n{pct}%  {volts:.2f} V"
-		return f"{status}\n{pct}%  {volts:.2f} V"
+			return f"{status}\nTime left: {time_text}\n{pct}%  {volts:.2f} V  ({charge_mah} mAh)"
+		return f"{status}\n{pct}%  {volts:.2f} V  ({charge_mah} mAh)"
 
 	def refresh(self):
 		data = read_battery()

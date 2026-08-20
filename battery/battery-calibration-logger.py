@@ -30,26 +30,39 @@ LOG_FILE = LOG_DIR / "calibration.log"
 CSV_FILE = LOG_DIR / "calibration_data.csv"
 METRICS_FILE = LOG_DIR / "metrics.json"
 
-# Battery sysfs paths
-SYSFS_PATHS = {
-    "capacity": f"{SYSFS_BASE}/capacity",
-    "voltage_now": f"{SYSFS_BASE}/voltage_now",
-    "v_ocv_uv": f"{SYSFS_BASE}/v_ocv_uv",
-    "current_now": f"{SYSFS_BASE}/current_now",
-    "status": f"{SYSFS_BASE}/status",
-    "health": f"{SYSFS_BASE}/health",
-    "temp": f"{SYSFS_BASE}/temp",
-    "charge_now": f"{SYSFS_BASE}/charge_now",
-    "charge_full": f"{SYSFS_BASE}/charge_full",
-    "charge_full_design": f"{SYSFS_BASE}/charge_full_design",
-    "time_to_full_now": f"{SYSFS_BASE}/time_to_full_now",
-    "time_to_empty_avg": f"{SYSFS_BASE}/time_to_empty_avg",
-    "ina228_current_ua": f"{SYSFS_BASE}/ina228_current_ua",
-    "ina228_bus_uv": f"{SYSFS_BASE}/ina228_bus_uv",
-    "ina228_power_mw": f"{SYSFS_BASE}/ina228_power_mw",
-    "ina228_dietemp_mdeg_c": f"{SYSFS_BASE}/ina228_dietemp_mdeg_c",
-    "fg_mode": f"{SYSFS_BASE}/fg_mode",
+# Alternative sysfs paths for battery device
+SYSFS_PATHS_ALTERNATIVES = {
+    "battery": [  # Primary power supply path
+        "/sys/class/power_supply/battery",
+    ],
+    "bq25890_battery": [  # Module-specific path
+        "/sys/devices/platform/soc@0/fe890000.i2c/i2c-1/1-006b/power_supply/bq25890_battery",
+        "/sys/devices/platform/soc@0/fe890000.i2c/i2c-0/0-006b/power_supply/bq25890_battery",
+        "/sys/bus/i2c/drivers/bq25890_battery/*/power_supply/*",
+    ],
 }
+
+
+def find_battery_sysfs_path():
+    """Find the actual battery sysfs path."""
+    # Try direct paths first
+    for base in SYSFS_PATHS_ALTERNATIVES["battery"]:
+        if Path(base).exists():
+            return base
+
+    # Try to find via bq25890_battery driver
+    for pattern in SYSFS_PATHS_ALTERNATIVES["bq25890_battery"]:
+        import glob
+        matches = glob.glob(pattern)
+        if matches:
+            return matches[0]
+
+    # Fallback to default
+    return SYSFS_BASE
+
+
+# Battery sysfs paths - discovered at runtime
+SYSFS_PATHS = {}
 
 
 def read_sysfs(path, default=None):
@@ -61,8 +74,39 @@ def read_sysfs(path, default=None):
         return default
 
 
+def discover_battery_sysfs():
+    """Discover and populate the SYSFS_PATHS dict at runtime."""
+    global SYSFS_PATHS
+    base = find_battery_sysfs_path()
+    print(f"[battery-calibration] Using battery sysfs path: {base}")
+
+    SYSFS_PATHS = {
+        "capacity": f"{base}/capacity",
+        "voltage_now": f"{base}/voltage_now",
+        "v_ocv_uv": f"{base}/v_ocv_uv",
+        "current_now": f"{base}/current_now",
+        "status": f"{base}/status",
+        "health": f"{base}/health",
+        "temp": f"{base}/temp",
+        "charge_now": f"{base}/charge_now",
+        "charge_full": f"{base}/charge_full",
+        "charge_full_design": f"{base}/charge_full_design",
+        "time_to_full_now": f"{base}/time_to_full_now",
+        "time_to_empty_avg": f"{base}/time_to_empty_avg",
+        "ina228_current_ua": f"{base}/ina228_current_ua",
+        "ina228_bus_uv": f"{base}/ina228_bus_uv",
+        "ina228_power_mw": f"{base}/ina228_power_mw",
+        "ina228_dietemp_mdeg_c": f"{base}/ina228_dietemp_mdeg_c",
+        "fg_mode": f"{base}/fg_mode",
+    }
+
+
 def read_all_metrics():
     """Read all battery metrics and return as dict."""
+    # Discover battery path on first call if not initialized
+    if not SYSFS_PATHS:
+        discover_battery_sysfs()
+
     metrics = {}
     for name, path in SYSFS_PATHS.items():
         value = read_sysfs(path)
@@ -117,24 +161,44 @@ def run_logger(interval=10, csv_file=None, log_file=None):
     """Run the calibration logger loop."""
     csv_path = Path(csv_file) if csv_file else CSV_FILE
     log_path = Path(log_file) if log_file else LOG_FILE
-    
+
     # Ensure log directory exists
     LOG_DIR.mkdir(parents=True, exist_ok=True)
-    
+
+    # Discover battery sysfs path before starting
     print(f"Starting Battery Calibration Logger")
     print(f"  Interval: {interval} seconds")
     print(f"  CSV output: {csv_path}")
     print(f"  Log output: {log_path}")
     print(f"  Press Ctrl+C to stop")
     print()
-    
+
+    # Try to discover battery sysfs, with retry
+    max_retries = 10
+    for attempt in range(max_retries):
+        if Path(find_battery_sysfs_path()).exists():
+            break
+        print(f"[battery-calibration] Waiting for battery sysfs... (attempt {attempt + 1}/{max_retries})")
+        time.sleep(2)
+    else:
+        print("[battery-calibration] WARNING: Battery sysfs not found. Will continue and retry at each interval.")
+
+    # Initialize sysfs paths
+    discover_battery_sysfs()
+
     # Log header
     print("Timestamp                | SOC  | Voltage    | Current    | Mode     | Status")
     print("-" * 90)
-    
+
     try:
         while True:
             metrics = read_all_metrics()
+
+            # Check if we got any data
+            if not metrics or "capacity" not in metrics:
+                print("[battery-calibration] WARNING: No battery data available. Retrying in 10 seconds...")
+                time.sleep(10)
+                continue
             
             # Format for display
             timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")

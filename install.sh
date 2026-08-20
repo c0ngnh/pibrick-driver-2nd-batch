@@ -29,9 +29,17 @@ safe_cp() {
     local src="$1" dst="$2"
     [ -f "$src" ] || { error "safe_cp: source not found: $src"; return 1; }
     if [ -f "$dst" ] && cmp -s "$src" "$dst"; then
+        # Even if bytes match, make sure exec bit is set if source has it.
+        if [ -x "$src" ] && [ ! -x "$dst" ]; then
+            chmod +x "$dst"
+        fi
         return 0
     fi
     cp -p "$src" "$dst"
+    # Ensure exec bit is set if source has it (cp -p preserves mode, but be safe).
+    if [ -x "$src" ] && [ ! -x "$dst" ]; then
+        chmod +x "$dst"
+    fi
 }
 
 # ── Config paths ───────────────────────────────────────────────────────────────
@@ -598,6 +606,12 @@ uninstall_battery() {
 	# Drop the cron job
 	rm -f /etc/cron.d/pibrick-battery-soc
 
+	# Drop polkit rules
+	rm -f /etc/polkit-1/localauthority/50-local.d/50-pibrick-battery.pkla
+
+	# Uninstall battery indicator
+	uninstall_battery_indicator
+
 	# Drop the SOC helper script + its services
 	rm -f "$PIBRICK_TOOLS_DIR/pibrick-battery-load-soc.sh"
 	rm -f /etc/systemd/system/pibrick-battery-load-soc.service
@@ -710,6 +724,7 @@ uninstall_wrapper() {
 	info "Uninstalling pibrick-tools wrapper..."
 
 	rm -f /usr/local/bin/pibrick-tools
+	rm -f /usr/local/bin/pibrick-brightness
 	rm -f /etc/bash_completion.d/pibrick-tools
 	# Some systems use /usr/share/bash-completion/completions/
 	rm -f /usr/share/bash-completion/completions/pibrick-tools
@@ -888,8 +903,6 @@ while [ $# -gt 0 ]; do
 		exit 0
 		;;
 	--autorotation-lock)
-		STATE_DIR="/var/lib/pibrick"
-		mkdir -p "$STATE_DIR"
 		ORIENT="${2:-normal}"
 		case "$ORIENT" in
 			normal|inverted|left|right) ;;
@@ -898,19 +911,40 @@ while [ $# -gt 0 ]; do
 				exit 1
 				;;
 		esac
-		echo "$ORIENT" > "$STATE_DIR/autorotation.lock"
-		success "Rotation locked to: $ORIENT"
-		# Apply immediately if service is running
-		if systemctl is-active --quiet pibrick-autorotation.service 2>/dev/null; then
-			systemctl reload-or-restart pibrick-autorotation.service 2>/dev/null || true
+		# Use the autorotation-lock script which handles all desktop integration
+		if command -v autorotation-lock >/dev/null 2>&1; then
+			autorotation-lock "$ORIENT"
+		elif [ -f /usr/bin/autorotation-lock ]; then
+			/usr/bin/autorotation-lock "$ORIENT"
+		elif [ -f /etc/pibrick/actions/autorotation-lock.sh ]; then
+			bash /etc/pibrick/actions/autorotation-lock.sh "$ORIENT"
+		else
+			# Fallback: write lock file directly and reload service
+			STATE_DIR="/var/lib/pibrick"
+			mkdir -p "$STATE_DIR"
+			echo "$ORIENT" > "$STATE_DIR/autorotation.lock"
+			if systemctl is-active --quiet pibrick-autorotation.service 2>/dev/null; then
+				systemctl reload-or-restart pibrick-autorotation.service 2>/dev/null || true
+			fi
 		fi
+		success "Rotation locked to: $ORIENT"
 		exit 0
 		;;
 	--autorotation-unlock)
-		STATE_DIR="/var/lib/pibrick"
-		rm -f "$STATE_DIR/autorotation.lock" "$STATE_DIR/autorotation.lock.type"
-		if systemctl is-active --quiet pibrick-autorotation.service 2>/dev/null; then
-			systemctl reload-or-restart pibrick-autorotation.service 2>/dev/null || true
+		# Use the autorotation-lock script which handles all desktop integration
+		if command -v autorotation-lock >/dev/null 2>&1; then
+			autorotation-lock auto
+		elif [ -f /usr/bin/autorotation-lock ]; then
+			/usr/bin/autorotation-lock auto
+		elif [ -f /etc/pibrick/actions/autorotation-lock.sh ]; then
+			bash /etc/pibrick/actions/autorotation-lock.sh auto
+		else
+			# Fallback: remove lock file directly and reload service
+			STATE_DIR="/var/lib/pibrick"
+			rm -f "$STATE_DIR/autorotation.lock" "$STATE_DIR/autorotation.lock.type"
+			if systemctl is-active --quiet pibrick-autorotation.service 2>/dev/null; then
+				systemctl reload-or-restart pibrick-autorotation.service 2>/dev/null || true
+			fi
 		fi
 		success "Auto-rotation resumed"
 		exit 0
@@ -1866,7 +1900,8 @@ install_service() {
 	sed -e "s|__PIBRICK_TOOLS__|$PIBRICK_TOOLS_DIR|g" \
 	    -e "s|__PIBRICK_LIB__|$PIBRICK_LIB|g" \
 	    "$src" > "$dst"
-	chmod 644 "$dst"
+    chmod 644 "$dst"
+    info "  Installed systemd service: $(basename "$src")"
 
 	systemctl daemon-reload
 }
@@ -1966,6 +2001,17 @@ install_battery() {
 		success "Cron job installed for SOC persistence"
 	fi
 
+	# Install polkit rules to allow desktop user to manage battery services
+	if [ -f "$PIBRICK_LIB/battery/etc/polkit-1/localauthority/50-local.d/50-pibrick-battery.pkla" ]; then
+		install -D -m 0644 \
+			"$PIBRICK_LIB/battery/etc/polkit-1/localauthority/50-local.d/50-pibrick-battery.pkla" \
+			/etc/polkit-1/localauthority/50-local.d/50-pibrick-battery.pkla
+		success "Polkit rules installed for battery services"
+	fi
+
+	# Install battery indicator with autostart for desktop users
+	install_battery_indicator
+
 	# Initial SOC save
 	python3 "$PIBRICK_TOOLS/battery-soc-persist.py" --quiet 2>/dev/null || true
 
@@ -2055,6 +2101,17 @@ install_battery_original() {
 		success "Cron job installed for SOC persistence"
 	fi
 
+	# Install polkit rules to allow desktop user to manage battery services
+	if [ -f "$PIBRICK_LIB/battery/etc/polkit-1/localauthority/50-local.d/50-pibrick-battery.pkla" ]; then
+		install -D -m 0644 \
+			"$PIBRICK_LIB/battery/etc/polkit-1/localauthority/50-local.d/50-pibrick-battery.pkla" \
+			/etc/polkit-1/localauthority/50-local.d/50-pibrick-battery.pkla
+		success "Polkit rules installed for battery services"
+	fi
+
+	# Install battery indicator with autostart for desktop users
+	install_battery_indicator
+
 	# Initial SOC save
 	python3 "$PIBRICK_TOOLS/battery-soc-persist.py" --quiet 2>/dev/null || true
 
@@ -2125,6 +2182,80 @@ install_display() {
 	success "Display driver installed for panel: $(panel_label "$panel")"
 }
 
+# ── Install battery indicator with autostart ─────────────────────────────────
+# Installs the desktop battery indicator and sets up autostart for it.
+# The indicator shows SOC and charging status in the desktop panel.
+install_battery_indicator() {
+	# Check if the indicator script exists
+	if [ ! -f "$PIBRICK_LIB/desktop/pibrick-battery-indicator.py" ]; then
+		return 0
+	fi
+
+	info "Installing battery indicator..."
+
+	# Install the indicator script to the tools directory
+	mkdir -p "$PIBRICK_TOOLS_DIR"
+	if [ "$PIBRICK_LIB/desktop/pibrick-battery-indicator.py" -ef "$PIBRICK_TOOLS_DIR/pibrick-battery-indicator.py" ]; then
+		: # already in place
+	else
+		safe_cp "$PIBRICK_LIB/desktop/pibrick-battery-indicator.py" \
+			"$PIBRICK_TOOLS_DIR/pibrick-battery-indicator.py"
+		chmod +x "$PIBRICK_TOOLS_DIR/pibrick-battery-indicator.py"
+		success "Battery indicator installed"
+	fi
+
+	# Create autostart desktop entry
+	# This runs the indicator on login for the desktop user
+	# Priority: SUDO_USER (the actual desktop user when running via sudo)
+	# > ORIG_HOME (original caller's home) > fallback
+	local autostart_dir=""
+	if [ -n "${SUDO_USER:-}" ]; then
+		local user_home
+		user_home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+		autostart_dir="$user_home/.config/autostart"
+	elif [ -n "${ORIG_HOME:-}" ] && [ -d "${ORIG_HOME:-}" ]; then
+		autostart_dir="$ORIG_HOME/.config/autostart"
+	fi
+
+	if [ -n "$autostart_dir" ]; then
+		mkdir -p "$autostart_dir"
+		cat > "$autostart_dir/pibrick-battery-indicator.desktop" << 'AUTOSTART'
+[Desktop Entry]
+Type=Application
+Name=piBrick Battery Indicator
+Comment=Battery state-of-charge and charging status indicator
+Exec=python3 /usr/lib/pibrick/battery/pibrick-battery-indicator.py
+Icon=battery
+Terminal=false
+Categories=System;Monitor;Battery;
+StartupNotify=false
+X-GNOME-Autostart-enabled=true
+AUTOSTART
+		chmod 644 "$autostart_dir/pibrick-battery-indicator.desktop"
+		success "Battery indicator autostart configured"
+	fi
+}
+
+# ── Uninstall battery indicator ───────────────────────────────────────────────
+uninstall_battery_indicator() {
+	info "Uninstalling battery indicator..."
+
+	# Remove the indicator script
+	rm -f "$PIBRICK_TOOLS_DIR/pibrick-battery-indicator.py"
+
+	# Remove autostart entries
+	if [ -n "${ORIG_HOME:-}" ]; then
+		rm -f "$ORIG_HOME/.config/autostart/pibrick-battery-indicator.desktop"
+	fi
+	if [ -n "${SUDO_USER:-}" ]; then
+		local user_home
+		user_home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
+		rm -f "$user_home/.config/autostart/pibrick-battery-indicator.desktop"
+	fi
+
+	success "Battery indicator uninstalled"
+}
+
 # ── Install button service ─────────────────────────────────────────────────────
 install_button() {
 	info "Installing Button Service..."
@@ -2184,6 +2315,11 @@ uninstall_autorotation() {
 		rm -f /var/lib/pibrick/autorotation.lock
 		rm -f /var/lib/pibrick/autorotation.lock.type
 		rmdir /usr/lib/pibrick/autorotation-service 2>/dev/null || true
+		# Remove shared library
+		rm -f /usr/lib/pibrick/lib-desktop-detection.sh
+		rmdir /usr/lib/pibrick 2>/dev/null || true
+		# Remove config file
+		rm -f /etc/pibrick/autorotation.conf
 		# Remove plasmoid (iterate all user homes to avoid hardcoding a username)
 		for home in /home/*; do
 			rm -rf "$home/.local/share/kservices5/pibrick-rotation-lock" 2>/dev/null || true
@@ -2260,6 +2396,106 @@ uninstall_zsh() {
 	success "zsh setup uninstalled"
 }
 
+# ── Prerequisite check + auto-install for fresh Raspberry Pi OS Trixie Lite ────
+# On a freshly-flashed Lite image, none of the build tooling or kernel headers
+# are pre-installed. The display + battery Makefiles both do
+#   make -C /lib/modules/$(uname -r)/build M=$(CURDIR)
+# which fails loudly (Makefile not found) when headers are absent. Likewise
+# `dtc` (device-tree-compiler), `libgpiod-dev` (button service), `g++` +
+# `qt6-{base,declarative}-dev` (autorotation QML plugin) all need an explicit
+# apt install on Lite. This function is called once at the top of main(), and
+# installs everything the selected components need.
+#
+# We deliberately do NOT pre-install build tools when no component needs them
+# (e.g. `--uninstall autorotation` on a stock image shouldn't pull gcc).
+ensure_prerequisites() {
+	local needs_kernel_build=0
+	local needs_libgpiod=0
+	local needs_qt6_dev=0
+
+	[ -n "${INSTALL_DISPLAY:-}" ]      && needs_kernel_build=1
+	[ -n "${INSTALL_BATTERY_NEW:-}" ]  && needs_kernel_build=1
+	[ -n "${INSTALL_BATTERY_ORIGINAL:-}" ] && needs_kernel_build=1
+	[ -n "${INSTALL_BUTTON:-}" ]       && needs_libgpiod=1
+	[ -n "${INSTALL_AUTOROTATION:-}" ] && needs_kernel_build=1
+	[ -n "${INSTALL_AUTOROTATION:-}" ] && needs_qt6_dev=1
+
+	[ "$needs_kernel_build" = "0" ] && [ "$needs_libgpiod" = "0" ] && \
+		[ "$needs_qt6_dev" = "0" ] && return 0
+
+	# apt-get update first so subsequent installs don't hit a stale cache.
+	info "Ensuring build prerequisites are installed..."
+	apt-get update -qq || { warn "apt-get update failed; builds may fail"; return 0; }
+
+	local pkgs=()
+
+	# Kernel module build requires: kernel headers for the running kernel,
+	# basic build toolchain, and dtc for the device-tree overlay.
+	if [ "$needs_kernel_build" = "1" ]; then
+		local kver
+		kver="$(uname -r)"
+		local headers_pkg=""
+		# Prefer the architecture-specific meta package (linux-headers-rpi-v8
+		# on a CM5) which tracks whatever kernel the rpi metapackage pulls
+		# in. Fall back to linux-headers-${kver} verbatim — that's what the
+		# running kernel is and what `make -C /lib/modules/${kver}/build`
+		# will look for.
+		if [ -d "/usr/src/linux-headers-${kver}" ]; then
+			: # already installed, nothing to do
+		else
+			case "$(dpkg --print-architecture 2>/dev/null)" in
+				aarch64)    headers_pkg="linux-headers-rpi-v8"  ;;
+				armv7l|armhf) headers_pkg="linux-headers-rpi"   ;;
+				*)          headers_pkg="linux-headers-${kver}" ;;
+			esac
+			if ! apt-cache show "$headers_pkg" >/dev/null 2>&1; then
+				# Fallback if the meta package isn't available in this repo
+				headers_pkg="linux-headers-${kver}"
+			fi
+			pkgs+=("$headers_pkg")
+		fi
+		command -v gcc       >/dev/null 2>&1 || pkgs+=(gcc)
+		command -v make      >/dev/null 2>&1 || pkgs+=(make)
+		command -v dtc       >/dev/null 2>&1 || pkgs+=(device-tree-compiler)
+		command -v pkg-config >/dev/null 2>&1 || pkgs+=(pkg-config)
+		# `bc` is required by some kernel Makefiles for version checks
+		command -v bc >/dev/null 2>&1 || pkgs+=(bc)
+	fi
+
+	if [ "$needs_libgpiod" = "1" ]; then
+		# libgpiod-dev provides the headers; gpiod provides the userland
+		# tools that the button service can optionally talk to.
+		pkg-config --exists libgpiod 2>/dev/null || pkgs+=(libgpiod-dev gpiod)
+	fi
+
+	if [ "$needs_qt6_dev" = "1" ]; then
+		# Only required for the autorotation QML plugin. Pure-QML fallback
+		# (main.qml) still works without these, but install_quicksetting
+		# tries the build. Missing g++/Qt6 should not fail the overall
+		# install, so we install quietly and let the autorotation installer
+		# warn if it can't build.
+		command -v g++ >/dev/null 2>&1 || pkgs+=(g++)
+		dpkg -s qt6-base-dev        >/dev/null 2>&1 || pkgs+=(qt6-base-dev)
+		dpkg -s qt6-declarative-dev >/dev/null 2>&1 || pkgs+=(qt6-declarative-dev)
+	fi
+
+	if [ "${#pkgs[@]}" -eq 0 ]; then
+		return 0
+	fi
+
+	info "Installing:${pkgs[*]}"
+	DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${pkgs[@]}" \
+		2>&1 | grep -v '^Get:\|^Fetched\|^Selecting\|^Preparing\|^Unpacking\|^Setting up\|^Processing' || {
+		warn "apt-get install of prerequisites failed; component builds may fail."
+		warn "Install manually:  sudo apt install ${pkgs[*]}"
+		# Don't return non-zero — let the installer attempt the build anyway
+		# so the user sees the actual error from gcc/make instead of just
+		# the apt failure.
+		return 0
+	}
+	success "Prerequisites installed."
+}
+
 # ── Reload drivers ─────────────────────────────────────────────────────────────
 reload_drivers() {
 	info "Reloading drivers..."
@@ -2285,6 +2521,14 @@ install_pibrick_wrapper() {
 	fi
 	info "Installing pibrick-tools wrapper at $PIBRICK_WRAPPER..."
 	safe_cp "$PIBRICK_SRC/tools/pibrick-tools.sh" "$PIBRICK_WRAPPER"
+
+	# Create pibrick-brightness symlink for legacy button service scripts
+	local brightness_src="/usr/lib/pibrick/tools/pibrick-brightness.sh"
+	if [ -f "$brightness_src" ]; then
+		ln -sf "$brightness_src" /usr/local/bin/pibrick-brightness
+		info "Created /usr/local/bin/pibrick-brightness symlink"
+	fi
+
 	success "Wrapper installed: $PIBRICK_WRAPPER"
 }
 
@@ -2332,6 +2576,11 @@ main() {
 	fi
 
 	choose_components "$@"
+
+	# Auto-install build prerequisites on fresh images so the kernel module
+	# + touch driver + autorotation plugin builds don't fail with "no rule to
+	# make target" or "no such file or directory" from make.
+	ensure_prerequisites
 
 	# Copy source tree for all installs
 	if [ -n "$INSTALL_DISPLAY$INSTALL_BATTERY_NEW$INSTALL_BATTERY_ORIGINAL$INSTALL_CALIBRATION$INSTALL_BUTTON$INSTALL_AUTOROTATION$INSTALL_PHOSH_PI5$INSTALL_ZSH" ]; then

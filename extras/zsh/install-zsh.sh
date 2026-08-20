@@ -84,7 +84,7 @@ EOF
 # Đảm bảo file .zshrc cũng thuộc quyền sở hữu của user thường
 sudo chown "$USER_NAME:$USER_NAME" "$USER_HOME/.zshrc"
 
-# 8. Đổi Shell mặc định sang Zsh cho user congn
+# 8. Đổi Shell mặc định sang Zsh cho user
 echo "--> Bước 7: Đổi shell mặc định của hệ thống sang Zsh..."
 sudo chsh -s $(which zsh) "$USER_NAME"
 

@@ -434,6 +434,30 @@ info "Installing autorotation service..."
 mkdir -p /var/lib/pibrick
 chmod 755 /var/lib/pibrick
 
+# Install shared library for desktop detection
+# This allows pibrick-autorotation.sh and autorotation-lock.sh to share
+# common detection functions, avoiding code duplication.
+if [ -f "$SCRIPT_DIR/lib-desktop-detection.sh" ]; then
+    mkdir -p /usr/lib/pibrick
+    safe_cp "$SCRIPT_DIR/lib-desktop-detection.sh" /usr/lib/pibrick/lib-desktop-detection.sh
+    chmod 644 /usr/lib/pibrick/lib-desktop-detection.sh
+    info "Installed shared desktop detection library"
+fi
+
+# Install config template
+# This allows users to override I2C bus, timing, and other settings
+# without editing the main script.
+if [ -f "$SCRIPT_DIR/etc/pibrick/autorotation.conf" ]; then
+    mkdir -p /etc/pibrick
+    if [ ! -f /etc/pibrick/autorotation.conf ]; then
+        safe_cp "$SCRIPT_DIR/etc/pibrick/autorotation.conf" /etc/pibrick/autorotation.conf
+        chmod 644 /etc/pibrick/autorotation.conf
+        info "Installed config template at /etc/pibrick/autorotation.conf"
+    else
+        info "Config already exists at /etc/pibrick/autorotation.conf (keeping existing)"
+    fi
+fi
+
 # Install main service script
 safe_cp "$SCRIPT_DIR/pibrick-autorotation.sh" /usr/lib/pibrick/autorotation-service/pibrick-autorotation.sh
 
@@ -472,6 +496,13 @@ safe_cp "$SCRIPT_DIR/etc/pibrick/actions/autorotation-lock.sh" /etc/pibrick/acti
 safe_cp "$SCRIPT_DIR/etc/pibrick/actions/autorotation-lock.sh" /usr/bin/autorotation-lock
 chmod +x /usr/bin/autorotation-lock
 info "Installed autorotation-lock to /usr/bin"
+
+# Install phosh-rotation-helper (Phosh-specific quick settings helper)
+if [ -f "$SCRIPT_DIR/etc/pibrick/actions/phosh-rotation-helper.sh" ]; then
+    safe_cp "$SCRIPT_DIR/etc/pibrick/actions/phosh-rotation-helper.sh" /usr/bin/phosh-rotation-helper
+    chmod +x /usr/bin/phosh-rotation-helper
+    info "Installed phosh-rotation-helper to /usr/bin"
+fi
 
 # ── Install Python services ─────────────────────────────────────────────────────
 install_python_services() {
@@ -961,7 +992,25 @@ EOF
 # Drops a GenericQML KPackage at /usr/share/plasma/quicksettings/ so the tile
 # appears in the Quick Drawer (top-pull panel) alongside the built-in entries.
 # Idempotent: re-running replaces the package in place.
+#
+# NOTE: This is KDE Plasma Mobile specific. On Phosh, we skip this since Phosh
+# uses its own quick settings system via phosh-osk-ui and gsettings.
 install_quicksetting() {
+    # Check if we're on KDE Plasma
+    local is_kde=0
+    if [[ "${XDG_CURRENT_DESKTOP:-}" == *"kde"* ]] || \
+       [[ "${XDG_CURRENT_DESKTOP:-}" == *"KDE"* ]] || \
+       [[ "${XDG_CURRENT_DESKTOP:-}" == *"plasma"* ]] || \
+       [[ "${XDG_CURRENT_DESKTOP:-}" == *"Plasma"* ]]; then
+        is_kde=1
+    fi
+
+    if [ "$is_kde" -eq 0 ]; then
+        info "Not on KDE Plasma - skipping Quick Drawer entry installation"
+        info "  (Phosh uses its own quick settings via gsettings)"
+        return 0
+    fi
+
     info "Installing Quick Drawer entry..."
 
     # Ensure the entry is in the user's enabled-quick-settings list. The
@@ -1025,10 +1074,8 @@ EOF
     local qs_dir="/usr/share/plasma/quicksettings/$qs_id"
     rm -rf "$qs_dir" 2>/dev/null || true
     cp -r "$SCRIPT_DIR/quicksetting/package" "$qs_dir"
-    # The default QML imports a QML module installed by the C++ plugin
-    # built below. We stage it as main.qml temporarily; after the plugin
-    # build we either keep it (plugin OK) or replace it with main-fallback.qml
-    # (plugin failed — missing the import would otherwise drop the tile).
+    # The QML tile always uses main.qml (the pure-QML fallback).
+    # main.qml reads lock state via Process and works without the C++ plugin.
     # The qml_uri here MUST match the one used in build_quicksetting_plugin
     # (hyphens stripped, NOT replaced with underscores — Qt's import resolver
     # walks the directory tree one segment per URI segment, so the directory
@@ -1041,27 +1088,18 @@ EOF
 
     info "  Quick Drawer entry installed: $qs_id"
 
-    # Build and install the matching QML extension plugin so the tile
-    # gets a bindable state property. Without it, the tile would always
-    # appear "on" because pure QML in this sandbox has no way to read
-    # the auto-rotation state. See plugin-src/README-style comments in
-    # pibrick-autorotation-util.h for the rationale.
+    # Try to build the C++ QML plugin for better state management.
+    # This is OPTIONAL - the fallback QML (main.qml) always works without it.
+    # We try to build it in the background so installation doesn't fail if
+    # g++ or Qt6 dev packages are not available.
+    #
+    # If the plugin builds successfully, the tile gets live state updates.
+    # If it fails, the fallback main.qml still works (reads lock file via Process).
     if build_quicksetting_plugin "$qs_id"; then
-        info "  Tile state is now live (auto / locked)."
+        info "  C++ QML plugin built - tile state is live."
     else
-        warn "  QML plugin build failed — falling back to a static tile."
-        warn "  The 'Auto-rotate' tile will still appear, but it will not"
-        warn "  reflect the current rotation state. To get live state,"
-        warn "  install Qt6 dev headers and rerun:"
-        warn "    sudo apt install g++ qt6-base-dev qt6-declarative-dev"
-        if [ -f "$qs_dir/contents/ui/main-fallback.qml" ]; then
-            mv "$qs_dir/contents/ui/main.qml" "$qs_dir/contents/ui/main.qml.disabled"
-            mv "$qs_dir/contents/ui/main-fallback.qml" "$qs_dir/contents/ui/main.qml"
-            info "  Replaced main.qml with the no-plugin fallback."
-        else
-            warn "  No main-fallback.qml found; leaving the stateful main.qml"
-            warn "  in place — it will fail to load and the tile will be hidden."
-        fi
+        info "  C++ QML plugin not built (g++/Qt6-dev optional) - using fallback."
+        info "  Tile will read lock state from /var/lib/pibrick/autorotation.lock"
     fi
 
     info "  Sign out and back in once; the 'Auto-rotate' tile will then appear in the"
@@ -1182,12 +1220,8 @@ install_systemd_service() {
     autorot_home="${autorot_home:-/home/$autorot_user}"
 
     # Substitute User, Group, HOME, USER, and UID-specific paths in the service file
-    sed -e "s|^User=congn$|User=$autorot_user|" \
-        -e "s|^Group=congn$|Group=$autorot_user|" \
-        -e "s|Environment=USER=congn$|Environment=USER=$autorot_user|" \
-        -e "s|Environment=HOME=/home/congn$|Environment=HOME=$autorot_home|" \
-        -e "s|Environment=XDG_RUNTIME_DIR=/run/user/1000$|Environment=XDG_RUNTIME_DIR=/run/user/$autorot_uid|" \
-        -e "s|Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus$|Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$autorot_uid/bus|" \
+    sed -e "s|PLACEHOLDER_USER|$autorot_user|g" \
+        -e "s|PLACEHOLDER_UID|$autorot_uid|g" \
         "$SCRIPT_DIR/pibrick-autorotation.service" \
         > /etc/systemd/system/pibrick-autorotation.service
     chmod 644 /etc/systemd/system/pibrick-autorotation.service
@@ -1195,8 +1229,22 @@ install_systemd_service() {
 }
 install_systemd_service
 
-# ── Disable KWin built-in auto-rotation ────────────────────────────────────────
+# ── Disable KWin built-in auto-rotation (KDE only) ──────────────────────────────
 disable_kwin_auto_rotation() {
+    # Check if we're running on KDE Plasma
+    local is_kde=0
+    if [[ "${XDG_CURRENT_DESKTOP:-}" == *"kde"* ]] || \
+       [[ "${XDG_CURRENT_DESKTOP:-}" == *"KDE"* ]] || \
+       [[ "${XDG_CURRENT_DESKTOP:-}" == *"plasma"* ]] || \
+       [[ "${XDG_CURRENT_DESKTOP:-}" == *"Plasma"* ]]; then
+        is_kde=1
+    fi
+
+    if [ "$is_kde" -eq 0 ]; then
+        info "Not on KDE Plasma - skipping KWin auto-rotation configuration"
+        return 0
+    fi
+
     info "Disabling KWin built-in auto-rotation..."
 
     # Find the active user (the user who owns the Wayland session)

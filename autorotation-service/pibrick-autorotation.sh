@@ -13,12 +13,77 @@
 #   - KDE Plasma (via kscreen)
 #   - Generic X11 (via xrandr)
 #   - Wayland compositors (via wlr-randr for labwc/sway)
+#   - Phosh (via wlr-randr or phoc D-Bus)
 #
 # Orientation states: normal, left, right, inverted
 #
 set -euo pipefail
 
-# Configuration
+# Source shared desktop detection library
+LIB_FILE="/usr/lib/pibrick/lib-desktop-detection.sh"
+if [ -f "$LIB_FILE" ]; then
+    # shellcheck source=/dev/null
+    source "$LIB_FILE"
+else
+    # Inline fallback if library not installed yet (development)
+    is_gnome() {
+        [[ "${XDG_CURRENT_DESKTOP:-}" == *"gnome"* ]] || [[ "${XDG_CURRENT_DESKTOP:-}" == *"GNOME"* ]]
+    }
+    is_kde() {
+        [[ "${XDG_CURRENT_DESKTOP:-}" == *"kde"* ]] || \
+        [[ "${XDG_CURRENT_DESKTOP:-}" == *"KDE"* ]] || \
+        [[ "${XDG_CURRENT_DESKTOP:-}" == *"plasma"* ]] || \
+        [[ "${XDG_CURRENT_DESKTOP:-}" == *"Plasma"* ]] || \
+        command -v kscreen-doctor >/dev/null 2>&1
+    }
+    is_phosh() {
+        [ -n "${PHOSH:-}" ] && return 0
+        [[ "${XDG_CURRENT_DESKTOP:-}" == *"phosh"* ]] && return 0
+        command -v phoc >/dev/null 2>&1 && return 0
+        [ -d "/usr/share/phosh" ] && return 0
+        [ -f "/usr/share/xsessions/phosh.desktop" ] && return 0
+        return 1
+    }
+    is_wayland() {
+        [ -n "${WAYLAND_DISPLAY:-}" ] && return 0
+        [[ "${XDG_CURRENT_DESKTOP:-}" == *"plasma"* ]] && return 0
+        pgrep -x kwin_wayland >/dev/null 2>&1 && return 0
+        return 1
+    }
+    is_x11() {
+        [ -n "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]
+    }
+    get_active_user() {
+        local session
+        session=$(loginctl list-sessions --no-legend 2>/dev/null | \
+            awk '$3 != "" && $3 != "root" && $6 != "manager" {print $1; exit}')
+        if [ -n "$session" ]; then
+            loginctl show-session "$session" -p User --value 2>/dev/null && return 0
+        fi
+        who 2>/dev/null | awk '$1 != "root" {print $1; exit}'
+    }
+    run_as_user() {
+        local user=$1
+        shift
+        local uid
+        uid=$(id -u "$user" 2>/dev/null)
+        if [ -z "$uid" ]; then
+            warn "run_as_user: cannot resolve UID for '$user', skipping"
+            return 1
+        fi
+        sudo -u "$user" DISPLAY="${DISPLAY:-:0}" XDG_RUNTIME_DIR="/run/user/$uid" "$@" 2>/dev/null || true
+    }
+fi
+
+# ── Configuration ────────────────────────────────────────────────────────────────
+# Load configuration from /etc/pibrick/autorotation.conf if it exists
+# This allows overriding I2C bus, address, and other settings without editing the script
+CONFIG_FILE="/etc/pibrick/autorotation.conf"
+if [ -f "$CONFIG_FILE" ]; then
+    # shellcheck source=/dev/null
+    source "$CONFIG_FILE"
+fi
+
 STATE_DIR="/var/lib/pibrick"
 ORIENTATION_LOCK_FILE="$STATE_DIR/autorotation.lock"
 LOCK_TYPE_FILE="$STATE_DIR/autorotation.lock.type"
@@ -27,12 +92,13 @@ SERVICE_NAME="pibrick-autorotation"
 # IIO device paths (discovered at runtime)
 IIO_DEVICE_PATH=""
 
-# I2C fallback settings
-I2C_BUS=1          # I2C1
-I2C_ADDR=0x1C      # MMA8451Q I2C address (SA0 floating)
-USE_I2C_FALLBACK=0 # Set to 1 if IIO driver not available
-I2CGET="sudo /usr/sbin/i2cget"   # Full path for i2c-tools with sudo
-I2CSET="sudo /usr/sbin/i2cset"   # Full path for i2c-tools with sudo
+# I2C fallback settings (can be overridden by /etc/pibrick/autorotation.conf)
+# Default: MMA8451Q on I2C1 at address 0x1C
+I2C_BUS="${I2C_BUS:-1}"           # I2C bus number
+I2C_ADDR="${I2C_ADDR:-0x1C}"       # MMA8451Q I2C address (SA0 floating)
+USE_I2C_FALLBACK="${USE_I2C_FALLBACK:-0}"  # Set to 1 if IIO driver not available
+I2CGET="sudo /usr/sbin/i2cget"     # Full path for i2c-tools with sudo
+I2CSET="sudo /usr/sbin/i2cset"    # Full path for i2c-tools with sudo
 
 # Ensure PATH is set (systemd may have limited PATH)
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
@@ -318,6 +384,18 @@ is_kde() {
     command -v kscreen-doctor >/dev/null 2>&1
 }
 
+is_phosh() {
+    # Detect Phosh (PureOS, Mobian, etc.)
+    # Phosh sets PHOSH environment variable and uses phoc compositor
+    [ -n "${PHOSH:-}" ] && return 0
+    [[ "${XDG_CURRENT_DESKTOP:-}" == *"phosh"* ]] && return 0
+    command -v phoc >/dev/null 2>&1 && return 0
+    # Also check for phosh-specific indicators
+    [ -d "/usr/share/phosh" ] && return 0
+    [ -f "/usr/share/xsessions/phosh.desktop" ] && return 0
+    return 1
+}
+
 is_wayland() {
     # Check for Wayland display
     [ -n "${WAYLAND_DISPLAY:-}" ] && return 0
@@ -409,6 +487,109 @@ rotate_gnome() {
     log "Applied GNOME rotation: $orientation"
 }
 
+# ── Phosh/Phoc Rotation ───────────────────────────────────────────────────────
+#
+# Phosh uses phoc compositor which is a wlroots-based compositor.
+# Phoc exposes screen rotation through D-Bus properties and accepts
+# rotation commands via wlr-randr-compatible interface.
+#
+# Key differences from KDE:
+# - No kscreen-doctor or kscreen libraries
+# - Uses wlr-randr for rotation commands
+# - Rotation state stored in phoc's session D-Bus interface
+# - Lock state tracked via our own lock file (not phoc's config)
+
+rotate_phosh() {
+    local orientation=$1
+
+    # Get active user for running commands as user
+    local user
+    user=$(get_active_user)
+    [ -z "$user" ] && { warn "No active user session"; return 1; }
+
+    local uid
+    uid=$(id -u "$user" 2>/dev/null)
+    [ -z "$uid" ] && { warn "rotate_phosh: cannot resolve UID for '$user'"; return 1; }
+
+    # Get the primary output name from phoc
+    # Phoc typically has a primary output that we need to rotate
+    local output=""
+    local xdg_runtime="/run/user/$uid"
+
+    # Method 1: Use wlr-randr if available (phoc supports this)
+    if command -v wlr-randr >/dev/null 2>&1; then
+        # Get list of outputs and rotate the first one
+        local transform
+        case "$orientation" in
+            normal)   transform="normal" ;;
+            left)    transform="90" ;;
+            right)   transform="270" ;;
+            inverted) transform="180" ;;
+            *)       warn "Unknown orientation: $orientation"; return 1 ;;
+        esac
+
+        # Try to get the primary output from phoc D-Bus
+        local phoc_output
+        if command -v busctl >/dev/null 2>&1; then
+            phoc_output=$(busctl --user get-property \
+                sm.puri.phoc \
+                /sm/puri/phoc \
+                sm.puri.phoc.Manager \
+                PrimaryOutput 2>/dev/null || echo "")
+        fi
+
+        # If we got a valid output name from phoc, use it
+        if [ -n "$phoc_output" ]; then
+            # busctl returns s "<output-name>", extract the name
+            output=$(echo "$phoc_output" | sed 's/^s "//;s/"$//')
+        fi
+
+        # Apply rotation using wlr-randr
+        if [ -n "$output" ]; then
+            WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" \
+            XDG_RUNTIME_DIR="$xdg_runtime" \
+                wlr-randr --output "$output" --transform "$transform" 2>/dev/null || true
+        else
+            # Fallback: apply to all outputs
+            WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" \
+            XDG_RUNTIME_DIR="$xdg_runtime" \
+                wlr-randr 2>/dev/null | grep -E '^[^ ]+' | while read -r line; do
+                WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" \
+                XDG_RUNTIME_DIR="$xdg_runtime" \
+                    wlr-randr --output "$line" --transform "$transform" 2>/dev/null || true
+            done
+        fi
+        log "Applied Phosh rotation via wlr-randr: $orientation"
+        return 0
+    fi
+
+    # Method 2: Use phoc's D-Bus interface directly
+    if command -v busctl >/dev/null 2>&1; then
+        # Get rotation value for phoc (0=normal, 90=left, 180=inverted, 270=right)
+        local phoc_rot
+        case "$orientation" in
+            normal)   phoc_rot=0 ;;
+            left)    phoc_rot=90 ;;
+            right)   phoc_rot=270 ;;
+            inverted) phoc_rot=180 ;;
+        esac
+
+        # Try to set rotation via phoc D-Bus
+        # phoc exposes: sm.puri.phoc.Manager.RotateOutput method
+        busctl --user call \
+            sm.puri.phoc \
+            /sm/puri/phoc \
+            sm.puri.phoc.Manager \
+            RotateOutput 'sui' '' 1 "$phoc_rot" 2>/dev/null || true
+
+        log "Applied Phosh rotation via D-Bus: $orientation"
+        return 0
+    fi
+
+    warn "No rotation method available for Phosh (needs wlr-randr or busctl)"
+    return 1
+}
+
 rotate_kde() {
     local orientation=$1
 
@@ -440,10 +621,10 @@ rotate_kde() {
     # Single attempt; kscreen-doctor may SIGABRT but rotation still applies.
     # Suppress all output to keep logs clean.
     WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" \
-    XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/1000}" \
+    XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" \
     QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-wayland}" \
     EGL_PLATFORM="${EGL_PLATFORM:-wayland}" \
-    DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/1000/bus}" \
+    DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$(id -u)/bus}" \
         kscreen-doctor "output.1.rotation.$orientation" 2>/dev/null
 
     # kscreen-doctor may crash but the call was processed — KWin handles it.
@@ -525,7 +706,7 @@ get_current_rotation() {
     # "Rotation:1".  The last digit is always the actual rotation value.
     rot=$(
         WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" \
-        XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/1000}" \
+        XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" \
         QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-wayland}" \
         EGL_PLATFORM="${EGL_PLATFORM:-wayland}" \
             kscreen-doctor -o 2>/dev/null | \
@@ -551,11 +732,13 @@ get_current_rotation() {
 # Falls back to "normal" if no supported desktop tool is available.
 get_current_orientation() {
     # Try kscreen-doctor -j (KDE Plasma / Plasma Mobile).
+    # Wrap in a 3-second timeout because Qt can hang trying to init a display
+    # when called outside a proper user session (e.g. from SSH).
     if command -v kscreen-doctor >/dev/null 2>&1; then
         local json
         json=$(WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" \
-               XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/1000}" \
-               kscreen-doctor -j 2>/dev/null) || true
+               XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" \
+               timeout 3 kscreen-doctor -j 2>/dev/null) || true
         if [ -n "$json" ] && command -v python3 >/dev/null 2>&1; then
             python3 - "$json" <<'PY' 2>/dev/null && return
 import json, sys
@@ -584,18 +767,39 @@ sys.exit(0)
 PY
         fi
     fi
-    # Fallback: wlr-randr (labwc/sway).
+    # Fallback: wlr-randr (labwc/sway, and Phosh via phoc).
+    # Phosh uses phoc which is wlroots-based, so wlr-randr works on Phosh too.
     if command -v wlr-randr >/dev/null 2>&1; then
         local rot
         rot=$(WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" \
-              XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/1000}" \
-              wlr-randr 2>/dev/null | awk '/Transform:/ {print $2; exit}')
+              XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" \
+              timeout 3 wlr-randr 2>/dev/null | awk '/Transform:/ {print $2; exit}')
         case "$rot" in
             normal|0)   echo "normal"   ; return ;;
             90|right)   echo "right"    ; return ;;
             180|inverted) echo "inverted" ; return ;;
             270|left)   echo "left"     ; return ;;
         esac
+    fi
+    # Fallback: try phoc D-Bus directly for Phosh
+    if is_phosh && command -v busctl >/dev/null 2>&1; then
+        local user uid phoc_rot
+        user=$(get_active_user 2>/dev/null || echo "")
+        uid=$(id -u "$user" 2>/dev/null || echo "1000")
+        if [ -n "$user" ] && [ "$uid" != "" ]; then
+            # Get current rotation from phoc
+            # phoc uses: sm.puri.phoc /sm/puri/phoc Manager GetScreenRotation (returns i)
+            phoc_rot=$(timeout 3 busctl --user --machine="$user" get-property \
+                sm.puri.phoc /sm/puri/phoc \
+                sm.puri.phoc.Manager GetScreenRotation 2>/dev/null | \
+                awk '{print $2}' || echo "")
+            case "$phoc_rot" in
+                0) echo "normal"   ; return ;;
+                90) echo "right"   ; return ;;
+                180) echo "inverted" ; return ;;
+                270) echo "left"    ; return ;;
+            esac
+        fi
     fi
     # Final fallback: assume portrait.
     echo "normal"
@@ -606,7 +810,9 @@ apply_rotation() {
 
     log "Applying rotation: $orientation"
 
-    if is_gnome; then
+    if is_phosh; then
+        rotate_phosh "$orientation"
+    elif is_gnome; then
         rotate_gnome "$orientation"
     elif is_kde; then
         rotate_kde "$orientation"
@@ -757,6 +963,7 @@ except: print('unknown')
 
     # orient_buf_size=1 → instant single-sample detection
     local orient_buf_size=1
+    local orient_buf=()
 
     # Rolling variance filter: maintain a small buffer of recent X values
     # to detect vibration (walking). If variance is high, skip the sample.
