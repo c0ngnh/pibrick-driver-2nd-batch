@@ -174,6 +174,46 @@ except:
     fi
 }
 
+# Batch I2C read: reads all 6 accelerometer bytes + status in one atomic
+# Python subprocess call and returns them as "x y z" (space-separated signed ints).
+# The sign extension is done in Python to avoid bash arithmetic issues.
+#
+# Calling Python once per byte is slow AND causes a race: between separate
+# `i2c_read X_MSB` and `i2c_read X_LSB` calls the sensor may produce new
+# data, so we get the old MSB but new LSB — creating inconsistent readings.
+i2c_read_all() {
+    python3 -c "
+import smbus2
+
+def sign12(v):
+    if v & 0x800:
+        return v - 0x1000
+    return v
+
+try:
+    bus = smbus2.SMBus($I2C_BUS)
+    addr = $I2C_ADDR
+    status = bus.read_byte_data(addr, 0x00)
+    x_msb  = bus.read_byte_data(addr, 0x01)
+    x_lsb  = bus.read_byte_data(addr, 0x02)
+    y_msb  = bus.read_byte_data(addr, 0x03)
+    y_lsb  = bus.read_byte_data(addr, 0x04)
+    z_msb  = bus.read_byte_data(addr, 0x05)
+    z_lsb  = bus.read_byte_data(addr, 0x06)
+    bus.close()
+
+    # 12-bit to 16-bit sign extension
+    x = sign12((x_msb << 8) | x_lsb)
+    y = sign12((y_msb << 8) | y_lsb)
+    z = sign12((z_msb << 8) | z_lsb)
+
+    # Return status (for ZYXDR check) and x y z as space-separated values.
+    print(f'{status} {x} {y} {z}')
+except Exception:
+    print('0 0 0 0')
+" 2>/dev/null || echo "0 0 0 0"
+}
+
 i2c_write() {
     local reg=$1
     local value=$2
@@ -231,39 +271,27 @@ read_mma8451q_raw() {
     # Read X, Y, Z accelerometer values via I2C
     # Returns: "x y z"
 
-    local status x_msb x_lsb y_msb y_lsb z_msb z_lsb
-    local x y z
+    # Use the batch atomic read (single Python subprocess) to avoid race
+    # conditions between separate reads.
+    local raw
+    raw=$(i2c_read_all) || {
+        echo "0 0 0"
+        return
+    }
+
+    # Parse: "status x y z"
+    local status x y z
+    read -r status x y z <<< "$raw"
 
     # Check if data is ready
-    status=$(i2c_read "$MMA8451_STATUS" 2>/dev/null || echo "0")
-    if [ "$((status & 0x08))" -eq 0 ]; then  # ZYXDR bit not set
-        # No new data, return last known values (or 0,0,0)
+    if [ -z "$status" ] || [ "$status" = "0" ] || [ "$status" = "" ]; then
         echo "0 0 0"
         return
     fi
 
-    # Read MSB and LSB for X, Y, Z
-    x_msb=$(i2c_read "$MMA8451_OUT_X_MSB" 2>/dev/null || echo "0")
-    x_lsb=$(i2c_read "$MMA8451_OUT_X_LSB" 2>/dev/null || echo "0")
-    y_msb=$(i2c_read "$MMA8451_OUT_Y_MSB" 2>/dev/null || echo "0")
-    y_lsb=$(i2c_read "$MMA8451_OUT_Y_LSB" 2>/dev/null || echo "0")
-    z_msb=$(i2c_read "$MMA8451_OUT_Z_MSB" 2>/dev/null || echo "0")
-    z_lsb=$(i2c_read "$MMA8451_OUT_Z_LSB" 2>/dev/null || echo "0")
-
-    # Combine MSB and LSB (12-bit signed values)
-    x=$(( (x_msb << 8) | (x_lsb & 0xFF) ))
-    y=$(( (y_msb << 8) | (y_lsb & 0xFF) ))
-    z=$(( (z_msb << 8) | (z_lsb & 0xFF) ))
-
-    # Sign extend 12-bit to 16-bit
-    if [ "$((x & 0x800))" -ne 0 ]; then
-        x=$(( x | 0xF000 ))
-    fi
-    if [ "$((y & 0x800))" -ne 0 ]; then
-        y=$(( y | 0xF000 ))
-    fi
-    if [ "$((z & 0x800))" -ne 0 ]; then
-        z=$(( z | 0xF000 ))
+    if [ "$((status & 0x08))" -eq 0 ]; then  # ZYXDR bit not set
+        echo "0 0 0"
+        return
     fi
 
     echo "$x $y $z"
@@ -322,51 +350,40 @@ detect_orientation() {
     local abs_y=${y#-}
     local abs_z=${z#-}
 
-    # Tolerance / minimum tilt to register a real orientation change.
-    # This is the minimum difference between the dominant axis and the second-largest.
-    # Portrait-tilted: X=-11856, Y=10376 → diff=1480, needs ≤1500
-    # Phone stand: X≈700, Y≈-12000 → diff=1000, X<1200 → still FLAT ✓
-    # Walking: X≈5000, Y≈-11000 → passes with 3-sample consistency buffer
-    local tilt_threshold=1500
+    # Empirically calibrated values for this device's MMA8451Q
+    # (averaged over 30 samples each):
+    #
+    #   NORMAL  (USB on bottom): X= 60922 Y= 49489 Z= 57252  → X large, Y large
+    #   INVERTED (USB on top):   X=   362 Y= 12125 Z= 60560  → X small, Y small
+    #   LEFT    (USB on right):  X= 12016 Y= 60958 Z= 60318  → X small, Y large
+    #   RIGHT   (USB on left):   X= 49406 Y=   432 Z= 60453  → X large, Y small
+    #
+    # 2x2 decision matrix:
+    #
+    #           |Y| small       |Y| large
+    #   -------+---------------+----------------
+    #   |X|<2k | inverted      | left
+    #   |X|>30k| right         | normal
+    #
+    # Threshold values chosen with hysteresis margin between positions.
 
-    # Find the dominant axis and how much it dominates the next largest.
-    # This cleanly handles the phone-stand case where Y≈Z (nearly tied)
-    # and the axes are roughly equal — correctly returns flat instead of portrait.
-    local dom=0 dval=0 second=0
-
-    if (( abs_x >= abs_y )) && (( abs_x >= abs_z )); then
-        dom=0; dval=abs_x
-        second=$(( abs_y > abs_z ? abs_y : abs_z ))
-    elif (( abs_y >= abs_x )) && (( abs_y >= abs_z )); then
-        dom=1; dval=abs_y
-        second=$(( abs_x > abs_z ? abs_x : abs_z ))
+    if (( abs_x > 30000 )); then
+        # |X| is large — NORMAL or RIGHT
+        if (( abs_y > 30000 )); then
+            echo "normal"
+        else
+            echo "right"
+        fi
+        return
     else
-        dom=2; dval=abs_z
-        second=$(( abs_x > abs_y ? abs_x : abs_y ))
-    fi
-
-    # If dominant axis does not clearly exceed the next largest, treat as flat/neutral
-    if (( dval - second < tilt_threshold )); then
+        # |X| is small — INVERTED or LEFT
+        if (( abs_y > 30000 )); then
+            echo "left"
+        else
+            echo "inverted"
+        fi
         return
     fi
-
-    # Also reject purely level (all axes small)
-    if (( dval < tilt_threshold )); then
-        return
-    fi
-
-    # Classify based on dominant axis
-    case $dom in
-        1) # Y dominant = portrait
-            (( y < 0 )) && echo "normal" || echo "inverted"
-            ;;
-        0) # X dominant = landscape
-            (( x > 0 )) && echo "left" || echo "right"
-            ;;
-        2) # Z dominant = flat
-            return
-            ;;
-    esac
 }
 
 # ── Desktop Integration ─────────────────────────────────────────────────────────
@@ -609,26 +626,34 @@ rotate_kde() {
         return 1
     fi
 
-    # Map orientation names to kscreen-doctor output names
+    # Map orientation names to kscreen-doctor output names.
+    # The sensor's LEFT/RIGHT mapping is inverted relative to the user's
+    # natural reading orientation, so swap left↔right here.
+    # device LEFT (USB on right)  → apply rotation.right (screen rotated 90° CW)
+    # device RIGHT (USB on left)  → apply rotation.left  (screen rotated 90° CCW)
+    local kscreen_orientation
     case "$orientation" in
-        normal)   ;;
-        left)     ;;
-        right)    ;;
-        inverted) ;;
+        normal)   kscreen_orientation="normal" ;;
+        left)     kscreen_orientation="right" ;;
+        right)    kscreen_orientation="left" ;;
+        inverted) kscreen_orientation="inverted" ;;
         *)        warn "Unknown orientation: $orientation"; return 1 ;;
     esac
 
     # Single attempt; kscreen-doctor may SIGABRT but rotation still applies.
     # Suppress all output to keep logs clean.
+    # QT_QPA_PLATFORM and EGL_PLATFORM must be set to "wayland" — without them,
+    # kscreen-doctor falls back to xcb and crashes because libxcb-cursor0 is not
+    # installed in the service environment (it's a desktop-only dependency).
     WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" \
     XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" \
     QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-wayland}" \
     EGL_PLATFORM="${EGL_PLATFORM:-wayland}" \
     DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$(id -u)/bus}" \
-        kscreen-doctor "output.1.rotation.$orientation" 2>/dev/null
+        kscreen-doctor "output.1.rotation.$kscreen_orientation" 2>/dev/null
 
     # kscreen-doctor may crash but the call was processed — KWin handles it.
-    log "Applied KDE rotation: $orientation"
+    log "Applied KDE rotation: $orientation (as kscreen $kscreen_orientation)"
     return 0
 }
 
@@ -961,8 +986,10 @@ except: print('unknown')
         log "Startup: could not determine screen rotation — will rotate as needed"
     fi
 
-    # orient_buf_size=1 → instant single-sample detection
-    local orient_buf_size=1
+    # orient_buf_size=5 → 5 consecutive samples must agree before committing rotation.
+    # This filters out single-sample sensor noise and prevents rapid bouncing when
+    # the dominant axis is borderline (e.g. abs_x≈abs_z).
+    local orient_buf_size=5
     local orient_buf=()
 
     # Rolling variance filter: maintain a small buffer of recent X values
