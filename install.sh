@@ -1860,6 +1860,10 @@ copy_sources() {
 	chmod +x "$PIBRICK_LIB/button-service/install.sh" 2>/dev/null || true
 	chmod +x "$PIBRICK_LIB/autorotation-service/install.sh" 2>/dev/null || true
 	chmod +x "$PIBRICK_LIB/autorotation-service/pibrick-autorotation.sh" 2>/dev/null || true
+	# apply-modprobe.sh is 100644 in git history; systemd ExecStart
+	# fails with "Permission denied" unless the copy is executable.
+	chmod +x "$PIBRICK_LIB/battery/pibrick-battery-apply-modprobe.sh" 2>/dev/null || true
+	chmod +x "$PIBRICK_LIB/battery/pibrick-battery-load-soc.sh" 2>/dev/null || true
 }
 
 # ── Install tools ───────────────────────────────────────────────────────────────

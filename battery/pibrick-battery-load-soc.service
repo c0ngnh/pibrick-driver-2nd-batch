@@ -21,7 +21,9 @@ Description=piBrick Battery SOC Boot Loader
 DefaultDependencies=no
 Before=display-manager.service
 # Don't try to run before systemd has a writable /var/log.
-After=local-fs.target
+# Wait for apply-modprobe so charge_full_uah is the persisted pack
+# size before we convert SOC% → coulomb_uah.
+After=local-fs.target pibrick-battery-apply-modprobe.service
 
 [Service]
 Type=oneshot

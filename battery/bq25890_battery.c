@@ -6,6 +6,7 @@
  */
 
 #include <linux/module.h>
+#include <linux/kernel.h>
 #include <linux/i2c.h>
 #include <linux/power_supply.h>
 #include <linux/power/bq25890_charger.h>
@@ -306,6 +307,8 @@ struct bq25890_device {
 #define BQ25890_FG_DRIFT_CHECK_INTERVAL_SEC	300
 #define BQ25890_FG_DRIFT_CORRECTION_RATE_PPM_PER_MIN	10
 #define BQ25890_FG_DRIFT_MAX_CORRECTION_PPM	50000
+/* Only compare coulomb vs OCV when rest current is below this (uA). */
+#define BQ25890_FG_DRIFT_IDLE_UA		50000
 
 /*
  * PocketCM5 tuned defaults (calibrated against the 3.8 Ah pack shipped with
@@ -359,24 +362,16 @@ MODULE_PARM_DESC(low_v_persistent_count,
  * Format: "soc=<value>\n" (SOC 0-100)
  * This prevents the SOC from jumping around after each reboot.
  *
- * Persistence is handled by userspace (battery_set.py script) which writes
- * the persisted value to the module parameter persist_soc on driver load.
+ * Persistence is handled entirely in userspace (soc_persist file +
+ * coulomb_uah sysfs). persist_soc is kept only so old modprobe.d lines
+ * do not fail module load; the driver does not apply it.
  */
 #define BQ25890_SOC_PERSIST_FILE  "/var/lib/bq25890_battery/soc_persist"
 
-static int persist_soc = -1;  /* -1 = not yet loaded from file, let userspace set this */
+static int persist_soc = -1;
 module_param(persist_soc, int, 0644);
-MODULE_PARM_DESC(persist_soc, "Last known SOC (0-100) for consistency across reboots (set by userspace)");
-
-/*
- * These functions are stubs that return the module parameter value.
- * Userspace (battery_set.py) handles actual file I/O and sets persist_soc
- * via modprobe options.
- */
-static int bq25890_load_persisted_soc(void)
-{
-	return persist_soc;  /* Userspace sets this via modprobe option */
-}
+MODULE_PARM_DESC(persist_soc,
+		 "Unused (legacy). SOC persist is userspace soc_persist + coulomb_uah");
 
 static int bq25890_save_persisted_soc(int soc)
 {
@@ -1283,6 +1278,9 @@ static void bq25890_fg_integrate_proxy_locked(struct bq25890_device *bq)
 
 	if (bq->fg_proxy_ua <= 0 || charge_full_uah <= 0)
 		return;
+	/* Unseeded remainder (-1). Integrating would clamp to 0% SOC. */
+	if (bq->fg_disch_remain_uah < 0)
+		return;
 
 	if (dt_jiffies < HZ / 10)
 		return;
@@ -1914,6 +1912,14 @@ static void bq25890_fg_integrate_ina228_locked(struct bq25890_device *bq)
 		return;
 	if (charge_full_uah <= 0)
 		return;
+	/*
+	 * remain == -1 means "never seeded" (probe init).  Integrating
+	 * from last_disch_remain_nah == 0 would publish 0% on the first
+	 * sample after reboot, even with a 4.1 V cell.  The sample path
+	 * seeds from OCV (or userspace coulomb_uah) first.
+	 */
+	if (bq->fg_disch_remain_uah < 0)
+		return;
 
 	dt_jiffies = now - bq->fg_disch_jiffies;
 	if (dt_jiffies < HZ / 10)
@@ -2072,6 +2078,12 @@ static int bq25890_fg_check_drift_correction(struct bq25890_device *bq,
 		return bq->drift_correction_ppm;
 
 	if (charge_full_uah <= 0)
+		return bq->drift_correction_ppm;
+
+	/* Terminal voltage is only an OCV proxy at rest with near-zero current. */
+	if (bq->fg_mode != BQ_FG_DISCHARGING_RESTING)
+		return bq->drift_correction_ppm;
+	if (abs(bq->ina228_current_ua) > BQ25890_FG_DRIFT_IDLE_UA)
 		return bq->drift_correction_ppm;
 
 	ocv_soc_pct = bq25890_calc_lipo_percentage(v_smooth_uv);
@@ -2400,6 +2412,44 @@ static int bq25890_get_chip_state(struct bq25890_device *bq,
 				  struct bq25890_state *state);
 
 /*
+ * Seed fg_disch_remain_uah from the OCV curve when the coulomb counter
+ * has never been initialised (remain < 0).
+ *
+ * After reboot the integrator starts at -1.  The first INA228 sample
+ * would otherwise treat last_disch_remain_nah == 0 as "empty" and
+ * publish 0 % even when the cell sits at 4.1 V.  Userspace
+ * pibrick-battery-load-soc.sh also writes coulomb_uah; this is the
+ * in-kernel safety net for the window before that service runs, and
+ * for boots with no persist file.
+ *
+ * Caller must hold bq->lock.  Does nothing if a userspace writer has
+ * already seeded, or if remain is already tracking (>= 0).
+ */
+static void bq25890_fg_ensure_remain_seeded_locked(struct bq25890_device *bq,
+						   int v_uv)
+{
+	int ocv_pct;
+
+	if (bq->fg_user_seeded)
+		return;
+	if (bq->fg_disch_remain_uah >= 0)
+		return;
+	if (charge_full_uah <= 0 || v_uv <= 0)
+		return;
+
+	ocv_pct = clamp(bq25890_calc_lipo_percentage(v_uv), 0, 100);
+	bq->fg_disch_remain_uah = (long)ocv_pct * charge_full_uah / 100;
+	bq->fg_disch_jiffies = jiffies;
+	if (bq->ina228 && bq->ina228->present)
+		bq->ina228->last_disch_remain_nah =
+			(s64)bq->fg_disch_remain_uah * 1000LL;
+	if (!bq->capacity_valid) {
+		bq->capacity_cache = ocv_pct;
+		bq->capacity_valid = true;
+	}
+}
+
+/*
  * Single owner for all fuel-gauge state mutations.
  *
  * Runs an ADC conversion, reads BATV/ICHGR/VBUSV/CHRG_STATUS once, picks a
@@ -2458,6 +2508,9 @@ static int bq25890_sample_and_update_fg(struct bq25890_device *bq)
 		if (ina_ret < 0)
 			dev_dbg(bq->dev, "INA228 refresh failed: %d\n", ina_ret);
 	}
+
+	bq25890_fg_ensure_remain_seeded_locked(bq,
+		v_smooth_uv > 0 ? v_smooth_uv : v_term_uv);
 
 	/* Maintain persistent-low-voltage guard. */
 	if (v_term_uv > 0) {
@@ -2520,8 +2573,7 @@ static int bq25890_sample_and_update_fg(struct bq25890_device *bq)
 		bq->fg_mode = BQ_FG_CHARGING;
 		/* Keep OCV tracker warm. */
 		bq25890_update_v_ocv_locked(bq, v_smooth_uv, false);
-		if (!bq->capacity_valid) {
-			/* Try to seed from smoothed terminal V. */
+		if (bq->fg_disch_remain_uah < 0) {
 			int ocv = bq25890_calc_lipo_percentage(v_smooth_uv);
 
 			soc_in = clamp(ocv, 0, 100);
@@ -2530,7 +2582,14 @@ static int bq25890_sample_and_update_fg(struct bq25890_device *bq)
 			bq->fg_disch_remain_uah =
 				(long)soc_in * charge_full_uah / 100;
 		}
-		soc_out = bq->capacity_cache;
+		if (bq->capacity_valid) {
+			soc_out = bq->capacity_cache;
+		} else if (bq->fg_disch_remain_uah >= 0 && charge_full_uah > 0) {
+			soc_out = (int)clamp(bq->fg_disch_remain_uah * 100L /
+					     charge_full_uah, 0L, 100L);
+		} else {
+			soc_out = 50;
+		}
 	} else {
 		bool just_unplugged = bq->last_ext_pwr;
 		bool sustained_load = time_after(now, bq->fg_rest_jiffies) &&
@@ -2562,19 +2621,27 @@ static int bq25890_sample_and_update_fg(struct bq25890_device *bq)
 		 * This runs periodically when the battery is at rest and
 		 * slowly corrects any accumulated drift in the coulomb counter.
 		 */
-		if (bq->ina228 && bq->ina228->present && ina228_enabled) {
+		if (bq->ina228 && bq->ina228->present && ina228_enabled &&
+		    bq->fg_mode == BQ_FG_DISCHARGING_RESTING &&
+		    abs(bq->ina228_current_ua) <= BQ25890_FG_DRIFT_IDLE_UA)
 			bq25890_fg_check_drift_correction(bq, v_smooth_uv);
-		}
 
-		if (just_unplugged || !bq->capacity_valid) {
-			/* Seed the discharge integrator from the OCV curve so we
-			 * don't briefly show 0% after a fresh unplug. */
+		/*
+		 * Seed from OCV only when the coulomb counter was never
+		 * initialised.  Do not reseed on unplug: terminal voltage is
+		 * still inflated after a charge, which would jump a tracked
+		 * 60% toward ~90%.
+		 */
+		if (bq->fg_disch_remain_uah < 0) {
 			int ocv = bq25890_calc_lipo_percentage(v_smooth_uv);
 
 			soc_in = clamp(ocv, 0, 100);
 			bq->fg_disch_remain_uah =
 				(long)soc_in * charge_full_uah / 100;
 			bq->fg_disch_jiffies = now;
+			if (bq->ina228 && bq->ina228->present)
+				bq->ina228->last_disch_remain_nah =
+					(s64)bq->fg_disch_remain_uah * 1000LL;
 		} else {
 			soc_in = bq->capacity_cache;
 		}
@@ -2755,46 +2822,16 @@ static void bq25890_capacity_calibrate_work(struct work_struct *work)
 {
 	struct bq25890_device *bq = container_of(work, struct bq25890_device,
 						 capacity_calibrate_work.work);
-	int soc, saved_soc;
+	int soc;
 
-	mutex_lock(&bq->lock);
-
-	/* Load persisted SOC from previous session for consistency */
-	saved_soc = bq25890_load_persisted_soc();
-	if (saved_soc >= 0) {
-		bq->capacity_valid = true;
-		bq->capacity_cache = saved_soc;
-	}
-
-	/* Always re-sync from rested OCV once after boot (UPower may read too early). */
-	bq->batv_smoothed_uv = 0;
-	bq->batv_smoothed_jiffies = 0;
-	bq->batv_load_glitch_until = 0;
-	bq->batv_unplug_until = 0;
-	bq->fg_v_ocv_uv = 0;
-	bq->fg_low_v_count = 0;
-	bq->fg_glitch_count = 0;
-	bq->fg_load_jiffies = 0;
-	bq->fg_rest_jiffies = 0;
 	/*
-	 * Reset the discharge integrator so the next sample can reseed
-	 * cleanly.  Two cases:
-	 *
-	 *  (a) A userspace writer (typically the load-soc service) has
-	 *      already injected a persisted SOC into coulomb_uah.  Honour
-	 *      it — the persisted value is the user's stated last-known
-	 *      SOC and overwriting it with a voltage-derived value at
-	 *      boot + 30 s caused the "shows 58% then drops to 0%"
-	 *      deadlock.
-	 *
-	 *  (b) No userspace seed.  Reseed the integrator directly from
-	 *      the current terminal voltage via the OCV curve.  Setting
-	 *      it to -1 (the old behaviour) was unsafe because the
-	 *      integrate functions run BEFORE the !capacity_valid reseed
-	 *      branch on the very next sample and would clamp -1 to 0,
-	 *      stranding SOC at 0% until the next unplug.
+	 * Delayed UPower nudge after probe. First-sample and load-soc already
+	 * seed the coulomb counter. Do not copy live BATV into remain: while
+	 * charging that voltage is not OCV. persist_soc is unused.
 	 */
-	if (!bq->fg_user_seeded) {
+	mutex_lock(&bq->lock);
+	if (!bq->fg_user_seeded && bq->fg_disch_remain_uah < 0 &&
+	    !bq->last_charging && !bq->last_ext_pwr) {
 		long batv_uv = bq25890_get_batv_uv(bq);
 
 		if (batv_uv > 0) {
@@ -2802,25 +2839,12 @@ static void bq25890_capacity_calibrate_work(struct work_struct *work)
 
 			bq->fg_disch_remain_uah =
 				(long)clamp(ocv_pct, 0, 100) * charge_full_uah / 100;
-		} else {
-			bq->fg_disch_remain_uah = -1;
+			bq->fg_disch_jiffies = jiffies;
+			if (bq->ina228 && bq->ina228->present)
+				bq->ina228->last_disch_remain_nah =
+					(s64)bq->fg_disch_remain_uah * 1000LL;
 		}
-		bq->fg_disch_jiffies = jiffies;
 	}
-	bq->fg_proxy_ua = 0;
-	bq->ina228_current_ua = 0;
-	if (bq->ina228) {
-		bq->ina228->current_ua = 0;
-		bq->ina228->bus_uv = 0;
-		bq->ina228->shunt_uv = 0;
-		bq->ina228->power_mw = 0;
-		bq->ina228->dietemp_mdeg_c = 0;
-		bq->ina228->jiffies = 0;
-	}
-	bq->last_ext_pwr = false;
-	bq->last_charging = false;
-	bq->last_fg_mode = BQ_FG_UNKNOWN;
-	bq25890_fg_charge_reset(bq);
 	mutex_unlock(&bq->lock);
 
 	soc = bq25890_sample_and_update_fg(bq);
@@ -3687,6 +3711,20 @@ static int bq25890_fg_get_v_ocv(struct bq25890_device *bq, bool rd)
 	return v;
 }
 
+static int bq25890_fg_get_ocv_soc_pct(struct bq25890_device *bq, bool rd)
+{
+	int v;
+
+	mutex_lock(&bq->lock);
+	v = (int)bq->batv_smoothed_uv;
+	if (v <= 0)
+		v = bq25890_get_batv_uv(bq);
+	mutex_unlock(&bq->lock);
+	if (v <= 0)
+		return -1;
+	return clamp(bq25890_calc_lipo_percentage(v), 0, 100);
+}
+
 static int bq25890_fg_get_proxy_ua(struct bq25890_device *bq, bool rd)
 {
 	int v;
@@ -3944,6 +3982,7 @@ static ssize_t bq25890_fg_show_##name(struct device *dev,                     \
 
 BQ25890_FG_INT_SHOW_FN(v_term)
 BQ25890_FG_INT_SHOW_FN(v_ocv)
+BQ25890_FG_INT_SHOW_FN(ocv_soc_pct)
 BQ25890_FG_INT_SHOW_FN(proxy_ua)
 BQ25890_FG_INT_SHOW_FN(remain)
 BQ25890_FG_INT_SHOW_FN(added)
@@ -3962,6 +4001,7 @@ BQ25890_FG_INT_SHOW_FN(ina228_shuntcal)
 static DEVICE_ATTR(fg_mode, 0444, bq25890_fg_show_str, NULL);
 static DEVICE_ATTR(v_term_uv, 0444, bq25890_fg_show_v_term, NULL);
 static DEVICE_ATTR(v_ocv_uv, 0444, bq25890_fg_show_v_ocv, NULL);
+static DEVICE_ATTR(ocv_soc_pct, 0444, bq25890_fg_show_ocv_soc_pct, NULL);
 static DEVICE_ATTR(i_proxy_ua, 0444, bq25890_fg_show_proxy_ua, NULL);
 static DEVICE_ATTR(remain_uah, 0444, bq25890_fg_show_remain, NULL);
 static DEVICE_ATTR(added_uah, 0444, bq25890_fg_show_added, NULL);
@@ -4159,6 +4199,7 @@ static struct attribute *bq25890_fg_attrs[] = {
 	&dev_attr_fg_mode.attr,
 	&dev_attr_v_term_uv.attr,
 	&dev_attr_v_ocv_uv.attr,
+	&dev_attr_ocv_soc_pct.attr,
 	&dev_attr_i_proxy_ua.attr,
 	&dev_attr_remain_uah.attr,
 	&dev_attr_added_uah.attr,

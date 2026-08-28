@@ -174,6 +174,7 @@ FIELDS = {
     "voltage_now":          f"{BASE}/voltage_now",
     "v_term_uv":            f"{BASE}/v_term_uv",
     "v_ocv_uv":             f"{BASE}/v_ocv_uv",
+    "ocv_soc_pct":          f"{BASE}/ocv_soc_pct",
     "current_now":          f"{BASE}/current_now",
     "ina228_current_ua":    f"{BASE}/ina228_current_ua",
     "ina228_power_mw":      f"{BASE}/ina228_power_mw",
@@ -196,7 +197,8 @@ def read_all():
     return {k: (r(v), rt(v)) for k, v in FIELDS.items()}
 
 
-# ── LiPo OCV table (0.1V steps, matches driver) ─────────────────────────────
+# Fallback OCV lookup for older drivers without ocv_soc_pct. Prefer the
+# driver's table via /sys/class/power_supply/battery/ocv_soc_pct.
 
 OCV_TABLE = [
     (298, 0),  (328, 5),  (348, 10), (358, 20), (363, 30), (366, 40),
@@ -416,6 +418,10 @@ EXAMPLES:
     else:
         coulomb_pct = None
 
+    ocv_drv = d["ocv_soc_pct"][0]
+    if ocv_drv is not None:
+        kv("ocv_soc_pct", f"{ocv_drv}% (driver table)")
+
     ocv_vals = {
         "v_ocv": v_ocv,
         "v_term": v_term,
@@ -465,9 +471,11 @@ EXAMPLES:
         else:
             print(f"[PASS] current direction correct: discharging")
 
-    # 3. large OCV gap
-    if coulomb_pct is not None and v_ocv is not None:
+    # 3. large OCV gap (driver table when present)
+    ocv_pct_val = d["ocv_soc_pct"][0]
+    if ocv_pct_val is None and v_ocv is not None:
         ocv_pct_val = ocv_pct(v_ocv)
+    if coulomb_pct is not None and ocv_pct_val is not None:
         gap = coulomb_pct - ocv_pct_val
         if abs(gap) > 30:
             print(f"[FAIL] Coulomb={coulomb_pct:.0f}% vs OCV={ocv_pct_val:.0f}% — gap={gap:+.0f} pp")

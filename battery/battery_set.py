@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-#!/usr/bin/env python3
 """
 Battery/INA228 interactive parameter setter.
 
@@ -532,54 +531,43 @@ def save_soc_persist():
     """Save current SOC to persistent storage for consistency across reboots.
 
     This is called after coulomb_uah calibration to ensure the SOC
-    remains consistent after reboot.
+    remains consistent after reboot. Delegates to battery-soc-persist.py
+    so the 0%/stale-voltage guards stay in one place.
     """
     import subprocess
 
-    # Try the Python script first. Look in any of the candidate install
-    # locations (per-user or system-wide) so the user does not need to
-    # reconfigure after running install.sh.
-    candidates = []
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = [here]
     if os.environ.get("PIBRICK_USER_HOME"):
         candidates.append(os.environ["PIBRICK_USER_HOME"])
+    if os.environ.get("PIBRICK_TOOLS"):
+        candidates.append(os.environ["PIBRICK_TOOLS"])
     if os.environ.get("HOME"):
         candidates.append(os.path.join(os.environ["HOME"], "battery-tools"))
+    candidates.append("/usr/lib/pibrick/battery")
     candidates.append("/usr/lib/pibrick/battery-tools")
 
+    seen = set()
     for tools_dir in candidates:
+        if not tools_dir or tools_dir in seen:
+            continue
+        seen.add(tools_dir)
         script_path = os.path.join(tools_dir, "battery-soc-persist.py")
-        if os.path.exists(script_path):
-            try:
-                result = subprocess.run(
-                    ["python3", script_path],
-                    capture_output=True,
-                    text=True,
-                    timeout=10
-                )
-                if result.returncode == 0:
-                    return True
-            except Exception:
-                pass
+        if not os.path.exists(script_path):
+            continue
+        try:
+            result = subprocess.run(
+                ["python3", script_path],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            if result.returncode == 0:
+                return True
+        except Exception:
+            pass
 
-    # Fallback: directly write to the persistence file
-    persist_file = "/var/lib/bq25890_battery/soc_persist"
-    capacity_path = "/sys/class/power_supply/battery/capacity"
-
-    try:
-        # Read current SOC
-        with open(capacity_path, "r") as f:
-            soc = int(f.read().strip())
-
-        # Ensure directory exists
-        os.makedirs(os.path.dirname(persist_file), exist_ok=True)
-
-        # Write to file
-        with open(persist_file, "w") as f:
-            f.write(f"soc={soc}\n")
-
-        return True
-    except Exception:
-        return False
+    return False
 
 
 def reload_driver(name=None):

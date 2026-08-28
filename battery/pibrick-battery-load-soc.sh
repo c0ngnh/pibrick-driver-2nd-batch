@@ -1,63 +1,54 @@
 #!/bin/sh
 # piBrick Battery SOC Boot Loader
 #
-# Reads the persisted SOC from /var/lib/bq25890_battery/soc_persist (written
-# previously by the shutdown hook or cron) and seeds the running kernel
-# driver via the writable `coulomb_uah` sysfs attribute.
+# Seeds the running kernel driver via the writable `coulomb_uah` sysfs
+# attribute. Coulomb remaining capacity is RAM-only: after reboot it is
+# -1 / 0 until something writes this node. If we leave it at 0, the
+# first INA228 sample publishes 0% even when the cell is at 4.1 V.
 #
-# IMPORTANT: This script uses the sysfs attribute, NOT modprobe.d injection.
-# Two reasons:
-#   1. udev loads the bq25890_battery module during device discovery,
-#      often before systemd-modules-load.service runs — so the old
-#      "rewrite modprobe.d, hope the driver reloads" approach was racy
-#      and caused the 0%-display-after-boot failure mode on PocketCM5.
-#   2. Writing sysfs coulomb_uah is atomic w.r.t. the driver state
-#      machine: we set bq->fg_disch_remain_uah directly, no module
-#      reload required.
+# Seed source, in order:
+#   1. /var/lib/bq25890_battery/soc_persist, if it is in range and not
+#      obviously stale vs the driver's OCV table.
+#   2. Otherwise the SOC from ocv_soc_pct (driver table), falling back
+#      to a coarse voltage lookup if that sysfs node is missing.
 #
-# Sanity check: when seeded, we compare the persisted SOC to the SOC
-# implied by the current battery voltage using the driver's OCV->SOC
-# table. If the voltages disagree strongly (e.g. voltage is healthy
-# 3.8 V but the persisted file says 0 %), we refuse to load the stale
-# value and let the driver seed from OCV instead. This breaks the
-# feedback loop where a 0% boot value keeps saving 0%.
-#
-# Idempotent and safe to run on any system where the driver may or may
-# not be present (e.g. different hardware clones of this repo).
+# Stale persist: empty-looking SOC (<15%) while voltage implies 15+
+# points more, or a large OCV gap while not charging. While charging,
+# a mid-pack persist is trusted because terminal voltage is inflated.
 
 # NOTE: do not `set -e` — this script handles many "expected" missing
 # conditions (no persist file, no driver, no voltage yet) and must exit
 # cleanly in all of them.
 
 SOC_PERSIST_FILE="/var/lib/bq25890_battery/soc_persist"
-# sysfs attr is on the i2c_client (not power_supply child).
 SYSFS_COULOMB="/sys/bus/i2c/devices"
 SYSFS_VOLTAGE="/sys/class/power_supply/battery/voltage_now"
 SYSFS_CHARGE_FULL="/sys/class/power_supply/battery/charge_full"
+SYSFS_OCV_SOC="/sys/class/power_supply/battery/ocv_soc_pct"
+SYSFS_STATUS="/sys/class/power_supply/battery/status"
+STALE_DELTA=15
+STALE_LOW=15
 
 log() {
-    # Surface in journal when run from systemd.
     echo "pibrick-battery-load-soc: $*"
 }
 
-# Nothing to do if there is no persisted value yet.
-if [ ! -r "$SOC_PERSIST_FILE" ]; then
-    log "no persisted SOC at $SOC_PERSIST_FILE; letting driver seed from OCV"
-    exit 0
-fi
+# Coarse OCV→SOC table (centivolts). Used only when ocv_soc_pct is absent.
+ocv_pct_from_cv() {
+    awk -v cv="$1" 'BEGIN{
+        split("330 337 340 344 348 352 356 360 365 370 375 380 385 390 395 400 410", v)
+        split("  0   2   9  18  24  30  35  43  51  55  63  73  78  88  94  96 100", p)
+        IMPLIED=0
+        for (i=1; i<=length(v); i++) {
+            if (v[i] <= cv) { IMPLIED = p[i] }
+            else             { print IMPLIED; exit }
+        }
+        print IMPLIED
+    }'
+}
 
-# Parse and validate "soc=N".
-SOC=$(awk -F= '/^soc=/{print $2; exit}' "$SOC_PERSIST_FILE" 2>/dev/null || true)
-case "$SOC" in
-    ''|*[!0-9]*) log "invalid persisted value; ignoring"; exit 0 ;;
-esac
-if [ "$SOC" -lt 0 ] || [ "$SOC" -gt 100 ]; then
-    log "persisted SOC $SOC out of range; ignoring"
-    exit 0
-fi
-
-# Wait briefly for the driver to expose coulomb_uah (udev-trigger may
-# still be racing us). Capped at 15 s so we don't hang on misconfig.
+# Wait for the driver to expose coulomb_uah (udev-trigger may still be
+# racing us). Capped at 15 s so we don't hang on misconfig.
 COULOMB_FILE=""
 i=0
 while [ $i -lt 60 ]; do
@@ -77,74 +68,134 @@ while [ $i -lt 60 ]; do
 done
 
 if [ -z "$COULOMB_FILE" ]; then
-    log "bq25890 driver did not come up; skipping SOC seed (will seed from OCV on next boot)"
+    log "bq25890 driver did not come up; skipping SOC seed"
     exit 0
 fi
 
 log "found coulomb_uah at $COULOMB_FILE"
 
-# Sanity check: compare persisted SOC against the SOC implied by the
-# current battery voltage. We use a tiny awk helper that mirrors the
-# driver's static OCV->SOC table so the sanity check matches the
-# driver's behavior. Keeping this in sync with bq25890_battery.c
-# voltage_to_percent_table (the table is sorted voltage-ASC).
-# Tolerance: persisted value is "stale" if voltage implies a SOC at
-# least 15 points higher. (A 0% persisted with a 3.8 V battery is
-# definitely stale; a 70% persisted with a 3.85 V battery can wait
-# for the next coulomb integration tick to converge.)
-VOLTAGE_UV=$(cat "$SYSFS_VOLTAGE" 2>/dev/null || echo 0)
-CHARGE_FULL=$(cat "$SYSFS_CHARGE_FULL" 2>/dev/null || echo 0)
-if [ -z "$VOLTAGE_UV" ] || [ "$VOLTAGE_UV" -lt 1000000 ] || [ "$VOLTAGE_UV" -gt 5000000 ]; then
-    log "could not read voltage_now (got '$VOLTAGE_UV'); skipping sanity check"
-    IMPLIES_PCT="-1"
-else
-    # Convert uV -> centivolts, then look up in the OCV table.
-    CV=$((VOLTAGE_UV / 10000))
-    IMPLIES_PCT=$(awk -v cv="$CV" 'BEGIN{
-        # Voltages in centivolts, sorted ASCENDING. Mirror of
-        # bq25890_battery.c voltage_to_percent_table (the calibrated
-        # 2026-08-22..28 version). Lookup: for input cv, return SOC
-        # for the largest entry with V <= cv (bsearch-left).  Below
-        # the lowest entry (334 cV = 3.34 V) we report 0; above 418
-        # we report 100.
-        #
-        # This is a coarse 17-row approximation of the 56-row driver
-        # table.  It is deliberately not a full mirror because the
-        # sanity check only needs to detect "obviously wrong" values
-        # (e.g. 0% persisted with a 3.8 V battery); 5% resolution is
-        # plenty for that.
-        split("330 337 340 344 348 352 356 360 365 370 375 380 385 390 395 400 410", v)
-        split("  0   2   9  18  24  30  35  43  51  55  63  73  78  88  94  96 100", p)
-        IMPLIED=0
-        for (i=1; i<=length(v); i++) {
-            if (v[i] <= cv) { IMPLIED = p[i] }
-            else             { print IMPLIED; exit }
-        }
-        print IMPLIED
-    }')
-fi
-
-if [ "$IMPLIES_PCT" != "-1" ]; then
-    DELTA=$((IMPLIES_PCT - SOC))
-    if [ "$DELTA" -ge 15 ]; then
-        log "persisted SOC=$SOC% looks stale (voltage ${VOLTAGE_UV}uV implies ${IMPLIES_PCT}%); discarding"
-        # Remove the stale file so we don't keep replaying it.
-        rm -f "$SOC_PERSIST_FILE"
-        exit 0
+# Voltage can lag the sysfs node by a sample; wait briefly so the OCV
+# fallback is not 0% because voltage_now was still unset.
+VOLTAGE_UV=0
+i=0
+while [ $i -lt 20 ]; do
+    VOLTAGE_UV=$(cat "$SYSFS_VOLTAGE" 2>/dev/null || echo 0)
+    case "$VOLTAGE_UV" in
+        ''|*[!0-9-]*) VOLTAGE_UV=0 ;;
+    esac
+    if [ "$VOLTAGE_UV" -ge 1000000 ] && [ "$VOLTAGE_UV" -le 5000000 ]; then
+        break
     fi
-    log "sanity check OK: persisted SOC=$SOC%, voltage implies ${IMPLIES_PCT}%, delta=${DELTA}"
+    i=$((i + 1))
+    sleep 0.25
+done
+
+IMPLIES_PCT="-1"
+if [ -r "$SYSFS_OCV_SOC" ]; then
+    OCV_RAW=$(cat "$SYSFS_OCV_SOC" 2>/dev/null || echo "")
+    case "$OCV_RAW" in
+        ''|*[!0-9-]*) ;;
+        *)
+            if [ "$OCV_RAW" -ge 0 ] && [ "$OCV_RAW" -le 100 ]; then
+                IMPLIES_PCT="$OCV_RAW"
+            fi
+            ;;
+    esac
+fi
+if [ "$IMPLIES_PCT" = "-1" ]; then
+    if [ "$VOLTAGE_UV" -ge 1000000 ] && [ "$VOLTAGE_UV" -le 5000000 ]; then
+        CV=$((VOLTAGE_UV / 10000))
+        IMPLIES_PCT=$(ocv_pct_from_cv "$CV")
+    else
+        log "could not read voltage_now (got '$VOLTAGE_UV')"
+    fi
 fi
 
-# Convert SOC% to coulomb_uah (micro-amp-hours). Cap to design capacity
-# to avoid clamping (coulomb_uah store clamps to charge_full_uah).
-if [ -z "$CHARGE_FULL" ] || [ "$CHARGE_FULL" -le 0 ]; then
+STATUS=$(cat "$SYSFS_STATUS" 2>/dev/null || echo "")
+CHARGING=0
+case "$STATUS" in
+    [Cc]harging) CHARGING=1 ;;
+esac
+
+SOC=""
+if [ -r "$SOC_PERSIST_FILE" ]; then
+    SOC=$(awk -F= '/^soc=/{print $2; exit}' "$SOC_PERSIST_FILE" 2>/dev/null || true)
+    case "$SOC" in
+        ''|*[!0-9]*)
+            log "invalid persisted value; ignoring $SOC_PERSIST_FILE"
+            SOC=""
+            ;;
+        *)
+            if [ "$SOC" -lt 0 ] || [ "$SOC" -gt 100 ]; then
+                log "persisted SOC $SOC out of range; ignoring"
+                SOC=""
+            fi
+            ;;
+    esac
+else
+    log "no persisted SOC at $SOC_PERSIST_FILE"
+fi
+
+persist_is_stale() {
+    # $1 persist $2 implies
+    _p=$1
+    _i=$2
+    if [ "$_i" = "-1" ]; then
+        return 1
+    fi
+    _d=$((_i - _p))
+    if [ "$_d" -lt "$STALE_DELTA" ]; then
+        return 1
+    fi
+    if [ "$_p" -lt "$STALE_LOW" ]; then
+        return 0
+    fi
+    if [ "$CHARGING" -eq 1 ]; then
+        return 1
+    fi
+    return 0
+}
+
+SEED_SOC=""
+SEED_SRC=""
+if [ -n "$SOC" ]; then
+    if persist_is_stale "$SOC" "$IMPLIES_PCT"; then
+        log "persisted SOC=$SOC% looks stale (voltage ${VOLTAGE_UV}uV implies ${IMPLIES_PCT}%); discarding"
+        rm -f "$SOC_PERSIST_FILE"
+        if [ "$IMPLIES_PCT" != "-1" ]; then
+            SEED_SOC="$IMPLIES_PCT"
+            SEED_SRC="OCV"
+        fi
+    else
+        if [ "$IMPLIES_PCT" != "-1" ]; then
+            log "sanity check OK: persisted SOC=$SOC%, voltage implies ${IMPLIES_PCT}%"
+        fi
+        SEED_SOC="$SOC"
+        SEED_SRC="persist"
+    fi
+elif [ "$IMPLIES_PCT" != "-1" ]; then
+    SEED_SOC="$IMPLIES_PCT"
+    SEED_SRC="OCV"
+fi
+
+if [ -z "$SEED_SOC" ]; then
+    log "no persist and no voltage; leaving coulomb unseeded for the driver OCV path"
+    exit 0
+fi
+
+CHARGE_FULL=$(cat "$SYSFS_CHARGE_FULL" 2>/dev/null || echo 0)
+case "$CHARGE_FULL" in
+    ''|*[!0-9]*) CHARGE_FULL=0 ;;
+esac
+if [ "$CHARGE_FULL" -le 0 ]; then
     log "could not read charge_full; aborting seed"
     exit 0
 fi
-UAH=$((SOC * CHARGE_FULL / 100))
+
+UAH=$((SEED_SOC * CHARGE_FULL / 100))
 
 if echo "$UAH" > "$COULOMB_FILE" 2>/dev/null; then
-    log "seeded coulomb_uah=$UAH uAh (SOC=$SOC%) from $SOC_PERSIST_FILE"
+    log "seeded coulomb_uah=$UAH uAh (SOC=$SEED_SOC%) from $SEED_SRC"
 else
     log "failed to write $COULOMB_FILE (driver may be busy)"
     exit 1
