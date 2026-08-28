@@ -609,9 +609,6 @@ uninstall_battery() {
 	# Drop polkit rules
 	rm -f /etc/polkit-1/localauthority/50-local.d/50-pibrick-battery.pkla
 
-	# Uninstall battery indicator
-	uninstall_battery_indicator
-
 	# Drop the SOC helper script + its services
 	rm -f "$PIBRICK_TOOLS_DIR/pibrick-battery-load-soc.sh"
 	rm -f /etc/systemd/system/pibrick-battery-load-soc.service
@@ -2009,9 +2006,6 @@ install_battery() {
 		success "Polkit rules installed for battery services"
 	fi
 
-	# Install battery indicator with autostart for desktop users
-	install_battery_indicator
-
 	# Initial SOC save
 	python3 "$PIBRICK_TOOLS/battery-soc-persist.py" --quiet 2>/dev/null || true
 
@@ -2109,9 +2103,6 @@ install_battery_original() {
 		success "Polkit rules installed for battery services"
 	fi
 
-	# Install battery indicator with autostart for desktop users
-	install_battery_indicator
-
 	# Initial SOC save
 	python3 "$PIBRICK_TOOLS/battery-soc-persist.py" --quiet 2>/dev/null || true
 
@@ -2180,80 +2171,6 @@ install_display() {
 	PANEL="$panel" ./build.sh --force --no-reboot
 
 	success "Display driver installed for panel: $(panel_label "$panel")"
-}
-
-# ── Install battery indicator with autostart ─────────────────────────────────
-# Installs the desktop battery indicator and sets up autostart for it.
-# The indicator shows SOC and charging status in the desktop panel.
-install_battery_indicator() {
-	# Check if the indicator script exists
-	if [ ! -f "$PIBRICK_LIB/desktop/pibrick-battery-indicator.py" ]; then
-		return 0
-	fi
-
-	info "Installing battery indicator..."
-
-	# Install the indicator script to the tools directory
-	mkdir -p "$PIBRICK_TOOLS_DIR"
-	if [ "$PIBRICK_LIB/desktop/pibrick-battery-indicator.py" -ef "$PIBRICK_TOOLS_DIR/pibrick-battery-indicator.py" ]; then
-		: # already in place
-	else
-		safe_cp "$PIBRICK_LIB/desktop/pibrick-battery-indicator.py" \
-			"$PIBRICK_TOOLS_DIR/pibrick-battery-indicator.py"
-		chmod +x "$PIBRICK_TOOLS_DIR/pibrick-battery-indicator.py"
-		success "Battery indicator installed"
-	fi
-
-	# Create autostart desktop entry
-	# This runs the indicator on login for the desktop user
-	# Priority: SUDO_USER (the actual desktop user when running via sudo)
-	# > ORIG_HOME (original caller's home) > fallback
-	local autostart_dir=""
-	if [ -n "${SUDO_USER:-}" ]; then
-		local user_home
-		user_home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
-		autostart_dir="$user_home/.config/autostart"
-	elif [ -n "${ORIG_HOME:-}" ] && [ -d "${ORIG_HOME:-}" ]; then
-		autostart_dir="$ORIG_HOME/.config/autostart"
-	fi
-
-	if [ -n "$autostart_dir" ]; then
-		mkdir -p "$autostart_dir"
-		cat > "$autostart_dir/pibrick-battery-indicator.desktop" << 'AUTOSTART'
-[Desktop Entry]
-Type=Application
-Name=piBrick Battery Indicator
-Comment=Battery state-of-charge and charging status indicator
-Exec=python3 /usr/lib/pibrick/battery/pibrick-battery-indicator.py
-Icon=battery
-Terminal=false
-Categories=System;Monitor;Battery;
-StartupNotify=false
-X-GNOME-Autostart-enabled=true
-AUTOSTART
-		chmod 644 "$autostart_dir/pibrick-battery-indicator.desktop"
-		success "Battery indicator autostart configured"
-	fi
-}
-
-# ── Uninstall battery indicator ───────────────────────────────────────────────
-uninstall_battery_indicator() {
-	info "Uninstalling battery indicator..."
-
-	# Remove the indicator script
-	rm -f "$PIBRICK_TOOLS_DIR/pibrick-battery-indicator.py"
-
-	# Remove autostart entries
-	if [ -n "${ORIG_HOME:-}" ]; then
-		rm -f "$ORIG_HOME/.config/autostart/pibrick-battery-indicator.desktop"
-	fi
-	if [ -n "${SUDO_USER:-}" ]; then
-		local user_home
-		user_home=$(getent passwd "$SUDO_USER" | cut -d: -f6)
-		rm -f "$user_home/.config/autostart/pibrick-battery-indicator.desktop"
-	fi
-
-	success "Battery indicator uninstalled"
 }
 
 # ── Install button service ─────────────────────────────────────────────────────

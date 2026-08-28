@@ -996,12 +996,20 @@ EOF
 # NOTE: This is KDE Plasma Mobile specific. On Phosh, we skip this since Phosh
 # uses its own quick settings system via phosh-osk-ui and gsettings.
 install_quicksetting() {
-    # Check if we're on KDE Plasma
+    # Detect KDE Plasma using multiple signals: env vars AND running processes.
+    # Checking process existence is more reliable than XDG_CURRENT_DESKTOP,
+    # which is often unset during sudo-based installation.
     local is_kde=0
     if [[ "${XDG_CURRENT_DESKTOP:-}" == *"kde"* ]] || \
        [[ "${XDG_CURRENT_DESKTOP:-}" == *"KDE"* ]] || \
        [[ "${XDG_CURRENT_DESKTOP:-}" == *"plasma"* ]] || \
        [[ "${XDG_CURRENT_DESKTOP:-}" == *"Plasma"* ]]; then
+        is_kde=1
+    fi
+    # Also check for running Plasma/KWin processes — these are present when the
+    # user is logged into a Plasma session even if XDG_CURRENT_DESKTOP is unset.
+    if pgrep -x kwin_wayland >/dev/null 2>&1 || \
+       pgrep -x plasmashell >/dev/null 2>&1; then
         is_kde=1
     fi
 
@@ -1074,6 +1082,15 @@ EOF
     local qs_dir="/usr/share/plasma/quicksettings/$qs_id"
     rm -rf "$qs_dir" 2>/dev/null || true
     cp -r "$SCRIPT_DIR/quicksetting/package" "$qs_dir"
+    # KPackage/GenericQML requires directories to have the execute bit set so
+    # the desktop user (not just root) can traverse into contents/ui/.
+    # Without it, plasmashell logs:
+    #   "Could not find required file 'mainscript' for package '...'"
+    #   "Quick setting package invalid: '.../metadata.json'"
+    # and silently drops the tile from the Quick Drawer. `cp -r` preserves
+    # source modes but on Debian the umask often strips +x on dirs during
+    # sudo-based installs, so we fix it explicitly here.
+    chmod -R u+rxX,go+rX "$qs_dir"
     # The QML tile always uses main.qml (the pure-QML fallback).
     # main.qml reads lock state via Process and works without the C++ plugin.
     # The qml_uri here MUST match the one used in build_quicksetting_plugin
@@ -1230,8 +1247,25 @@ install_systemd_service() {
 install_systemd_service
 
 # ── Disable KWin built-in auto-rotation (KDE only) ──────────────────────────────
+disable_iio_sensor_proxy() {
+    # Always mask iio-sensor-proxy.service — it feeds orientation data to KWin's
+    # built-in auto-rotation via D-Bus, which conflicts with our custom service regardless
+    # of which desktop environment is running.  We must stop it even on non-Plasma DEs.
+    if systemctl is-active --quiet iio-sensor-proxy.service 2>/dev/null || \
+       systemctl is-enabled --quiet iio-sensor-proxy.service 2>/dev/null; then
+        info "  Stopping and masking iio-sensor-proxy.service..."
+        systemctl mask iio-sensor-proxy.service >/dev/null 2>&1 || true
+        systemctl stop iio-sensor-proxy.service >/dev/null 2>&1 || true
+        info "  iio-sensor-proxy.service stopped and masked"
+    else
+        info "  iio-sensor-proxy.service already disabled"
+    fi
+}
+
 disable_kwin_auto_rotation() {
-    # Check if we're running on KDE Plasma
+    # Detect KDE Plasma using multiple signals: env vars AND running processes.
+    # Checking process existence is more reliable than XDG_CURRENT_DESKTOP,
+    # which is often unset during sudo-based installation.
     local is_kde=0
     if [[ "${XDG_CURRENT_DESKTOP:-}" == *"kde"* ]] || \
        [[ "${XDG_CURRENT_DESKTOP:-}" == *"KDE"* ]] || \
@@ -1239,13 +1273,21 @@ disable_kwin_auto_rotation() {
        [[ "${XDG_CURRENT_DESKTOP:-}" == *"Plasma"* ]]; then
         is_kde=1
     fi
+    # Also check for running Plasma/KWin processes — these are present when the
+    # user is logged into a Plasma session even if XDG_CURRENT_DESKTOP is unset.
+    if pgrep -x kwin_wayland >/dev/null 2>&1 || \
+       pgrep -x plasmashell >/dev/null 2>&1; then
+        is_kde=1
+    fi
 
     if [ "$is_kde" -eq 0 ]; then
-        info "Not on KDE Plasma - skipping KWin auto-rotation configuration"
+        info "Not on KDE Plasma — applying iio-sensor-proxy masking only"
+        disable_iio_sensor_proxy
         return 0
     fi
 
     info "Disabling KWin built-in auto-rotation..."
+    disable_iio_sensor_proxy
 
     # Find the active user (the user who owns the Wayland session)
     local active_user
@@ -1292,18 +1334,6 @@ with open(path, "w") as f:
                 info "  autoRotation already configured"
             fi
         fi
-    fi
-
-    # CRITICAL: mask and stop iio-sensor-proxy.service to prevent KWin from using it
-    # for built-in auto-rotation.  This conflicts with our custom autorotation service.
-    if systemctl is-active --quiet iio-sensor-proxy.service 2>/dev/null || \
-       systemctl is-enabled --quiet iio-sensor-proxy.service 2>/dev/null; then
-        info "  Stopping and masking iio-sensor-proxy.service..."
-        systemctl mask iio-sensor-proxy.service >/dev/null 2>&1 || true
-        systemctl stop iio-sensor-proxy.service >/dev/null 2>&1 || true
-        info "  iio-sensor-proxy.service stopped and masked"
-    else
-        info "  iio-sensor-proxy.service already disabled"
     fi
 
     info "  KWin auto-rotation configured"

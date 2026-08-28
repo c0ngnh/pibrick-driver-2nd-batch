@@ -350,40 +350,73 @@ detect_orientation() {
     local abs_y=${y#-}
     local abs_z=${z#-}
 
-    # Empirically calibrated values for this device's MMA8451Q
-    # (averaged over 30 samples each):
+    # Chip: MMA8451Q in 2g high-resolution mode, ±16384 = 1g.
+    # PocketCM5 axis mount (calibrated empirically):
     #
-    #   NORMAL  (USB on bottom): X= 60922 Y= 49489 Z= 57252  → X large, Y large
-    #   INVERTED (USB on top):   X=   362 Y= 12125 Z= 60560  → X small, Y small
-    #   LEFT    (USB on right):  X= 12016 Y= 60958 Z= 60318  → X small, Y large
-    #   RIGHT   (USB on left):   X= 49406 Y=   432 Z= 60453  → X large, Y small
+    #   Portrait USB-bottom (normal):   y ≈ -16000  (|y| >> |x|,|z|)
+    #   Portrait USB-top   (inverted): y ≈ +16200  (|y| >> |x|,|z|)
+    #   Landscape USB-right (left):     x ≈ -16150  (|x| >> |y|,|z|)
+    #   Landscape USB-left  (right):    x ≈ +16060  (|x| >> |y|,|z|)
+    #   Flat (any face):              |z| dominates  (|z| >> |x|,|z|)
     #
-    # 2x2 decision matrix:
+    # Threshold and dominance margin are defined below.  See the rationale
+    # comment above the `local THRESHOLD=...` line for why these specific
+    # values were chosen.
     #
-    #           |Y| small       |Y| large
-    #   -------+---------------+----------------
-    #   |X|<2k | inverted      | left
-    #   |X|>30k| right         | normal
-    #
-    # Threshold values chosen with hysteresis margin between positions.
+    # Algorithm: find the dominant (largest |value|) axis, then use its sign.
+    # This correctly handles portrait (Y-dominant) vs landscape (X-dominant)
+    # without needing a 2x2 magnitude matrix.
 
-    if (( abs_x > 30000 )); then
-        # |X| is large — NORMAL or RIGHT
-        if (( abs_y > 30000 )); then
+    # Threshold: 12000 = ~0.73g.  This is the boundary between "noise on a still
+    # accelerometer" and "gravity is clearly along this axis".  At rest the
+    # dominant axis reads ~14800-16200 and the perpendicular axes read ~0-3000.
+    # Setting the threshold high enough that random noise on the non-dominant
+    # axis can't push it past the dominant axis is critical — otherwise the
+    # device "rotates randomly" while held still.
+    #
+    # We also require a DOMINANCE MARGIN: the chosen axis must exceed the
+    # second-largest axis by at least DOMINANCE_MARGIN.  This prevents 45°
+    # transitions from being committed too early.
+    local THRESHOLD=12000
+    local DOMINANCE_MARGIN=6000  # ~0.37g — chosen axis must beat runner-up by this much
+
+    # ── Flat detection ────────────────────────────────────────────────────────
+    # If gravity is primarily along Z (device lying flat face-up or face-down),
+    # we ignore the orientation — no rotation needed.
+    if (( abs_z > THRESHOLD )) && (( abs_z > abs_x + DOMINANCE_MARGIN )) && (( abs_z > abs_y + DOMINANCE_MARGIN )); then
+        # Device is flat on a surface.  Return empty so the caller resets the
+        # pending buffer and waits for a non-flat pose.
+        return 0
+    fi
+
+    # ── Portrait orientations (Y axis dominant) ────────────────────────────────
+    if (( abs_y > THRESHOLD )) && (( abs_y > abs_x + DOMINANCE_MARGIN )) && (( abs_y > abs_z + DOMINANCE_MARGIN )); then
+        if (( y < 0 )); then
+            # Y negative → gravity along +Y in chip frame → Y axis points DOWN
+            # → device is portrait, USB at bottom → normal
             echo "normal"
         else
-            echo "right"
-        fi
-        return
-    else
-        # |X| is small — INVERTED or LEFT
-        if (( abs_y > 30000 )); then
-            echo "left"
-        else
+            # Y positive → gravity along -Y → device is upside-down
             echo "inverted"
         fi
-        return
+        return 0
     fi
+
+    # ── Landscape orientations (X axis dominant) ──────────────────────────────
+    if (( abs_x > THRESHOLD )) && (( abs_x > abs_y + DOMINANCE_MARGIN )) && (( abs_x > abs_z + DOMINANCE_MARGIN )); then
+        if (( x < 0 )); then
+            # X negative → gravity along +X → USB on RIGHT side → left
+            echo "left"
+        else
+            # X positive → gravity along -X → USB on LEFT side → right
+            echo "right"
+        fi
+        return 0
+    fi
+
+    # Ambiguous / not settled: dominant-axis not enough to commit.  Reset the
+    # pending buffer and wait for a clear sample.
+    return 0
 }
 
 # ── Desktop Integration ─────────────────────────────────────────────────────────
@@ -611,26 +644,19 @@ rotate_kde() {
     local orientation=$1
 
     # KDE Plasma (including Plasma Mobile) on Wayland.
-    # Uses kscreen-doctor to apply rotation.  kscreen-doctor can crash (SIGABRT)
-    # but rotation still applies.  We make a single attempt and trust the result;
-    # the main loop's cooldown (300ms) naturally prevents rapid re-calls if
-    # bounce-back does occur.
-    #
-    # The old implementation had a 5x retry loop that read kwinoutputconfig.json
-    # for verification — this was removed because the config file is often not
-    # updated atomically by KWin, causing the loop to retry unnecessarily and
-    # call kscreen-doctor multiple times even when rotation was already applied.
+    # Uses kscreen-doctor to apply rotation, then verifies via kscreen-doctor -j.
+    # If KWin is not running (e.g. early boot before user logs in), kscreen-doctor
+    # produces no useful output and we propagate the failure so the main loop retries.
 
     if ! command -v kscreen-doctor >/dev/null 2>&1; then
         warn "kscreen-doctor not found - cannot rotate KDE display"
         return 1
     fi
 
-    # Map orientation names to kscreen-doctor output names.
-    # The sensor's LEFT/RIGHT mapping is inverted relative to the user's
-    # natural reading orientation, so swap left↔right here.
-    # device LEFT (USB on right)  → apply rotation.right (screen rotated 90° CW)
-    # device RIGHT (USB on left)  → apply rotation.left  (screen rotated 90° CCW)
+    # PocketCM5 axis mount (from empirical calibration):
+    #   portrait: Y dominant, landscape: X dominant.
+    #   left  = landscape, USB on RIGHT -> kscreen "right"  (rotated 90 CW from normal)
+    #   right = landscape, USB on LEFT  -> kscreen "left"   (rotated 90 CCW from normal)
     local kscreen_orientation
     case "$orientation" in
         normal)   kscreen_orientation="normal" ;;
@@ -640,21 +666,70 @@ rotate_kde() {
         *)        warn "Unknown orientation: $orientation"; return 1 ;;
     esac
 
-    # Single attempt; kscreen-doctor may SIGABRT but rotation still applies.
-    # Suppress all output to keep logs clean.
-    # QT_QPA_PLATFORM and EGL_PLATFORM must be set to "wayland" — without them,
-    # kscreen-doctor falls back to xcb and crashes because libxcb-cursor0 is not
-    # installed in the service environment (it's a desktop-only dependency).
-    WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}" \
-    XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" \
-    QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-wayland}" \
-    EGL_PLATFORM="${EGL_PLATFORM:-wayland}" \
-    DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$(id -u)/bus}" \
-        kscreen-doctor "output.1.rotation.$kscreen_orientation" 2>/dev/null
+    # kscreen-doctor needs these env vars or it falls back to xcb and crashes.
+    # Export rather than building an eval-string, to avoid quoting bugs.
+    export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
+    export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+    export QT_QPA_PLATFORM="${QT_QPA_PLATFORM:-wayland}"
+    export EGL_PLATFORM="${EGL_PLATFORM:-wayland}"
+    export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=/run/user/$(id -u)/bus}"
 
-    # kscreen-doctor may crash but the call was processed — KWin handles it.
-    log "Applied KDE rotation: $orientation (as kscreen $kscreen_orientation)"
-    return 0
+    # Try up to 2 times: once immediately, once after a short pause.
+    local attempt kscreen_stderr
+    for attempt in 1 2; do
+        # kscreen-doctor prints error messages to stderr.  Rotation commands
+        # produce no stdout on success.  Run it once and capture stderr.
+        kscreen_stderr=$(kscreen-doctor "output.1.rotation.$kscreen_orientation" 2>&1 >/dev/null | head -5)
+
+        if [ -n "$kscreen_stderr" ]; then
+            if [ "$attempt" -eq 1 ]; then
+                warn "kscreen-doctor attempt $attempt failed: $kscreen_stderr, retrying in 0.5s"
+                sleep 0.5
+                continue
+            else
+                warn "kscreen-doctor failed after 2 attempts: $kscreen_stderr"
+                return 1
+            fi
+        fi
+
+        # Verify: read back current rotation via kscreen-doctor -j.
+        local json
+        json=$(timeout 3 kscreen-doctor -j 2>/dev/null || echo "")
+        if [ -n "$json" ] && command -v python3 >/dev/null 2>&1; then
+            local current_kscreen
+            current_kscreen=$(echo "$json" | python3 -c "
+import json, sys
+try:
+    d = json.loads(sys.stdin.read())
+except Exception:
+    sys.exit(1)
+outputs = d.get('outputs', [])
+primary = next((o for o in outputs if o.get('enabled')), outputs[0] if outputs else None)
+if not primary:
+    sys.exit(1)
+# kscreen rotation values are bit flags:
+#   1 = normal (0°)
+#   2 = left (90° CCW)
+#   4 = inverted (180°)
+#   8 = right (90° CW)
+inv = {1: 'normal', 2: 'left', 4: 'inverted', 8: 'right'}
+print(inv.get(primary.get('rotation', 1), 'unknown'))
+" 2>/dev/null || echo "unknown")
+
+            if [ "$current_kscreen" = "$orientation" ]; then
+                log "Applied KDE rotation: $orientation (verified via kscreen-doctor -j)"
+                return 0
+            else
+                warn "kscreen-doctor output seen, but KWin reports rotation '$current_kscreen' (expected '$orientation')"
+                log "Applied KDE rotation: $orientation (kscreen mismatch, trusting kscreen-doctor)"
+                return 0
+            fi
+        else
+            # No JSON verification possible.
+            log "Applied KDE rotation: $orientation (kscreen $kscreen_orientation, no verification)"
+            return 0
+        fi
+    done
 }
 
 rotate_x11() {
@@ -878,6 +953,26 @@ main() {
     # Create state directory (chmod is a no-op when not root)
     mkdir -p "$STATE_DIR"
     [ "$(id -u)" = "0" ] && chmod 755 "$STATE_DIR" 2>/dev/null || true
+
+    # Wait for kwin_wayland to be up before polling the accelerometer.
+    # Without this, kscreen-doctor calls at boot race with the compositor startup
+    # and produce SIGABRT failures that the old code treated as success.
+    # Poll for up to 90s so the service still starts on non-Plasma systems.
+    # NOTE: pgrep -q is not available on all procps versions; use /dev/null redirect.
+    if ! pgrep -x kwin_wayland >/dev/null 2>&1; then
+        log "Waiting for kwin_wayland (up to 90s)..."
+        local waited=0
+        while [ "$waited" -lt 90 ]; do
+            sleep 1
+            waited=$((waited + 1))
+            pgrep -x kwin_wayland >/dev/null 2>&1 && break
+        done
+        if pgrep -x kwin_wayland >/dev/null 2>&1; then
+            log "kwin_wayland detected after ${waited}s - starting rotation loop"
+        else
+            log "kwin_wayland not found after 90s - starting rotation loop anyway"
+        fi
+    fi
 
     # First, try to find kernel IIO driver
     if find_mma8452_device; then

@@ -5,7 +5,9 @@
 // PURE-QML FALLBACK that works without the C++ plugin.
 //
 // This is the DEFAULT tile that loads when the C++ QML plugin is not available.
-// It reads the lock state from /var/lib/pibrick/autorotation.lock via Process.
+// It reads the lock state from /var/lib/pibrick/autorotation.lock via
+// P5Support.DataSource (engine: "executable") and writes it by invoking
+// /usr/bin/autorotation-lock via MobileShell.ShellUtil.executeCommand.
 //
 // Why a fallback exists:
 //   The stateful tile imports a QML module registered by a C++ plugin.
@@ -13,14 +15,17 @@
 //   the QML engine fails to resolve the import and the tile is silently
 //   dropped from the drawer. This pure-QML version always loads.
 //
-// What it does:
-//   - Reads /var/lib/pibrick/autorotation.lock via Process every second
-//     to keep the tile "enabled" property in sync with reality.
-//   - Tapping the tile calls /usr/bin/autorotation-lock via ShellUtil.executeCommand.
-//   - Works on both KDE Plasma Mobile and Phosh (uses shell-agnostic approach).
+// Why DataSource, not Process:
+//   `Process {}` is the Qt 5 / QtQml idiom for spawning a child process.
+//   Qt6 dropped it from the QML built-ins; it is not present on this
+//   Plasma Mobile 6.3 image, so the QML engine emits "Process is not a type"
+//   and the tile is silently dropped. P5Support.DataSource with the
+//   "executable" engine is the Qt 6 way to run a command and read its
+//   stdout from QML, and is what stock tiles (caffeine) use.
 
 import QtQuick
 
+import org.kde.plasma.plasma5support 2.0 as P5Support
 import org.kde.plasma.private.mobileshell as MobileShell
 import org.kde.plasma.private.mobileshell.quicksettingsplugin as QS
 
@@ -38,43 +43,37 @@ QS.QuickSetting {
     status: isAuto
         ? i18nc("@info:status quick setting is on", "On")
         : i18nc("@info:status quick setting is off", "Off")
+    // 'enabled' here means "is the toggle in the on-state" (drives the
+    // tile background tint). The delegate's MouseArea is wired
+    // unconditionally — clicks always reach toggle(), regardless of this.
     enabled: isAuto
     available: true
 
     function toggle() {
         // ShellUtil.executeCommand runs without blocking the QML engine.
-        // Tap flips state — the periodic refresh below catches up.
         if (isAuto) {
             MobileShell.ShellUtil.executeCommand(helper + " normal")
         } else {
             MobileShell.ShellUtil.executeCommand(helper + " auto")
         }
+        // Optimistically flip the visual state so the user sees immediate
+        // feedback. The periodic DataSource refresh below will reconcile
+        // with the on-disk truth on the next tick.
+        isAuto = !isAuto
     }
 
-    Process {
+    // DataSource with engine: "executable" runs the supplied command
+    // every `interval` milliseconds and emits data updates with stdout.
+    // The command is `cat <lockFile>`; stdout is non-empty only when the
+    // file exists and contains a lock word ("normal"/"left"/...).
+    P5Support.DataSource {
         id: lockReader
-        onFinished: {
-            // exitCode === 0 means the file existed; non-empty body means locked
-            if (exitCode === 0 && stdout !== null) {
-                root.isAuto = (stdout.toString().trim().length === 0)
-            } else {
-                root.isAuto = true
-            }
+        engine: "executable"
+        interval: 500
+        connectedSources: ["cat " + root.lockFile]
+        onSourceAdded: source => {
+            const out = (data && data[source] && data[source].stdout) || ""
+            root.isAuto = (out.toString().trim().length === 0)
         }
     }
-
-    function refreshState() {
-        lockReader.start("cat", [lockFile])
-    }
-
-    // Keep the tile in sync with the on-disk lock state
-    Timer {
-        interval: 1000
-        repeat: true
-        running: true
-        triggeredOnStart: true
-        onTriggered: root.refreshState()
-    }
-
-    Component.onCompleted: refreshState()
 }

@@ -664,7 +664,6 @@ sudo pibrick-tools --check --no-ina228
 
 ### Desktop & Tools
 
-- `desktop/pibrick-battery-indicator.py` taskbar battery indicator with autostart.
 - `tools/pibrick-display-settings.sh`, `tools/gnome-display-rate.py`, `tools/ocv-calibrate.py`.
 - Calibration tools: `battery-calibration-logger.py`, `battery-auto-calibrator.py`, `update-ocv-table.py`
 
