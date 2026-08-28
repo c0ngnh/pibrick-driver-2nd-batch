@@ -2396,18 +2396,6 @@ static void bq25890_fg_charge_integrate(struct bq25890_device *bq)
 	bq->chg_last_jiffies = now;
 }
 
-static int bq25890_fg_charge_percent(struct bq25890_device *bq)
-{
-	long remain_uah, pct;
-
-	if (bq->chg_remain_uah < 0)
-		return -ENODATA;
-
-	remain_uah = bq->chg_remain_uah + bq->chg_added_uah;
-	pct = remain_uah * 100L / charge_full_uah;
-	return (int)clamp(pct, 0L, 99L);
-}
-
 static int bq25890_get_chip_state(struct bq25890_device *bq,
 				  struct bq25890_state *state);
 
