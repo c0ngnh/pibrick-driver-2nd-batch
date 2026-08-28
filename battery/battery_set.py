@@ -440,14 +440,30 @@ def persist_available():
 def persist_to_modprobe_d(name, value):
     """Update the value of `name` in MODPROBE_CONF.
 
-    Reads the file, removes any prior `options bq25890_battery <name>=<value>`
-    pair (whether on its own line or co-located with other pairs), then
-    appends a fresh single-pair line with the new value. Comments, blank
-    lines, and unrelated `options` lines are preserved. The output is one
-    `options bq25890_battery <name>=<value>` line per persisted parameter,
-    so each parameter can be removed or updated independently.
+    Reads the file, removes any prior `name=value` pair (whether on its
+    own options line or co-located with other pairs), then merges the new
+    value into the LAST remaining `options bq25890_battery` line — or
+    appends a fresh options line if none exists. Comments, blank lines,
+    and unrelated `options` lines for other modules are preserved.
+
+    Merging rather than appending is important for two reasons:
+      1. modprobe.d treats multiple `options MODNAME ...` lines as
+         independent command-line overrides: each is applied to the
+         kernel as the entire parameter set, with later lines winning
+         wholesale over earlier ones.  A two-line file like:
+             options bq25890_battery A=1 B=2
+             options bq25890_battery charge_full_uah=4800000
+         causes the kernel to load bq25890_battery with ONLY
+         charge_full_uah=4800000, dropping A and B back to defaults.
+      2. Our boot-time applier (pibrick-battery-apply-modprobe.service)
+         applies "last wins" semantics to mirror modprobe's behaviour,
+         which makes a single-line conf much easier to reason about.
+
+    Net effect after persist: at most ONE `options bq25890_battery ...`
+    line in the file, with all persisted params side by side.
     """
-    new_line = f"options bq25890_battery {name}={value}"
+    new_pair = f"{name}={value}"
+    new_line = f"options bq25890_battery {new_pair}"
 
     if os.path.exists(MODPROBE_CONF):
         with open(MODPROBE_CONF) as f:
@@ -457,12 +473,14 @@ def persist_to_modprobe_d(name, value):
         existing = ""
         trailing_nl = True
 
-    # Split on newlines, drop the trailing empty element if present so
-    # we can process line-by-line.
     lines = existing.split("\n")
     if trailing_nl and lines and lines[-1] == "":
         lines.pop()
 
+    # Strip any "name=value" pair that matches our parameter from each
+    # `options bq25890_battery ...` line, and remember the LAST such line
+    # so we can merge our new pair into it instead of appending a new line.
+    last_battery_idx = -1
     kept = []
     for ln in lines:
         stripped = ln.strip()
@@ -470,44 +488,44 @@ def persist_to_modprobe_d(name, value):
             kept.append(ln)
             continue
 
-        # Only modify the bq25890_battery options lines. Leave everything
-        # else (other modules' options, comments, blank lines) alone.
         if not (stripped.startswith("options bq25890_battery") or
                 stripped.startswith("# options bq25890_battery")):
             kept.append(ln)
             continue
 
-        # Strip any " name=value" pair that matches our parameter from the
-        # tokens after `options <module>`.
         tokens = stripped.split()
-        # tokens[0] is "options", tokens[1] is the module name
         if len(tokens) < 2 or tokens[0] != "options":
             kept.append(ln)
             continue
         is_commented = ln.lstrip().startswith("#")
         prefix = "# " if is_commented else ""
-        head = tokens[:2]  # ['options', 'bq25890_battery']
+        head = tokens[:2]
         body = []
         for tok in tokens[2:]:
-            if "=" in tok:
-                tok_name = tok.split("=", 1)[0]
-                if tok_name == name:
-                    continue  # drop this pair
+            if "=" in tok and tok.split("=", 1)[0] == name:
+                continue
             body.append(tok)
-        # Reassemble: only keep the line if it still has at least one pair
-        # (otherwise we'd produce `options bq25890_battery` with no body).
         if body:
             kept.append(f"{prefix}{head[0]} {head[1]} " + " ".join(body))
-        # else: drop the line entirely
+            last_battery_idx = len(kept) - 1
+        # else: this line is now empty, drop it entirely.
 
-    kept.append(new_line)
+    if last_battery_idx >= 0:
+        # Merge our new pair into the trailing battery options line.
+        existing_line = kept[last_battery_idx]
+        sep = "" if existing_line.endswith(" ") or new_pair.startswith(" ") else " "
+        kept[last_battery_idx] = existing_line + sep + new_pair
+    else:
+        # No existing battery options line — add a fresh one.
+        kept.append(new_line)
+
     body = "\n".join(kept) + "\n"
     tmp = MODPROBE_CONF + ".tmp"
     with open(tmp, "w") as f:
         f.write(body)
     os.replace(tmp, MODPROBE_CONF)
     print(f"  -> Persisted to {MODPROBE_CONF}:")
-    print(f"       {new_line}")
+    print(f"       {new_pair}")
 
 
 def save_soc_persist():

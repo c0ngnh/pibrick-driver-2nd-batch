@@ -87,7 +87,7 @@ log "found coulomb_uah at $COULOMB_FILE"
 # current battery voltage. We use a tiny awk helper that mirrors the
 # driver's static OCV->SOC table so the sanity check matches the
 # driver's behavior. Keeping this in sync with bq25890_battery.c
-# voltage_to_percent_table (the table is sorted voltage-DESC).
+# voltage_to_percent_table (the table is sorted voltage-ASC).
 # Tolerance: persisted value is "stale" if voltage implies a SOC at
 # least 15 points higher. (A 0% persisted with a 3.8 V battery is
 # definitely stale; a 70% persisted with a 3.85 V battery can wait
@@ -101,17 +101,20 @@ else
     # Convert uV -> centivolts, then look up in the OCV table.
     CV=$((VOLTAGE_UV / 10000))
     IMPLIES_PCT=$(awk -v cv="$CV" 'BEGIN{
-        # Voltages in centivolts, sorted ASCENDING. Keep in sync with
-        # bq25890_battery.c voltage_to_percent_table — the driver uses
-        # ascending voltage: low V = 0 %, high V = 100 %. Lookup returns
-        # the SOC for the largest entry with V <= cv (bsearch-left).
+        # Voltages in centivolts, sorted ASCENDING. Mirror of
+        # bq25890_battery.c voltage_to_percent_table (the calibrated
+        # 2026-08-22..28 version). Lookup: for input cv, return SOC
+        # for the largest entry with V <= cv (bsearch-left).  Below
+        # the lowest entry (334 cV = 3.34 V) we report 0; above 418
+        # we report 100.
         #
-        # AUTO-GENERATED MIRROR of the current driver table — keep in
-        # sync whenever voltage_to_percent_table is updated. The last
-        # "max V" entry (here 418) is treated as 100 % so any higher
-        # voltage is also reported as 100 %.
-        split("330 332 332 333 340 340 343 348 350 358 364 369 373 375 379 383 386 391 394 418", v)
-        split("  0   5  10  15  20  25  30  35  40  45  50  55  60  65  70  75  80  85  90 100", p)
+        # This is a coarse 17-row approximation of the 56-row driver
+        # table.  It is deliberately not a full mirror because the
+        # sanity check only needs to detect "obviously wrong" values
+        # (e.g. 0% persisted with a 3.8 V battery); 5% resolution is
+        # plenty for that.
+        split("330 337 340 344 348 352 356 360 365 370 375 380 385 390 395 400 410", v)
+        split("  0   2   9  18  24  30  35  43  51  55  63  73  78  88  94  96 100", p)
         IMPLIED=0
         for (i=1; i<=length(v); i++) {
             if (v[i] <= cv) { IMPLIED = p[i] }

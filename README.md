@@ -133,7 +133,7 @@ end of the run is your cue.
 | Component | What it removes |
 |---|---|
 | `display` | `pibrick.service`, `/lib/modules/<kernel>/kernel/drivers/gpu/drm/panel/panel-pibrick.ko`, all three known overlays, `dtoverlay=…` lines in `/boot/firmware/config.txt`, `/etc/pibrick.panel`, `/etc/pibrick.display-refresh`, `/etc/udev/rules.d/99-pibrick-display.rules` |
-| `battery` | `bq25890_battery.ko`, `/etc/modprobe.d/pibrick-battery.conf`, `/var/lib/bq25890_battery/soc_persist`, `/etc/cron.d/pibrick-battery-soc`, `pibrick-battery-{load-soc,soc-persist}.service` units, `/usr/lib/pibrick/battery/pibrick-battery-load-soc.sh`. `pibrick-battery-calibration.service` is removed by the `calibration` component |
+| `battery` | `bq25890_battery.ko`, `/etc/modprobe.d/pibrick-battery.conf`, `/var/lib/bq25890_battery/soc_persist`, `/etc/cron.d/pibrick-battery-soc`, `pibrick-battery-{load-soc,soc-persist,apply-modprobe}.service` units, `/usr/lib/pibrick/battery/pibrick-battery-load-soc.sh`, `/usr/lib/pibrick/battery/pibrick-battery-apply-modprobe.sh`. `pibrick-battery-calibration.service` is removed by the `calibration` component |
 | `calibration` | `pibrick-battery-calibration.service`, the entire `/var/log/bq25890_battery/` directory (CSV, logs, `suggested_ocv_table.h`, `calibration_status.json`), `battery-calibration-logger.py`, `battery-auto-calibrator.py`. `battery_set.py` / `battery-soc-persist.py` are **kept** as they are useful diagnostics even with no driver loaded |
 | `upower` | Restores `/usr/libexec/upowerd` from the most recent `.bak-pibrick-*` backup |
 | `kde-mobile-desktop` | SDDM config, `/etc/sddm.conf.d/kde-plasma-mobile.conf`, KWin drop-ins; `kde-standard`/`sddm` packages left in place |
@@ -420,6 +420,20 @@ sudo pibrick-tools --battery-config --list
 
 **Important**: `--persist` makes the change survive reboot. Without it, the change is "live" — visible immediately but lost on next driver reload or reboot.
 
+#### Why `--persist` Needs the `pibrick-battery-apply-modprobe.service`
+
+The `bq25890_battery` module is auto-loaded by udev-trigger the moment the I2C client device appears, which happens **before** `systemd-modules-load.service` has a chance to consult `/etc/modprobe.d`. This means module parameters specified in `/etc/modprobe.d/pibrick-battery.conf` are silently ignored at boot — every persisted value (e.g. `charge_full_uah`) reverts to its in-kernel default.
+
+To bridge the gap, the installer ships `pibrick-battery-apply-modprobe.service` (enabled by default). At boot it waits for `/sys/module/bq25890_battery/parameters/` to exist, then writes each persisted `name=value` pair from `/etc/modprobe.d/pibrick-battery.conf` to the corresponding sysfs node. This is race-free (no `rmmod`/`modprobe` reload, which would break `pibrick-battery-load-soc.sh` and was the root cause of earlier 0%-after-boot failures) and idempotent (safe to run multiple times).
+
+```bash
+# Manual check after a config change
+sudo systemctl status pibrick-battery-apply-modprobe.service
+sudo journalctl -u pibrick-battery-apply-modprobe.service
+# Direct invocation (after driver is loaded):
+sudo /usr/lib/pibrick/battery/pibrick-battery-apply-modprobe.sh
+```
+
 #### Calibration Log Files
 
 | File | Purpose |
@@ -520,6 +534,7 @@ The battery driver (`battery/bq25890_battery.c`) has been significantly enhanced
 | `battery_set.py` | Interactive battery parameter setter (charge_full_uah, ina228_shunt_uohm, etc.) |
 | `battery-check.py` | Comprehensive battery diagnostics |
 | `battery-soc-persist.py` | SOC persistence across reboots |
+| `postprocess-ocv-table.py` | Post-process calibrator's `suggested_ocv_table.h` into a clean, monotonic driver table |
 | `battery-calibration-logger.py` | Logs voltage-SOC data continuously |
 | `battery-auto-calibrator.py` | Analyzes data and generates OCV table |
 

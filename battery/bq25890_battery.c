@@ -842,124 +842,92 @@ typedef struct {
     int percentage;
 } VoltageMap;
 /*
- * Standard 1S LiPo rest OCV (4.20 V profile) scaled to 4.176 V full charge.
- * Matches typical fuel-gauge / ModelGauge baseline; centivolts (3.70 V -> 370).
- * Tune using tools/ocv-calibrate.py with idle (unplugged, rested) sysfs samples only.
+ * Calibrated 1S LiPo rest OCV table for the PocketCM5 / BQ25895 pack
+ * (4800 mAh rated, 4.176 V full charge). Centivolts; 3.70 V -> 370.
  *
- * IMPORTANT: this table must be sorted ASCENDING by voltage. The driver
- * walks it looking for `voltage >= v[i] && voltage < v[i+1]` and assumes
- * `v[0]` is the lowest voltage (= 0%) and `v[size-1]` is the highest (= 100%).
- * A descending table would make the first lookup `voltage <= v[0]` match
- * for almost any voltage and force SOC=0% forever (this was the root
- * cause of an earlier "always shows 0%" bug).
+ * IMPORTANT: this table must be sorted ASCENDING by voltage and MUST
+ * have exactly one entry per voltage.  The driver walks it looking
+ * for `voltage >= v[i] && voltage < v[i+1]` and assumes `v[0]` is the
+ * lowest voltage (= 0%) and `v[size-1]` is the highest (= 100%).
+ * A descending table, a duplicate-voltage table, or a non-monotonic
+ * table would each produce wrong SOC for some voltage range.
  *
- * ENHANCED: This table has been replaced with a calibrated version from
- * actual battery measurements (3455 resting samples, 99.6% confidence).
- * The table provides 1% SOC granularity for improved accuracy.
- * Voltage values are offset by +1 from raw measurements to ensure proper
- * linear interpolation in the driver's lookup function.
+ * Source: 5299 resting samples logged 2026-08-22 .. 2026-08-28 by
+ * pibrick-battery-calibration.service, processed by
+ * battery-auto-calibrator.py and collapsed by
+ * battery/postprocess-ocv-table.py.  The raw calibrator output had
+ * multiple (voltage_cv, soc) entries per voltage — the dominant one
+ * per voltage (highest sample count, ties to lower SOC) was kept and
+ * the curve was monotonicity-floor-corrected (any SOC drop was raised
+ * to the previous max).  Confidence: 0.99, SOC coverage: 97%.
+ *
+ * Re-generate by:
+ *   1. Run pibrick-battery-calibration.service for 1+ charge cycles
+ *   2. python3 battery-auto-calibrator.py --check
+ *   3. python3 battery/postprocess-ocv-table.py \
+ *        /var/log/bq25890_battery/suggested_ocv_table.h \
+ *        /tmp/ocv-clean.h /tmp/ocv-clean.csv \
+ *        /var/log/bq25890_battery/calibration_status.json
+ *   4. Paste the resulting static VoltageMap[] body into here.
  */
 static VoltageMap voltage_to_percent_table[] = {
-	{ 325,   2 },
-	{ 325,   3 },
-	{ 326,   4 },
-	{ 327,   1 },
-	{ 327,   5 },
-	{ 328,   6 },
-	{ 328,   7 },
-	{ 328,   8 },
-	{ 329,   9 },
-	{ 331,   0 },
-	{ 331,  10 },
-	{ 333,  11 },
-	{ 335,  12 },
-	{ 336,  13 },
-	{ 336,  14 },
-	{ 337,  15 },
-	{ 340,  16 },
-	{ 342,  18 },
-	{ 343,  17 },
-	{ 344,  19 },
-	{ 344,  20 },
-	{ 345,  21 },
-	{ 346,  22 },
-	{ 347,  23 },
-	{ 348,  24 },
-	{ 348,  25 },
-	{ 349,  26 },
-	{ 349,  27 },
-	{ 350,  28 },
-	{ 351,  29 },
-	{ 352,  30 },
-	{ 352,  31 },
-	{ 352,  32 },
-	{ 355,  36 },
-	{ 356,  33 },
-	{ 356,  35 },
-	{ 356,  37 },
-	{ 357,  34 },
-	{ 357,  45 },
-	{ 357,  47 },
-	{ 358,  38 },
-	{ 358,  39 },
-	{ 358,  44 },
-	{ 358,  46 },
-	{ 359,  40 },
-	{ 360,  41 },
-	{ 360,  42 },
-	{ 360,  48 },
-	{ 360,  49 },
-	{ 361,  43 },
-	{ 361,  50 },
-	{ 361,  51 },
-	{ 367,  52 },
-	{ 368,  53 },
-	{ 368,  54 },
-	{ 368,  56 },
-	{ 369,  55 },
-	{ 369,  57 },
-	{ 369,  58 },
-	{ 370,  59 },
-	{ 371,  60 },
-	{ 373,  61 },
-	{ 374,  62 },
-	{ 378,  63 },
-	{ 379,  64 },
-	{ 380,  65 },
-	{ 382,  66 },
-	{ 382,  67 },
-	{ 383,  68 },
-	{ 383,  71 },
-	{ 384,  69 },
-	{ 384,  70 },
-	{ 384,  72 },
-	{ 384,  73 },
-	{ 385,  74 },
-	{ 385,  91 },
-	{ 386,  75 },
-	{ 386,  92 },
-	{ 387,  76 },
-	{ 387,  77 },
-	{ 387,  83 },
-	{ 388,  78 },
-	{ 388,  88 },
-	{ 388,  89 },
-	{ 389,  93 },
-	{ 390,  79 },
-	{ 391,  80 },
-	{ 391,  81 },
-	{ 391,  82 },
-	{ 391,  90 },
-	{ 391,  94 },
-	{ 392,  86 },
-	{ 392,  87 },
-	{ 394,  85 },
-	{ 395,  84 },
-	{ 396,  95 },
-	{ 400,  99 },
-	{ 401,  96 },
-	{ 402,  97 },
-	{ 402,  98 },
+	{ 334,   2 },  /* 14 samples */
+	{ 335,   4 },  /* 58 samples */
+	{ 337,   6 },  /* 54 samples */
+	{ 338,   7 },  /* 57 samples */
+	{ 339,   8 },  /* 59 samples */
+	{ 340,   9 },  /* 53 samples */
+	{ 341,  10 },  /* 45 samples */
+	{ 342,  11 },  /* 44 samples */
+	{ 343,  18 },  /* 50 samples */
+	{ 344,  18 },  /* 65 samples (raised from 17 for monotonicity) */
+	{ 345,  21 },  /* 58 samples */
+	{ 346,  21 },  /* 62 samples (raised from 16) */
+	{ 347,  22 },  /* 52 samples */
+	{ 348,  24 },  /* 72 samples */
+	{ 349,  27 },  /* 60 samples */
+	{ 350,  28 },  /* 49 samples */
+	{ 351,  29 },  /* 49 samples */
+	{ 352,  30 },  /* 53 samples */
+	{ 353,  31 },  /* 54 samples */
+	{ 355,  33 },  /* 52 samples */
+	{ 356,  35 },  /* 58 samples */
+	{ 357,  39 },  /* 75 samples */
+	{ 358,  41 },  /* 84 samples */
+	{ 359,  42 },  /* 77 samples */
+	{ 360,  43 },  /* 83 samples */
+	{ 361,  45 },  /* 94 samples */
+	{ 363,  48 },  /* 101 samples */
+	{ 365,  51 },  /* 43 samples */
+	{ 366,  51 },  /* raised from 50 */
+	{ 367,  53 },  /* 40 samples */
+	{ 369,  54 },  /* 70 samples */
+	{ 370,  55 },  /* 52 samples */
+	{ 371,  56 },  /* 53 samples */
+	{ 373,  60 },  /* 75 samples */
+	{ 374,  60 },  /* raised from 57 */
+	{ 375,  63 },  /* 33 samples */
+	{ 377,  63 },  /* raised from 58 */
+	{ 378,  65 },  /* 32 samples */
+	{ 379,  65 },  /* raised from 59 */
+	{ 380,  73 },  /* 48 samples */
+	{ 381,  73 },  /* raised from 72 */
+	{ 383,  76 },  /* 49 samples */
+	{ 384,  77 },  /* 63 samples */
+	{ 385,  78 },  /* 65 samples */
+	{ 386,  81 },  /* 49 samples */
+	{ 387,  83 },  /* 52 samples */
+	{ 388,  86 },  /* 54 samples */
+	{ 389,  88 },  /* 80 samples */
+	{ 390,  88 },  /* 79 samples (raised from 84) */
+	{ 391,  89 },  /* 42 samples */
+	{ 392,  92 },  /* 27 samples */
+	{ 393,  93 },  /* 33 samples */
+	{ 395,  94 },  /* 53 samples */
+	{ 399,  96 },  /* 52 samples */
+	{ 407,  97 },  /* 22 samples */
+	{ 413,  98 },  /* 15 samples */
+	{ 418, 100 },  /* synthetic full-charge point (above max observed) */
 };
 const int table_size = ARRAY_SIZE(voltage_to_percent_table);
 static int bq25890_calc_lipo_percentage(int voltage_uv)

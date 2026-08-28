@@ -1,0 +1,43 @@
+[Unit]
+Description=piBrick Battery Modprobe-Parameters Runtime Applier
+# Apply bq25890_battery module parameters from /etc/modprobe.d at boot.
+#
+# Why a separate unit: the bq25890_battery driver is auto-loaded by
+# udev-trigger as soon as the I2C client device appears, which on
+# PocketCM5 happens BEFORE systemd-modules-load.service runs.  At that
+# point /etc/modprobe.d has not been consulted, so every persisted
+# `options bq25890_battery ...` directive is silently ignored at boot
+# and the driver falls back to its in-kernel defaults (3800 mAh for
+# charge_full_uah on a 5000 mAh pack, etc.).  This unit bridges the
+# gap: it waits for /sys/module/bq25890_battery to appear, then writes
+# each persisted param back via the writable sysfs nodes.
+#
+# We deliberately do NOT modprobe -r / modprobe — that trick is racy
+# with udev-trigger and was the root cause of the 0%-display-after-
+# boot failure mode.  The sysfs-write approach is race-free: the
+# kernel parameter store is read once during insmod and writes from
+# userspace are simply held until then; once the module is up, every
+# write is observable on the next read of the corresponding sysfs node.
+#
+# Ordering: DefaultDependencies=no so we can race udev-trigger rather
+# than wait for the full multi-user target.  We must finish before
+# display-manager.service (UPower / KDE read capacity on first
+# sample) and before pibrick-battery-calibration.service starts
+# reading charge_full_design.
+
+[Unit]
+Description=piBrick Battery Modprobe-Parameters Runtime Applier
+DefaultDependencies=no
+Before=display-manager.service pibrick-battery-calibration.service pibrick-battery-load-soc.service
+After=local-fs.target sys-kernel-debug.mount
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/lib/pibrick/battery/pibrick-battery-apply-modprobe.sh
+TimeoutStartSec=45
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

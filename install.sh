@@ -581,7 +581,8 @@ uninstall_battery() {
 	# Stop services that depend on the driver / sysfs.
 	for svc in pibrick-battery-calibration.service \
 	           pibrick-battery-soc-persist.service \
-	           pibrick-battery-load-soc.service; do
+	           pibrick-battery-load-soc.service \
+	           pibrick-battery-apply-modprobe.service; do
 		systemctl stop "$svc" 2>/dev/null || true
 		systemctl disable "$svc" 2>/dev/null || true
 	done
@@ -611,8 +612,10 @@ uninstall_battery() {
 
 	# Drop the SOC helper script + its services
 	rm -f "$PIBRICK_TOOLS_DIR/pibrick-battery-load-soc.sh"
+	rm -f "$PIBRICK_TOOLS_DIR/pibrick-battery-apply-modprobe.sh"
 	rm -f /etc/systemd/system/pibrick-battery-load-soc.service
 	rm -f /etc/systemd/system/pibrick-battery-soc-persist.service
+	rm -f /etc/systemd/system/pibrick-battery-apply-modprobe.service
 
 	systemctl daemon-reload || true
 	depmod -a 2>/dev/null || true
@@ -1977,10 +1980,25 @@ install_battery() {
 		fi
 	fi
 
+	if [ -f "$PIBRICK_LIB/battery/pibrick-battery-apply-modprobe.sh" ]; then
+		if [ "$PIBRICK_LIB/battery/pibrick-battery-apply-modprobe.sh" -ef "$PIBRICK_TOOLS_DIR/pibrick-battery-apply-modprobe.sh" ]; then
+			: # already in place
+		else
+			safe_cp "$PIBRICK_LIB/battery/pibrick-battery-apply-modprobe.sh" \
+				"$PIBRICK_TOOLS_DIR/pibrick-battery-apply-modprobe.sh"
+		fi
+	fi
+
 	if [ -f "$PIBRICK_LIB/battery/pibrick-battery-load-soc.service" ]; then
 		install_service "$PIBRICK_LIB/battery/pibrick-battery-load-soc.service"
 		systemctl enable pibrick-battery-load-soc.service
 		success "SOC load-on-boot service enabled"
+	fi
+
+	if [ -f "$PIBRICK_LIB/battery/pibrick-battery-apply-modprobe.service" ]; then
+		install_service "$PIBRICK_LIB/battery/pibrick-battery-apply-modprobe.service"
+		systemctl enable pibrick-battery-apply-modprobe.service
+		success "Modprobe-params runtime applier service enabled"
 	fi
 
 	if [ -f "$PIBRICK_LIB/battery/pibrick-battery-soc-persist.service" ]; then
@@ -2074,10 +2092,25 @@ install_battery_original() {
 		fi
 	fi
 
+	if [ -f "$PIBRICK_LIB/battery/pibrick-battery-apply-modprobe.sh" ]; then
+		if [ "$PIBRICK_LIB/battery/pibrick-battery-apply-modprobe.sh" -ef "$PIBRICK_TOOLS_DIR/pibrick-battery-apply-modprobe.sh" ]; then
+			: # already in place
+		else
+			safe_cp "$PIBRICK_LIB/battery/pibrick-battery-apply-modprobe.sh" \
+				"$PIBRICK_TOOLS_DIR/pibrick-battery-apply-modprobe.sh"
+		fi
+	fi
+
 	if [ -f "$PIBRICK_LIB/battery/pibrick-battery-load-soc.service" ]; then
 		install_service "$PIBRICK_LIB/battery/pibrick-battery-load-soc.service"
 		systemctl enable pibrick-battery-load-soc.service
 		success "SOC load-on-boot service enabled"
+	fi
+
+	if [ -f "$PIBRICK_LIB/battery/pibrick-battery-apply-modprobe.service" ]; then
+		install_service "$PIBRICK_LIB/battery/pibrick-battery-apply-modprobe.service"
+		systemctl enable pibrick-battery-apply-modprobe.service
+		success "Modprobe-params runtime applier service enabled"
 	fi
 
 	if [ -f "$PIBRICK_LIB/battery/pibrick-battery-soc-persist.service" ]; then

@@ -36,6 +36,7 @@ install-tools: install
 	@install -m 755 battery_set.py $(PIBRICK_TOOLS)/ 2>/dev/null || true
 	@install -m 755 battery-check.py $(PIBRICK_TOOLS)/ 2>/dev/null || true
 	@install -m 755 battery-soc-persist.py $(PIBRICK_TOOLS)/ 2>/dev/null || true
+	@install -m 755 postprocess-ocv-table.py $(PIBRICK_TOOLS)/ 2>/dev/null || true
 	@echo "Battery tools installed to $(PIBRICK_TOOLS)"
 
 # Install calibration tools
