@@ -318,7 +318,7 @@ module_param(discharge_current_ua, int, 0644);
 MODULE_PARM_DESC(discharge_current_ua,
 		 "Assumed average discharge (uA) for time-to-empty only");
 
-static int charge_full_uah = 3800000;
+static int charge_full_uah = 4800000;
 module_param(charge_full_uah, int, 0644);
 MODULE_PARM_DESC(charge_full_uah, "Battery capacity (uAh)");
 
@@ -338,7 +338,7 @@ module_param(discharge_load_factor_pct, int, 0644);
 MODULE_PARM_DESC(discharge_load_factor_pct,
 		 "Extra %% added to discharge proxy while under sustained load");
 
-static int discharge_max_ua = 2200000;
+static int discharge_max_ua = 4000000;
 module_param(discharge_max_ua, int, 0644);
 MODULE_PARM_DESC(discharge_max_ua,
 		 "Hard ceiling (uA) for the SOC integrator proxy current");
@@ -1901,7 +1901,7 @@ static void bq25890_fg_integrate_ina228_locked(struct bq25890_device *bq)
 	s64 dt_msec;
 	s64 corrected_current_ua;
 	s64 new_disch_remain_nah;
-	s64 drop_nah;
+	s64 delta_nah;
 	int current_ua;
 
 	if (!ina || !ina->present)
@@ -1910,7 +1910,7 @@ static void bq25890_fg_integrate_ina228_locked(struct bq25890_device *bq)
 	current_ua = bq25890_ina228_corrected_current_ua(
 		ina->current_ua, ina->temp_correction_ppm);
 
-	if (current_ua <= 0)
+	if (current_ua == 0)
 		return;
 	if (charge_full_uah <= 0)
 		return;
@@ -1937,12 +1937,6 @@ static void bq25890_fg_integrate_ina228_locked(struct bq25890_device *bq)
 		dt_msec = (s64)BQ25890_FG_CHG_INTEGRATE_MAX_SEC * 1000LL;
 
 	/*
-	 * Use the temperature-corrected current for integration.
-	 * This compensates for shunt resistance drift with temperature.
-	 */
-	corrected_current_ua = (s64)current_ua;
-
-	/*
 	 * Apply drift correction factor to current measurement.
 	 * Drift correction slowly adjusts the coulomb counter toward
 	 * the OCV-derived SOC when they diverge over time.
@@ -1950,6 +1944,7 @@ static void bq25890_fg_integrate_ina228_locked(struct bq25890_device *bq)
 	 * The correction factor is applied as:
 	 *   current_corrected = current × (1 + drift_correction_ppm / 1e6)
 	 */
+	corrected_current_ua = (s64)current_ua;
 	{
 		s64 drift_factor = bq25890_fg_get_drift_correction_factor(bq);
 		corrected_current_ua = corrected_current_ua * drift_factor / 1000000LL;
@@ -1957,19 +1952,22 @@ static void bq25890_fg_integrate_ina228_locked(struct bq25890_device *bq)
 
 	/*
 	 * ENHANCED: Coulomb calculation in nAh with fractional precision.
+	 * Formula: charge (nAh) = |current| (nA) × time (s) / 3600
+	 *        = |current| (µA) × 1000 × time (ms) / 1000 / 3600
+	 *        = |current| (µA) × time (ms) / 3600
 	 *
-	 * Formula: charge (nAh) = current (nA) × time (s) / 3600
-	 *        = current (µA) × 1000 × time (ms) / 1000 / 3600
-	 *        = current (µA) × time (ms) / 3600
+	 * delta_nah is always positive; the sign of current_ua determines
+	 * whether we add it (charging, current into battery) or subtract it
+	 * (discharging, current out of battery).
 	 *
 	 * Using 64-bit arithmetic to prevent overflow:
 	 *   max: 10A × 60000ms = 600,000,000 (well within s64 range)
 	 */
-	drop_nah = corrected_current_ua * dt_msec;
+	delta_nah = (corrected_current_ua >= 0 ? corrected_current_ua
+						: -corrected_current_ua) * dt_msec;
+	delta_nah = div_s64(delta_nah, 3600LL);
 
-	drop_nah = div_s64(drop_nah, 3600LL);
-
-	if (drop_nah <= 0)
+	if (delta_nah <= 0)
 		goto update_timestamp;
 
 	/*
@@ -1984,6 +1982,9 @@ static void bq25890_fg_integrate_ina228_locked(struct bq25890_device *bq)
 	 *
 	 * Convert remaining capacity from uAh to nah for accumulation.
 	 * This allows us to maintain fractional precision internally.
+	 *
+	 * Re-seed the nah accumulator whenever the coulomb counter was
+	 * reset (e.g. at boot, after full charge, or after a user seed).
 	 */
 	if (bq->fg_disch_remain_uah == 0 && bq->fg_disch_remain_uah != (long)-1) {
 		ina->coulomb_nah = 0;
@@ -1992,11 +1993,19 @@ static void bq25890_fg_integrate_ina228_locked(struct bq25890_device *bq)
 		ina->last_disch_remain_nah = (s64)bq->fg_disch_remain_uah * 1000LL;
 	}
 
-	ina->coulomb_nah += drop_nah;
+	ina->coulomb_nah += delta_nah;
 
-	new_disch_remain_nah = ina->last_disch_remain_nah - drop_nah;
-	if (new_disch_remain_nah < 0)
-		new_disch_remain_nah = 0;
+	if (current_ua > 0) {
+		/* Discharging: capacity decreases. */
+		new_disch_remain_nah = ina->last_disch_remain_nah - delta_nah;
+		if (new_disch_remain_nah < 0)
+			new_disch_remain_nah = 0;
+	} else {
+		/* Charging: capacity increases (capped at full). */
+		new_disch_remain_nah = ina->last_disch_remain_nah + delta_nah;
+		if (new_disch_remain_nah > (s64)charge_full_uah * 1000LL)
+			new_disch_remain_nah = (s64)charge_full_uah * 1000LL;
+	}
 
 	/*
 	 * Update display value with proper rounding.
@@ -2006,6 +2015,8 @@ static void bq25890_fg_integrate_ina228_locked(struct bq25890_device *bq)
 	bq->fg_disch_remain_uah = (long)div_s64(new_disch_remain_nah + 500, 1000);
 	if (bq->fg_disch_remain_uah < 0)
 		bq->fg_disch_remain_uah = 0;
+	if ((s64)bq->fg_disch_remain_uah > (s64)charge_full_uah)
+		bq->fg_disch_remain_uah = (long)charge_full_uah;
 
 	ina->last_disch_remain_nah = new_disch_remain_nah;
 
@@ -2481,18 +2492,29 @@ static int bq25890_sample_and_update_fg(struct bq25890_device *bq)
 		if (!bq->last_ext_pwr || bq->chg_remain_uah < 0)
 			bq25890_fg_charge_begin(bq, &new_state, v_smooth_uv);
 		bq25890_fg_charge_integrate(bq);
+		/*
+		 * Run the INA228 coulomb integrator during charging too.
+		 * It uses the signed INA228 current (negative during charge)
+		 * to update fg_disch_remain_uah bidirectionally, so both
+		 * charge_now and capacity% track real charge accumulation
+		 * rather than staying frozen at the plug-in seed value.
+		 */
+		if (bq->ina228 && bq->ina228->present && ina228_enabled)
+			bq25890_fg_integrate_ina228_locked(bq);
 		/* Keep the OCV tracker current so an abrupt unplug does not
 		 * reseed the discharge integrator from a stale OCV value. */
 		bq25890_update_v_ocv_locked(bq, v_smooth_uv, false);
-		/* Seed the discharge integrator from current integrated SOC so a
-		 * fresh unplug starts from where charging left off. */
-		soc_in = bq25890_fg_charge_percent(bq);
-		if (soc_in < 0)
+		/* Read back the INA228-driven capacity for SOC output. */
+		if (bq->fg_disch_remain_uah >= 0 && charge_full_uah > 0) {
+			soc_out = (int)clamp(
+				(s64)bq->fg_disch_remain_uah * 100L /
+				(s64)charge_full_uah,
+				0L, 100L);
+		} else {
 			soc_in = bq->capacity_valid ? bq->capacity_cache : 50;
-		bq->fg_disch_remain_uah =
-			(long)soc_in * charge_full_uah / 100;
-		bq->fg_disch_jiffies = now;
-		soc_out = soc_in;
+			soc_out = soc_in;
+		}
+		soc_in = soc_out;
 	} else if (ext_pwr) {
 		/* Plugged in but not actively charging: hold last SOC. */
 		bq->fg_mode = BQ_FG_CHARGING;
@@ -3854,6 +3876,22 @@ static ssize_t bq25890_fg_store_coulomb_uah(struct device *dev,
 	 */
 	mutex_lock(&bq->lock);
 	bq->fg_disch_remain_uah = clamp(v, 0L, (long)charge_full_uah);
+	/*
+	 * Reset the integrator timestamps so the next integration sample
+	 * does not compute a large dt from a stale pre-write timestamp and
+	 * overwrite our seeded value with a jump.  Also re-seed the nah
+	 * accumulator so fractional tracking is consistent with the new
+	 * fg_disch_remain_uah.  Reset chg_added_uah so the legacy charge
+	 * integrator does not interfere with the INA228-driven value.
+	 */
+	bq->fg_disch_jiffies = jiffies;
+	bq->chg_added_uah = 0;
+	bq->chg_last_jiffies = 0;
+	if (bq->ina228 && bq->ina228->present) {
+		bq->ina228->last_disch_remain_nah =
+			(s64)bq->fg_disch_remain_uah * 1000LL;
+		bq->ina228->last_coulomb_update_jiffies = jiffies;
+	}
 	/*
 	 * Mark the integrator as user-seeded so the post-probe calibrate
 	 * work does not overwrite this value with an OCV-based reseed.

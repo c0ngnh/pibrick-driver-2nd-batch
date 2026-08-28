@@ -59,7 +59,7 @@ no need to remember paths under `/usr/lib/pibrick/`:
 ```bash
 sudo pibrick-tools --battery-status          # Show all params + persisted config
 sudo pibrick-tools --battery-config          # Interactive parameter setter
-sudo pibrick-tools --battery-config charge_full_uah 3800 mAh --persist
+sudo pibrick-tools --battery-config charge_full_uah 4800 mAh --persist
 sudo pibrick-tools --status-calibration      # Calibration status / confidence
 sudo pibrick-tools --enable-calibration      # Start logging
 sudo pibrick-tools --disable-calibration     # Stop logging
@@ -371,19 +371,19 @@ This launches the **interactive setter** which lets you:
 Set a single value directly:
 
 ```bash
-# Set battery capacity to 3800 mAh (non-persistent, until reboot)
-sudo pibrick-tools --battery-config charge_full_uah 3800
+# Set battery capacity to 4800 mAh (non-persistent, until reboot)
+sudo pibrick-tools --battery-config charge_full_uah 4800
 
 # Set and persist (saves to /etc/modprobe.d/ + reloads driver)
-sudo pibrick-tools --battery-config charge_full_uah 3800mAh --persist
+sudo pibrick-tools --battery-config charge_full_uah 4800mAh --persist
 
 # Set INA228 shunt for 15 mΩ resistor, persist it
 sudo pibrick-tools --battery-config ina228_shunt_uohm 15mΩ --persist
 
-# Set fuel-gauge discharge profile (700 mA idle, 40% under load, 2200 mA ceiling)
+# Set fuel-gauge discharge profile (700 mA idle, 40% under load, 4000 mA ceiling)
 sudo pibrick-tools --battery-config discharge_avg_ua 700mA --persist
 sudo pibrick-tools --battery-config discharge_load_factor_pct 40 --persist
-sudo pibrick-tools --battery-config discharge_max_ua 2200mA --persist
+sudo pibrick-tools --battery-config discharge_max_ua 4000mA --persist
 
 # Show all values
 sudo pibrick-tools --battery-config --show
@@ -396,7 +396,7 @@ sudo pibrick-tools --battery-config --list
 
 | Parameter | Unit | Default | Purpose |
 |-----------|------|---------|---------|
-| `charge_full_uah` | mAh | 3800 | Battery design capacity (e.g. 3800 for 3800 mAh pack) |
+| `charge_full_uah` | mAh | 4800 | Battery design capacity (e.g. 4800 for 4800 mAh pack) |
 | `ina228_shunt_uohm` | mΩ | 15 | INA228 shunt resistor value (must match hardware) |
 | `ina228_max_current_ua` | mA | 6400 | INA228 max current range |
 | `ina228_enabled` | bool | 1 | Use INA228 when present; set 0 to force proxy |
@@ -404,7 +404,7 @@ sudo pibrick-tools --battery-config --list
 | `batt_ir_mohm` | mΩ | 180 | Battery internal resistance (charge-time OCV estimate) |
 | `discharge_avg_ua` | mA | 700 | Nominal idle discharge (set 0 to disable) |
 | `discharge_load_factor_pct` | % | 40 | Extra % added under sustained load |
-| `discharge_max_ua` | mA | 2200 | Hard ceiling for SOC integrator proxy current |
+| `discharge_max_ua` | mA | 4000 | Hard ceiling for SOC integrator proxy current |
 | `rest_min_sec` | s | 300 | Seconds of quiet required for DISCHARGING_RESTING |
 | `low_v_persistent_count` | samples | 5 | Consecutive low-V samples before SOC→critical |
 | `fg_v_ocv_tau_sec_override` | s | -1 | OCV tracker time constant. -1 = auto (60 with INA228, 120 without). Use 60-180. |

@@ -172,7 +172,7 @@ PARAMS = {
             "This value is used as the reference '100%%' for state-of-charge "
             "calculations. Set this to match your battery's actual rated "
             "capacity. The PocketCM5 ships with a 3800 mAh pack, so the "
-            "compile-time default is 3800000 uAh. For a 5000 mAh battery, "
+            "compile-time default is 4800000 uAh. For a 5000 mAh battery, "
             "enter 5000000 uAh.\n"
             "\n"
             "Note: The kernel also exports 'charge_full' (current full capacity) "
@@ -183,7 +183,7 @@ PARAMS = {
         "unit": "mAh",
         "unit_hint": "mAh",
         "kind": "module",
-        "default": 3800000,
+        "default": 4800000,
     },
     "ina228_shunt_uohm": {
         "desc": "INA228 shunt resistance",
@@ -279,7 +279,7 @@ PARAMS = {
         "unit": "mA",
         "unit_hint": "mA",
         "kind": "module",
-        "default": 2200000,
+        "default": 4000000,
     },
     "rest_min_sec": {
         "desc": "Seconds of quiet required to enter DISCHARGING_RESTING",
